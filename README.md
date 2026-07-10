@@ -6,16 +6,17 @@ No cgo and no external libraries in the published module.
 
 ## Status
 
-Work in progress, decoder first. Every codec layer is validated bit-for-bit
-against the C reference before it lands (see Approach), so the pieces marked
-done are done in the strong sense: byte-identical to libopus.
+Work in progress. Every codec layer is validated bit-for-bit against the C
+reference before it lands (see Approach), so the pieces marked done are done in
+the strong sense: byte-identical to libopus.
 
-- **CELT decoder**: complete and passing RFC 6716 conformance (the decoder's
-  per-packet range state matches libopus exactly on the CELT test vectors).
-- **SILK decoder**: complete, including LTP/LPC synthesis, PLC/CNG, stereo, the
-  resampler, and inband FEC/LBRR.
-- **Top-level Opus decode** (SILK / CELT / hybrid mode switching and
-  redundancy) and the **encoder**: in progress.
+- **Decoder: complete.** The full Opus decoder passes RFC 6716 conformance,
+  decoding all 12 official test vectors with the per-packet range state matching
+  libopus exactly. This covers CELT, SILK, and hybrid modes, mode switching and
+  redundancy (including the SILK/CELT crossovers), packet-loss concealment, and
+  inband FEC/LBRR.
+- **Encoder: in development.** A CELT-only fixed-point encoder is being built to
+  the same bit-exact standard.
 
 ## Approach
 
