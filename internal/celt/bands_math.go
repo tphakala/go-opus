@@ -70,8 +70,10 @@ func fracMul16(a, b int32) int32 {
 
 // div32_16 is DIV32_16(a,b) = ((opus_val16)(((opus_val32)(a))/((opus_val16)(b))))
 // (fixed_generic.h:200): int32/int16 truncating division, narrowed to int16.
+// Delegates to fixedmath.DIV32_16 so there is a single implementation to keep
+// bit-exact.
 func div32_16(a int32, b int16) int16 {
-	return int16(a / int32(b))
+	return fixedmath.DIV32_16(a, b)
 }
 
 // celtExp2DbFrac is the non-QEXT FIXED_POINT macro celt_exp2_db_frac(x) =

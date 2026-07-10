@@ -32,12 +32,16 @@ func mult32_32_q16(a, b int32) int32 { return int32((int64(a) * int64(b)) >> 16)
 func mult32_32_32(a, b int32) int32 { return a * b }
 
 // div32 is DIV32 (fixed_generic.h:203): truncating 32-bit signed division.
-func div32(a, b int32) int32 { return a / b }
+// Delegates to fixedmath.DIV32 so there is a single implementation to keep
+// bit-exact.
+func div32(a, b int32) int32 { return fixedmath.DIV32(a, b) }
 
 // sround16 is SROUND16 (fixed_generic.h:141): EXTRACT16(SATURATE(PSHR32(x,a), 32767)).
 // Round-to-nearest right shift, saturated to the int16 magnitude range.
+// Delegates to fixedmath.SROUND16 so there is a single implementation to keep
+// bit-exact.
 func sround16(x int32, a int) int16 {
-	return fixedmath.EXTRACT16(fixedmath.SATURATE(fixedmath.PSHR32(x, a), 32767))
+	return fixedmath.SROUND16(x, a)
 }
 
 // celtMaxabs16 is celt_maxabs16 (mathops.h:86): max |x[i]| as opus_val32.

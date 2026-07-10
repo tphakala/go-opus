@@ -25,4 +25,12 @@
 static inline int32_t oracle_fme_celt_sqrt32(int32_t x) { return celt_sqrt32(x); }
 static inline int32_t oracle_fme_celt_rcp_norm32(int32_t x) { return celt_rcp_norm32(x); }
 
+/* fixed_generic.h scalar macros the CELT encoder front half reaches
+   (transient_analysis SROUND16, patch_transient_decision DIV32, and DIV32_16 for
+   the surround/trim path). SROUND16's fixed_generic.h definition carries a
+   trailing semicolon, so it is only usable in statement position (return). */
+static inline int16_t oracle_fme_sround16(int32_t x, int a) { return SROUND16(x, a); }
+static inline int32_t oracle_fme_div32(int32_t a, int32_t b) { return DIV32(a, b); }
+static inline int16_t oracle_fme_div32_16(int32_t a, int16_t b) { return DIV32_16(a, b); }
+
 #endif /* GOOPUS_FIXEDMATHENC_SHIM_H */

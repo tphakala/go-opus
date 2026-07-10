@@ -85,6 +85,22 @@ func SATURATE16(x int32) int16 {
 // (fixed_generic.h:139)
 func ROUND16(x int32, a int) int16 { return EXTRACT16(PSHR32(x, a)) }
 
+// SROUND16 shifts by a with round-to-nearest, saturates to the int16 range, then
+// truncates to 16 bits. (fixed_generic.h:141)
+//
+// NOTE: internal/celt keeps package-local wrappers (sround16 and div32 in
+// celt_lpc.go, div32_16 in bands_math.go) for their pre-existing decoder call
+// sites; they delegate to these three functions, so there is a single
+// implementation to keep bit-exact.
+func SROUND16(x int32, a int) int16 { return EXTRACT16(SATURATE(PSHR32(x, a), 32767)) }
+
+// DIV32 is a 32-bit integer division. (fixed_generic.h:203)
+func DIV32(a, b int32) int32 { return a / b }
+
+// DIV32_16 divides a 32-bit numerator by a 16-bit denominator and truncates the
+// quotient back to 16 bits. (fixed_generic.h:200)
+func DIV32_16(a int32, b int16) int16 { return int16(a / int32(b)) }
+
 // HALF16 divides a 16-bit value by two. (fixed_generic.h:144)
 func HALF16(x int16) int16 { return SHR16(x, 1) }
 

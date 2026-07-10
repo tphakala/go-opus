@@ -3,9 +3,10 @@
 // decimate by `factor`, whiten with an order-4 LPC), pitch_search (coarse 4x then
 // fine 2x cross-correlation search with pseudo-interpolation), celt_pitch_xcorr_c
 // (the scalar reference cross-correlation), find_best_pitch, celt_fir5 and
-// celt_inner_prod. remove_doubling is NOT ported: celt_decode_lost reaches pitch.c
-// only through celt_plc_pitch_search, which calls pitch_downsample + pitch_search
-// and never remove_doubling.
+// celt_inner_prod. The encoder (phase 4) additionally needs remove_doubling plus
+// its dual_inner_prod / compute_pitch_gain helpers, ported at the bottom of this
+// file; the decoder never reached them (celt_plc_pitch_search calls only
+// pitch_downsample + pitch_search).
 //
 // These are pure functions (docs/hard-parts.md section 8); their bit-exactness
 // against celt/pitch.c is proven by the function-level differential tests in
@@ -274,6 +275,167 @@ func pitchSearch(xLp []int16, y []int16, len_, maxPitch int, pitch *int) {
 	*pitch = 2*bestPitch[0] - offset
 }
 
+// dualInnerProd is dual_inner_prod_c (pitch.h:137): computes both
+// sum_i x[xb+i]*y01[y01b+i] and sum_i x[xb+i]*y02[y02b+i] over the shared int16
+// buffer in a single pass. run_prefilter's remove_doubling correlates a signal
+// against two lags at once, so this halves the multiplies.
+func dualInnerProd(x []int16, xb, y01b, y02b, N int) (xy1, xy2 int32) {
+	var xy01, xy02 int32
+	for i := 0; i < N; i++ {
+		xy01 = fixedmath.MAC16_16(xy01, x[xb+i], x[y01b+i])
+		xy02 = fixedmath.MAC16_16(xy02, x[xb+i], x[y02b+i])
+	}
+	return xy01, xy02
+}
+
+// computePitchGain is compute_pitch_gain (pitch.c:419) for FIXED_POINT: the
+// normalized correlation xy / sqrt(xx*yy) clamped to [-1, 1] in Q15, computed with
+// per-operand ilog2 normalization and celt_rsqrt_norm to keep the intermediates in
+// range.
+func computePitchGain(xy, xx, yy int32) int16 {
+	if xy == 0 || xx == 0 || yy == 0 {
+		return 0
+	}
+	sx := fixedmath.Celt_ilog2(xx) - 14
+	sy := fixedmath.Celt_ilog2(yy) - 14
+	shift := sx + sy
+	x2y2 := fixedmath.SHR32(fixedmath.MULT16_16(
+		int16(fixedmath.VSHR32(xx, sx)), int16(fixedmath.VSHR32(yy, sy))), 14)
+	if shift&1 != 0 {
+		if x2y2 < 32768 {
+			x2y2 <<= 1
+			shift--
+		} else {
+			x2y2 >>= 1
+			shift++
+		}
+	}
+	den := fixedmath.Celt_rsqrt_norm(x2y2)
+	g := fixedmath.MULT16_32_Q15(den, xy)
+	g = fixedmath.VSHR32(g, (shift>>1)-1)
+	return fixedmath.EXTRACT16(fixedmath.MAX32(-int32(q15one), fixedmath.MIN32(g, int32(q15one))))
+}
+
+// secondCheck is second_check[16] (pitch.c:453): the alternate divisor used when
+// remove_doubling probes for a strong sub-harmonic correlation.
+var secondCheck = [16]int{0, 0, 3, 2, 3, 2, 5, 2, 3, 2, 3, 2, 5, 2, 3, 2}
+
+// removeDoubling is remove_doubling (pitch.c:454) for FIXED_POINT: given the
+// coarse pitch estimate *T0, look for a stronger correlation at a sub-multiple of
+// the period (pitch doubling/tripling avoidance), biased against very short
+// periods and toward continuity with the previous frame (prevPeriod/prevGain). It
+// refines *T0 by pseudo-interpolation and returns the pitch gain in Q15. x is the
+// half-rate whitened analysis buffer produced by pitch_downsample; it is advanced
+// by maxperiod internally so negative indices reach the pitch history.
+func removeDoubling(x []int16, maxperiod, minperiod, N int, T0 *int, prevPeriod int, prevGain int16) int16 {
+	var xy, xx, yy, xy2 int32
+	var xcorr [3]int32
+	var offset int
+
+	minperiod0 := minperiod
+	maxperiod /= 2
+	minperiod /= 2
+	*T0 /= 2
+	prevPeriod /= 2
+	N /= 2
+	xb := maxperiod // x += maxperiod
+	if *T0 >= maxperiod {
+		*T0 = maxperiod - 1
+	}
+
+	T := *T0
+	T0v := *T0
+	yyLookup := make([]int32, maxperiod+1)
+	xx, xy = dualInnerProd(x, xb, xb, xb-T0v, N)
+	yyLookup[0] = xx
+	yy = xx
+	for i := 1; i <= maxperiod; i++ {
+		yy = yy + fixedmath.MULT16_16(x[xb-i], x[xb-i]) - fixedmath.MULT16_16(x[xb+N-i], x[xb+N-i])
+		yyLookup[i] = fixedmath.MAX32(0, yy)
+	}
+	yy = yyLookup[T0v]
+	bestXy := xy
+	bestYy := yy
+	g := computePitchGain(xy, xx, yy)
+	g0 := g
+	// Look for any pitch at T/k.
+	for k := 2; k <= 15; k++ {
+		var T1, T1b int
+		var g1 int16
+		var cont int16
+		var thresh int16
+		T1 = int(fixedmath.Celt_udiv(uint32(2*T0v+k), uint32(2*k)))
+		if T1 < minperiod {
+			break
+		}
+		// Look for another strong correlation at T1b.
+		if k == 2 {
+			if T1+T0v > maxperiod {
+				T1b = T0v
+			} else {
+				T1b = T0v + T1
+			}
+		} else {
+			T1b = int(fixedmath.Celt_udiv(uint32(2*secondCheck[k]*T0v+k), uint32(2*k)))
+		}
+		xy, xy2 = dualInnerProd(x, xb, xb-T1, xb-T1b, N)
+		xy = fixedmath.HALF32(xy + xy2)
+		yy = fixedmath.HALF32(yyLookup[T1] + yyLookup[T1b])
+		g1 = computePitchGain(xy, xx, yy)
+		if pitchIabs(T1-prevPeriod) <= 1 {
+			cont = prevGain
+		} else if pitchIabs(T1-prevPeriod) <= 2 && 5*k*k < T0v {
+			cont = fixedmath.HALF16(prevGain)
+		} else {
+			cont = 0
+		}
+		thresh = fixedmath.EXTRACT16(fixedmath.MAX16(int32(fixedmath.QCONST16(0.3, 15)),
+			fixedmath.MULT16_16_Q15(fixedmath.QCONST16(0.7, 15), g0)-int32(cont)))
+		// Bias against very high pitch (very short period) to avoid false-positives
+		// due to short-term correlation.
+		if T1 < 3*minperiod {
+			thresh = fixedmath.EXTRACT16(fixedmath.MAX16(int32(fixedmath.QCONST16(0.4, 15)),
+				fixedmath.MULT16_16_Q15(fixedmath.QCONST16(0.85, 15), g0)-int32(cont)))
+		} else if T1 < 2*minperiod {
+			thresh = fixedmath.EXTRACT16(fixedmath.MAX16(int32(fixedmath.QCONST16(0.5, 15)),
+				fixedmath.MULT16_16_Q15(fixedmath.QCONST16(0.9, 15), g0)-int32(cont)))
+		}
+		if g1 > thresh {
+			bestXy = xy
+			bestYy = yy
+			T = T1
+			g = g1
+		}
+	}
+	bestXy = fixedmath.MAX32(0, bestXy)
+	var pg int16
+	if bestYy <= bestXy {
+		pg = int16(q15one)
+	} else {
+		pg = fixedmath.EXTRACT16(fixedmath.SHR32(fixedmath.Frac_div32(bestXy, bestYy+1), 16))
+	}
+
+	for k := 0; k < 3; k++ {
+		xcorr[k] = celtInnerProd(x, xb, x, xb-(T+k-1), N)
+	}
+	if (xcorr[2] - xcorr[0]) > fixedmath.MULT16_32_Q15(fixedmath.QCONST16(0.7, 15), xcorr[1]-xcorr[0]) {
+		offset = 1
+	} else if (xcorr[0] - xcorr[2]) > fixedmath.MULT16_32_Q15(fixedmath.QCONST16(0.7, 15), xcorr[1]-xcorr[2]) {
+		offset = -1
+	} else {
+		offset = 0
+	}
+	if pg > g {
+		pg = g
+	}
+	*T0 = 2*T + offset
+
+	if *T0 < minperiod0 {
+		*T0 = minperiod0
+	}
+	return pg
+}
+
 // --- Differential-test entry points (used by internal/reftest/oracle) --------
 
 // CeltPitchXcorr runs celtPitchXcorr and returns xcorr[0..maxPitch) plus maxcorr.
@@ -296,4 +458,12 @@ func PitchSearch(xLp, y []int16, len_, maxPitch int) int {
 	var pitch int
 	pitchSearch(xLp, y, len_, maxPitch, &pitch)
 	return pitch
+}
+
+// RemoveDoubling runs removeDoubling and returns the pitch gain and the refined
+// pitch lag T0 (in/out in C).
+func RemoveDoubling(x []int16, maxperiod, minperiod, N, T0, prevPeriod int, prevGain int16) (pg int16, t0Out int) {
+	t := T0
+	pg = removeDoubling(x, maxperiod, minperiod, N, &t, prevPeriod, prevGain)
+	return pg, t
 }
