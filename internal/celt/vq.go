@@ -13,9 +13,10 @@
 // the rotation arithmetic is written out with explicit int32 products rather than
 // the int16-typed fixedmath.MULT16_16 helper.
 //
-// The encoder-only op_pvq_search / alg_quant and the ENABLE_QEXT refine paths are
-// phase-4 concerns; see the TODO below. The C alg_quant is invoked from the
-// differential-test shim to PRODUCE codewords for this decode side.
+// The phase-4 encode side (opPvqSearch / AlgQuant / StereoItheta, plus the
+// celt_atan2p_norm math helper stereo_itheta needs) is transliterated below. The
+// ENABLE_QEXT op_pvq_search_N2 / _extra / cubic_* refine paths are excluded from
+// the frozen build and are NOT ported.
 
 package celt
 
@@ -23,10 +24,6 @@ import (
 	"github.com/tphakala/go-opus/internal/fixedmath"
 	"github.com/tphakala/go-opus/internal/rangecoding"
 )
-
-// TODO(phase 4): port the encoder side of vq.c (op_pvq_search_c / alg_quant,
-// plus the ENABLE_QEXT op_pvq_search_N2 / _extra refine paths) when the CELT
-// encoder lands. This file is the pure decode path only.
 
 // normShift is celt/arch.h NORM_SHIFT (24): the fixed-point scale of a celt_norm
 // (opus_val32) unit-norm band sample. normScaledown/normScaleup shift between the
@@ -206,4 +203,229 @@ func RenormaliseVector(X []int32, n int, gain int32) {
 		X[i] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(g)*X[i], k+15-14)))
 	}
 	normScaleup(X, n, normShift-14)
+}
+
+// opPvqSearch is the FIXED_POINT base op_pvq_search_c (vq.c:205): the greedy
+// pyramid pulse search that places K unit pulses over the length-N band X to
+// maximise the projection onto X, returning the coded pulse vector in iy and yy =
+// the (int16-truncated) running sum of squares that normalise_residual consumes.
+//
+// Rounding-brittle Layer-C code, transliterated verbatim. The load-bearing detail
+// is that yy is an opus_val16 (int16) accumulator: every MAC16_16/ADD16 result is
+// truncated back to int16 on assignment, and MULT16_16 truncates its celt_norm
+// (int32) operands to int16 first. The leading norm_scaledown keeps X small enough
+// that these int16 lanes do not overflow. EXTEND32 of a celt_norm is a plain
+// widening (no int16 truncation), so those sites use the int32 value directly.
+// The ENABLE_QEXT op_pvq_search_N2 / _extra refine variants are excluded.
+func opPvqSearch(X []int32, iy []int32, K, N int) int16 {
+	y := make([]int32, N)   // VARDECL(celt_norm, y)
+	signx := make([]int, N) // VARDECL(int, signx)
+	var i, j int
+	var pulsesLeft int
+	var sum int32 // opus_val32
+	var xy int32  // opus_val32
+	var yy int16  // opus_val16
+
+	// FIXED_POINT: scale X down so the int16 accumulators below cannot overflow.
+	shift := (fixedmath.Celt_ilog2(1+celtInnerProdNormShift(X, X, N)) + 1) / 2
+	shift = fixedmath.IMAX(0, shift+(normShift-14)-14)
+	normScaledown(X, N, shift)
+
+	// Get rid of the sign. ABS16(X[j]) on a celt_norm (int32) is a plain int32 abs.
+	sum = 0
+	for j = 0; j < N; j++ {
+		signx[j] = b2i(X[j] < 0)
+		X[j] = fixedmath.ABS32(X[j])
+		iy[j] = 0
+		y[j] = 0
+	}
+
+	xy = 0
+	yy = 0
+
+	pulsesLeft = K
+
+	// Do a pre-search by projecting on the pyramid.
+	if K > (N >> 1) {
+		var rcp int16
+		for j = 0; j < N; j++ {
+			sum += X[j]
+		}
+		// If X is too small, just replace it with a pulse at 0.
+		if sum <= int32(K) {
+			X[0] = 16384 // QCONST16(1.f,14)
+			for j = 1; j < N; j++ {
+				X[j] = 0
+			}
+			sum = 16384 // QCONST16(1.f,14)
+		}
+		rcp = fixedmath.EXTRACT16(fixedmath.MULT16_32_Q16(int16(K), fixedmath.Celt_rcp(sum)))
+		for j = 0; j < N; j++ {
+			// It's really important to round *towards zero* here (X[j]>=0).
+			iy[j] = fixedmath.MULT16_16_Q15(fixedmath.EXTRACT16(X[j]), rcp)
+			y[j] = iy[j]
+			yy = fixedmath.EXTRACT16(fixedmath.MAC16_16(int32(yy), fixedmath.EXTRACT16(y[j]), fixedmath.EXTRACT16(y[j])))
+			xy = fixedmath.MAC16_16(xy, fixedmath.EXTRACT16(X[j]), fixedmath.EXTRACT16(y[j]))
+			y[j] *= 2
+			pulsesLeft -= int(iy[j])
+		}
+	}
+	// celt_sig_assert(pulsesLeft>=0)
+
+	// This should never happen, but just in case it does (e.g. on silence) we
+	// fill the first bin with pulses.
+	if pulsesLeft > N+3 {
+		tmp := int16(pulsesLeft)
+		yy = fixedmath.EXTRACT16(fixedmath.MAC16_16(int32(yy), tmp, tmp))
+		yy = fixedmath.EXTRACT16(fixedmath.MAC16_16(int32(yy), tmp, fixedmath.EXTRACT16(y[0])))
+		iy[0] += int32(pulsesLeft)
+		pulsesLeft = 0
+	}
+
+	for i = 0; i < pulsesLeft; i++ {
+		var Rxy, Ryy, bestDen int16
+		var bestNum int32
+		var bestID int
+		rshift := 1 + fixedmath.Celt_ilog2(int32(K-pulsesLeft+i+1))
+		bestID = 0
+		// The squared magnitude term gets added anyway, so add it out of the loop.
+		yy = fixedmath.ADD16(yy, 1)
+
+		// Calculations for position 0 are out of the loop. We're multiplying y[j]
+		// by two (done above) so we don't have to do it here.
+		Rxy = fixedmath.EXTRACT16(fixedmath.SHR32(fixedmath.ADD32(xy, X[0]), rshift))
+		Ryy = fixedmath.ADD16(yy, fixedmath.EXTRACT16(y[0]))
+		Rxy = fixedmath.EXTRACT16(fixedmath.MULT16_16_Q15(Rxy, Rxy))
+		bestDen = Ryy
+		bestNum = int32(Rxy)
+		for j = 1; j < N; j++ {
+			Rxy = fixedmath.EXTRACT16(fixedmath.SHR32(fixedmath.ADD32(xy, X[j]), rshift))
+			Ryy = fixedmath.ADD16(yy, fixedmath.EXTRACT16(y[j]))
+			Rxy = fixedmath.EXTRACT16(fixedmath.MULT16_16_Q15(Rxy, Rxy))
+			// Check num/den >= best_num/best_den without any division.
+			if fixedmath.MULT16_16(bestDen, Rxy) > fixedmath.MULT16_16(Ryy, fixedmath.EXTRACT16(bestNum)) {
+				bestDen = Ryy
+				bestNum = int32(Rxy)
+				bestID = j
+			}
+		}
+
+		// Updating the sums of the new pulse(s).
+		xy = fixedmath.ADD32(xy, X[bestID])
+		yy = fixedmath.ADD16(yy, fixedmath.EXTRACT16(y[bestID]))
+		// Only now that we've made the final choice, update y/iy.
+		y[bestID] += 2
+		iy[bestID]++
+	}
+
+	// Put the original sign back.
+	for j = 0; j < N; j++ {
+		iy[j] = (iy[j] ^ int32(-signx[j])) + int32(signx[j])
+	}
+	return yy
+}
+
+// AlgQuant is the FIXED_POINT base alg_quant (vq.c:550): rotate X into the search
+// domain, run the PVQ pulse search, code the pulses, and (when resynth != 0)
+// reconstruct the unit-norm band into X. Returns the anti-collapse mask. The
+// ENABLE_QEXT extra-bits refine branches are excluded; the arch parameter is
+// dropped. Requires K>0, N>1.
+func AlgQuant(X []int32, N, K, spread, B int, enc *rangecoding.Encoder, gain int32, resynth int) uint32 {
+	// celt_assert2(K>0); celt_assert2(N>1)
+	iy := make([]int32, N)
+
+	// expRotation1 (below) applies a fixed norm_scaledown by NORM_SHIFT-14 (=10)
+	// whose int16 lane stays bit-exact with the C MULT16_16 truncation only while
+	// |X[i]| < 33,553,920 (one past 32767<<10 after PSHR rounding; at that value
+	// |X|>>10 rounds to 32768 and wraps). Every reachable encoder input satisfies
+	// this: the input band is unit-norm (a full unit is 1.0 = 2^NORM_SHIFT = 2^24,
+	// and theta-split sub-bands have norm <= 1), and the stereo_split/haar1 worst
+	// case reaches only ~23.7M (~1.41x margin). haar1 is norm-preserving and the
+	// rotation preserves norm, so no component ever crosses the threshold.
+	expRotation(X, N, 1, B, K, spread)
+
+	yy := int32(opPvqSearch(X, iy, K, N))
+	collapseMask := extractCollapseMask(iy, N, B)
+	EncodePulses(iy, N, K, enc)
+	if resynth != 0 {
+		normaliseResidual(iy, X, N, yy, gain)
+	}
+
+	if resynth != 0 {
+		expRotation(X, N, -1, B, K, spread)
+	}
+	return collapseMask
+}
+
+// atan approximation constants for celtAtanNorm (mathops.h:550-557); each is a
+// 32-bit polynomial coefficient (the /* Qxx */ comments name the Q format of the
+// coefficient, but the stored value is a plain int32 constant).
+const (
+	atanTwoOverPi int32 = 1367130551  // Q31
+	atanCoeffA03  int32 = -715791936  // Q31
+	atanCoeffA05  int32 = 857391616   // Q32
+	atanCoeffA07  int32 = -1200579328 // Q33
+	atanCoeffA09  int32 = 1682636672  // Q34
+	atanCoeffA11  int32 = -1985085440 // Q35
+	atanCoeffA13  int32 = 1583306112  // Q36
+	atanCoeffA15  int32 = -598602432  // Q37
+)
+
+// celtAtanNorm computes atan(x)*2/pi for x in [-1,1] Q30, result Q30. Verbatim
+// transliteration of the FIXED_POINT celt_atan_norm (mathops.h:547).
+func celtAtanNorm(x int32) int32 {
+	// celt_sig_assert((x <= 1073741824) && (x >= -1073741824))
+	if x == 1073741824 {
+		return 536870912 // 0.5f (Q30)
+	}
+	if x == -1073741824 {
+		return -536870912 // -0.5f (Q30)
+	}
+	xQ31 := fixedmath.SHL32(x, 1)
+	xSqQ30 := fixedmath.MULT32_32_Q31(xQ31, x)
+	// Split evaluation in steps to avoid exploding macro expansion.
+	tmp := fixedmath.MULT32_32_Q31(xSqQ30, atanCoeffA15)
+	tmp = fixedmath.MULT32_32_Q31(xSqQ30, fixedmath.ADD32(atanCoeffA13, tmp))
+	tmp = fixedmath.MULT32_32_Q31(xSqQ30, fixedmath.ADD32(atanCoeffA11, tmp))
+	tmp = fixedmath.MULT32_32_Q31(xSqQ30, fixedmath.ADD32(atanCoeffA09, tmp))
+	tmp = fixedmath.MULT32_32_Q31(xSqQ30, fixedmath.ADD32(atanCoeffA07, tmp))
+	tmp = fixedmath.MULT32_32_Q31(xSqQ30, fixedmath.ADD32(atanCoeffA05, tmp))
+	tmp = fixedmath.MULT32_32_Q31(xSqQ30, fixedmath.ADD32(atanCoeffA03, tmp))
+	tmp = fixedmath.ADD32(x, fixedmath.MULT32_32_Q31(xQ31, tmp))
+	return fixedmath.MULT32_32_Q31(atanTwoOverPi, tmp)
+}
+
+// celtAtan2pNorm computes atan2(y,x)*2/pi in Q30 for x,y >= 0 in Q30, at least one
+// nonzero. Verbatim transliteration of celt_atan2p_norm (mathops.h:592).
+func celtAtan2pNorm(y, x int32) int32 {
+	// celt_sig_assert(x>=0 && y>=0)
+	if y == 0 && x == 0 {
+		return 0
+	} else if y < x {
+		return celtAtanNorm(fixedmath.SHR32(fixedmath.Frac_div32(y, x), 1))
+	}
+	// celt_sig_assert(y > 0)
+	return 1073741824 /* 1.0f Q30 */ - celtAtanNorm(fixedmath.SHR32(fixedmath.Frac_div32(x, y), 1))
+}
+
+// StereoItheta is the FIXED_POINT stereo_itheta (vq.c:722): the mid/side energy
+// angle (itheta, Q30 via celt_atan2p_norm) for the stereo pair X, Y over N
+// samples. stereo != 0 selects the per-sample mid/side accumulation; otherwise it
+// uses the plain per-channel norm energies.
+func StereoItheta(X, Y []int32, stereo, N int) int32 {
+	var Emid, Eside int32 // opus_val32
+	if stereo != 0 {
+		for i := 0; i < N; i++ {
+			m := fixedmath.PSHR32(fixedmath.ADD32(X[i], Y[i]), normShift-13) // celt_norm
+			s := fixedmath.PSHR32(fixedmath.SUB32(X[i], Y[i]), normShift-13)
+			Emid = fixedmath.MAC16_16(Emid, fixedmath.EXTRACT16(m), fixedmath.EXTRACT16(m))
+			Eside = fixedmath.MAC16_16(Eside, fixedmath.EXTRACT16(s), fixedmath.EXTRACT16(s))
+		}
+	} else {
+		Emid += celtInnerProdNormShift(X, X, N)
+		Eside += celtInnerProdNormShift(Y, Y, N)
+	}
+	mid := fixedmath.Celt_sqrt32(Emid)
+	side := fixedmath.Celt_sqrt32(Eside)
+	return celtAtan2pNorm(side, mid)
 }

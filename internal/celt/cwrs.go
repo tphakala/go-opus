@@ -9,9 +9,12 @@
 // column indexing in cwrsi reads the same as the source. Exported with C-style
 // names on the relaxed internal/celt lint list; helpers stay unexported.
 //
-// The encoder ranking (icwrs / encode_pulses) and the CUSTOM_MODES-only
-// get_required_bits / log2_frac are phase-4 concerns and are omitted here; see
-// the TODO below.
+// The phase-4 encoder ranking (icwrs / EncodePulses) is transliterated below.
+// The CUSTOM_MODES-only get_required_bits / log2_frac are deliberately NOT
+// ported: they are gated by #if defined(CUSTOM_MODES) in cwrs.c, are not compiled
+// into the frozen (non-CUSTOM_MODES) build, and the frozen encoder never calls
+// them at runtime (static modes use the precomputed pulse cache cache_bits50 in
+// static_modes_fixed.h).
 
 package celt
 
@@ -19,9 +22,6 @@ import (
 	"github.com/tphakala/go-opus/internal/fixedmath"
 	"github.com/tphakala/go-opus/internal/rangecoding"
 )
-
-// TODO(phase 4): port the encoder side of cwrs.c (icwrs, encode_pulses) and the
-// CUSTOM_MODES-only get_required_bits / log2_frac when the CELT encoder lands.
 
 // celtPVQU returns U(N,K), the number of PVQ combinations wherein N-1 objects are
 // taken at most K-1 at a time. U is symmetric (U(n,k)==U(k,n)), so the row is
@@ -160,4 +160,47 @@ func b2i(cond bool) int {
 		return 1
 	}
 	return 0
+}
+
+// iabs is the C abs() over a pulse count: |x| widened to int, matching the
+// int-typed abs(_y[j]) accumulations in icwrs.
+func iabs(x int32) int {
+	if x < 0 {
+		return int(-x)
+	}
+	return int(x)
+}
+
+// icwrs returns the codebook index of the pulse vector y (length n, sum of
+// absolute values k) with its associated sign bits, the encode inverse of cwrsi.
+// Direct transliteration of the non-SMALL_FOOTPRINT icwrs (cwrs.c:444). Static in
+// C; exposed here as Icwrs for the differential test. Requires n>=2.
+func icwrs(n int, y []int32) uint32 {
+	// celt_assert(_n>=2)
+	j := n - 1
+	i := uint32(b2i(y[j] < 0))
+	k := iabs(y[j])
+	for {
+		j--
+		i += celtPVQU(n-j, k)
+		k += iabs(y[j])
+		if y[j] < 0 {
+			i += celtPVQU(n-j, k+1)
+		}
+		if j <= 0 {
+			break
+		}
+	}
+	return i
+}
+
+// Icwrs exposes icwrs for the differential test.
+func Icwrs(n int, y []int32) uint32 { return icwrs(n, y) }
+
+// EncodePulses writes the PVQ codeword for the pulse vector y (length N, k
+// pulses) to the range encoder over the V(N,K) alphabet. (cwrs.c:462). Requires
+// k>0.
+func EncodePulses(y []int32, n, k int, enc *rangecoding.Encoder) {
+	// celt_assert(_k>0)
+	enc.EncUint(icwrs(n, y), celtPVQV(n, k))
 }
