@@ -1,26 +1,28 @@
-// Verbatim transliteration of the DECODE side of celt/bands.c (libopus v1.6.1,
-// commit 3da9f7a6) for the frozen FIXED_POINT + DISABLE_FLOAT_API,
-// non-CUSTOM_MODES, non-ENABLE_QEXT build: the CELT residual (PVQ) band
-// quantizer. This is a named verbatim zone (docs/hard-parts.md section 2, the
-// quant_all_bands machinery): every temporary keeps its C name and declaration
-// order and every fixed-point expression keeps C's exact form; correctness is
-// proved by the differential sweep in internal/reftest/oracle (bands_test.go),
-// not by review.
+// Verbatim transliteration of celt/bands.c (libopus v1.6.1, commit 3da9f7a6)
+// for the frozen FIXED_POINT + DISABLE_FLOAT_API, non-CUSTOM_MODES,
+// non-ENABLE_QEXT build: the CELT residual (PVQ) band quantizer, BOTH the DECODE
+// and ENCODE directions. This is a named verbatim zone (docs/hard-parts.md
+// section 2, the quant_all_bands machinery): every temporary keeps its C name
+// and declaration order and every fixed-point expression keeps C's exact form;
+// correctness is proved by the differential sweeps in internal/reftest/oracle
+// (bands_test.go decode, bandsenc_test.go encode), not by review.
 //
 // On DECODE, resynth = !encode is always 1, so the synthesis-side band code
-// (folding, the LCG noise fill, stereo_merge, renormalise) always runs; this
-// file ports it. The range-decode order (ec_dec_bit_logp / ec_dec_uint /
-// ec_decode+ec_dec_update / decode_pulses) matches docs/celt-bitstream.md.
+// (folding, the LCG noise fill, stereo_merge, renormalise) always runs. On
+// ENCODE, resynth = theta_rdo (encode && stereo && !dual_stereo &&
+// complexity>=8), so the same synthesis-side code runs during the theta-RDO
+// trial loop; the encode direction reuses it rather than duplicating it. The
+// range-decode / range-encode order (ec_dec_bit_logp / ec_enc_bit_logp,
+// ec_dec_uint / ec_enc_uint, ec_decode+ec_dec_update / ec_encode, decode_pulses
+// / encode_pulses) matches docs/celt-bitstream.md.
 //
 // C's single ec_ctx serves both directions; here the band context carries a
-// *rangecoding.Decoder and an `encode` flag kept for shape. The ENCODER paths
-// (op_pvq_search / alg_quant, stereo_itheta, stereo_split, the MIN_STEREO_ENERGY
-// copy-down, and the complexity>=8 theta-RDO trial loop with
-// compute_channel_weights) require vq.c encode helpers that are not ported yet;
-// every such branch is guarded with a // TODO(phase 4) panic and never runs on
-// the decode path (encode==0 forces theta_rdo==0). intensity_stereo and
-// stereo_merge are ported (stereo_merge runs on decode resynth); stereo_split is
-// encoder-only and is not ported.
+// *rangecoding.Decoder and a *rangecoding.Encoder (exactly one non-nil,
+// selected by the `encode` flag). tellFrac() dispatches ec_tell_frac to
+// whichever is active. The encoder-only helpers op_pvq_search / alg_quant
+// (internal/celt/vq.go), stereo_itheta / stereo_split, intensity_stereo, the
+// MIN_STEREO_ENERGY copy-down, compute_channel_weights and the theta-RDO trial
+// loop with its range-coder snapshot/splice are all ported below.
 
 package celt
 
@@ -29,12 +31,14 @@ import (
 	"github.com/tphakala/go-opus/internal/rangecoding"
 )
 
-// TODO(phase 4): port the ENCODE side of bands.c (alg_quant via quant_partition,
-// stereo_itheta / stereo_split / intensity_stereo mixing in compute_theta, the
-// MIN_STEREO_ENERGY copy-down and the theta-RDO trial loop) when the CELT
-// encoder lands. This file is the pure decode/resynth path only.
+// minStereoEnergy is MIN_STEREO_ENERGY (bands.c:1381, FIXED_POINT): the energy
+// floor below which a near-silent stereo channel is replaced by a copy of the
+// other channel before the mid/side split (quant_band_stereo encode).
+const minStereoEnergy = 2
 
-const bandsEncodeTODO = "celt: bands.c encode path is phase 4"
+// spreadLight is SPREAD_LIGHT (bands.h): a spreading_decision output level (the
+// other SPREAD_* values live in vq.go, celt.go and bands_math.go).
+const spreadLight = 1
 
 // celtLcgRand is celt_lcg_rand (bands.c:61): the linear congruential generator
 // that drives the folding noise and anti-collapse fill. uint32 arithmetic wraps,
@@ -303,6 +307,33 @@ func intensityStereo(m *celtMode, X, Y, bandE []int32, bandID, N int) {
 	}
 }
 
+// stereoSplit ports stereo_split (bands.c:405): the encoder-side mid/side
+// rotation (a 45-degree Hadamard) applied when the coded theta is nonzero. It is
+// exercised through the encode differential test.
+func stereoSplit(X, Y []int32, N int) {
+	for j := 0; j < N; j++ {
+		l := fixedmath.MULT32_32_Q31(sqrt2Inv31, X[j])
+		r := fixedmath.MULT32_32_Q31(sqrt2Inv31, Y[j])
+		X[j] = fixedmath.ADD32(l, r)
+		Y[j] = fixedmath.SUB32(r, l)
+	}
+}
+
+// computeChannelWeights ports compute_channel_weights (bands.c:362, FIXED_POINT):
+// the per-channel weights used by the theta-RDO trial loop to weight the squared
+// distortion when choosing between theta rounded down vs up. It uses the band
+// amplitude (sqrt energy), which corresponds to minimizing the MSE in the
+// non-normalized domain.
+func computeChannelWeights(Ex, Ey int32, w *[2]int16) {
+	minE := fixedmath.MIN32(Ex, Ey)
+	// Adjustment to make the weights a bit more conservative.
+	Ex = fixedmath.ADD32(Ex, minE/3)
+	Ey = fixedmath.ADD32(Ey, minE/3)
+	shift := fixedmath.Celt_ilog2(1 /* EPSILON */ +fixedmath.MAX32(Ex, Ey)) - 14
+	w[0] = int16(fixedmath.VSHR32(Ex, shift))
+	w[1] = int16(fixedmath.VSHR32(Ey, shift))
+}
+
 // stereoMerge ports stereo_merge (bands.c:418): the decoder-side stereo
 // un-mixing that turns the decoded mid/side pair back into left/right.
 func stereoMerge(X, Y []int32, mid int32, N int) {
@@ -344,6 +375,103 @@ func stereoMerge(X, Y []int32, mid int32, N int) {
 
 // orderyTable is the natural-to-ordery Hadamard index table for N=2,4,8,16
 // (bands.c:567).
+// spreadingDecision ports spreading_decision (bands.c:470): the encoder-only
+// decision of how much to spread the pulses in the current frame. It builds a
+// rough |x| CDF per band, folds it into a running average with hysteresis, and
+// (when updateHf) updates the tapset decision from the high-frequency content.
+// average / hfAverage / tapsetDecision are read-modify-write, matching the C
+// int* out-parameters. The FUZZING override is excluded (it is not in the frozen
+// build).
+func spreadingDecision(m *celtMode, X []int32, average *int, lastDecision int,
+	hfAverage, tapsetDecision *int, updateHf, end, C, M int, spreadWeight []int) int {
+	sum := 0
+	nbBands := 0
+	eBands := m.eBands
+	hfSum := 0
+
+	// celt_assert(end>0)
+	N0 := M * m.shortMdctSize
+
+	if M*(int(eBands[end])-int(eBands[end-1])) <= 8 {
+		return spreadNone
+	}
+	c := 0
+	for {
+		for i := 0; i < end; i++ {
+			var tcount [3]int
+			x := X[M*int(eBands[i])+c*N0:]
+			N := M * (int(eBands[i+1]) - int(eBands[i]))
+			if N <= 8 {
+				continue
+			}
+			// Compute rough CDF of |x[j]|.
+			for j := 0; j < N; j++ {
+				// x2N is Q13.
+				xj := int16(fixedmath.SHR32(x[j], normShift-14))
+				x2N := fixedmath.MULT16_16(int16(fixedmath.MULT16_16_Q15(xj, xj)), int16(N))
+				if x2N < int32(fixedmath.QCONST16(0.25, 13)) {
+					tcount[0]++
+				}
+				if x2N < int32(fixedmath.QCONST16(0.0625, 13)) {
+					tcount[1]++
+				}
+				if x2N < int32(fixedmath.QCONST16(0.015625, 13)) {
+					tcount[2]++
+				}
+			}
+			// Only include four last bands (8 kHz and up).
+			if i > m.nbEBands-4 {
+				hfSum += int(fixedmath.Celt_udiv(uint32(32*(tcount[1]+tcount[0])), uint32(N)))
+			}
+			tmp := b2i(2*tcount[2] >= N) + b2i(2*tcount[1] >= N) + b2i(2*tcount[0] >= N)
+			sum += tmp * spreadWeight[i]
+			nbBands += spreadWeight[i]
+		}
+		c++
+		if c >= C {
+			break
+		}
+	}
+
+	if updateHf != 0 {
+		if hfSum != 0 {
+			hfSum = int(fixedmath.Celt_udiv(uint32(hfSum), uint32(C*(4-m.nbEBands+end))))
+		}
+		*hfAverage = (*hfAverage + hfSum) >> 1
+		hfSum = *hfAverage
+		if *tapsetDecision == 2 {
+			hfSum += 4
+		} else if *tapsetDecision == 0 {
+			hfSum -= 4
+		}
+		if hfSum > 22 {
+			*tapsetDecision = 2
+		} else if hfSum > 18 {
+			*tapsetDecision = 1
+		} else {
+			*tapsetDecision = 0
+		}
+	}
+	// celt_assert(nbBands>0); celt_assert(sum>=0)
+	sum = int(fixedmath.Celt_udiv(uint32(sum<<8), uint32(nbBands)))
+	// Recursive averaging.
+	sum = (sum + *average) >> 1
+	*average = sum
+	// Hysteresis.
+	sum = (3*sum + (((3 - lastDecision) << 7) + 64) + 2) >> 2
+	var decision int
+	if sum < 80 {
+		decision = spreadAggressive
+	} else if sum < 256 {
+		decision = spreadNormal
+	} else if sum < 384 {
+		decision = spreadLight
+	} else {
+		decision = spreadNone
+	}
+	return decision
+}
+
 var orderyTable = [...]int{
 	1, 0,
 	3, 0, 2, 1,
@@ -435,13 +563,16 @@ func computeQn(N, b, offset, pulseCap, stereo int) int {
 // bandCtx mirrors struct band_ctx (bands.c:664) for the frozen non-QEXT build.
 // The encoder ec is not carried (encode is phase 4); dec is the range decoder.
 type bandCtx struct {
-	encode            int
-	resynth           int
-	m                 *celtMode
-	i                 int
-	intensity         int
-	spread            int
-	tf_change         int
+	encode    int
+	resynth   int
+	m         *celtMode
+	i         int
+	intensity int
+	spread    int
+	tf_change int
+	// C's single ec_ctx *ec serves both directions. The Go port carries a
+	// separate encoder and decoder; exactly one is non-nil (selected by encode).
+	enc               *rangecoding.Encoder
 	dec               *rangecoding.Decoder
 	remaining_bits    int32
 	bandE             []int32
@@ -449,6 +580,15 @@ type bandCtx struct {
 	theta_round       int
 	disable_inv       int
 	avoid_split_noise int
+}
+
+// tellFrac returns ec_tell_frac(ctx->ec) for whichever coder direction is active
+// (C's single ec serves both; the Go port carries a Decoder and an Encoder).
+func (ctx *bandCtx) tellFrac() uint32 {
+	if ctx.encode != 0 {
+		return ctx.enc.TellFrac()
+	}
+	return ctx.dec.TellFrac()
 }
 
 // splitCtx mirrors struct split_ctx (bands.c:688) for the non-QEXT build.
@@ -474,6 +614,7 @@ func computeTheta(ctx *bandCtx, sctx *splitCtx, X, Y []int32, N int, b *int, B, 
 	i := ctx.i
 	intensity := ctx.intensity
 	dec := ctx.dec
+	bandE := ctx.bandE
 
 	// Decide on the resolution to give to the split parameter theta.
 	pulseCap := int(m.logN[i]) + LM*(1<<bitRes)
@@ -487,71 +628,142 @@ func computeTheta(ctx *bandCtx, sctx *splitCtx, X, Y []int32, N int, b *int, B, 
 		qn = 1
 	}
 	if encode != 0 {
-		// TODO(phase 4): itheta_q30 = stereo_itheta(X, Y, stereo, N, arch)
-		panic(bandsEncodeTODO)
+		// theta is the atan() of the ratio between the (normalized) side and mid.
+		// With just that parameter, we can re-scale both mid and side because we
+		// know that 1) they have unit norm and 2) they are orthogonal.
+		itheta = int(StereoItheta(X, Y, stereo, N)) >> 16
 	}
-	tell := int32(dec.TellFrac())
+	tell := int32(ctx.tellFrac())
 	if qn != 1 {
 		if encode != 0 {
-			// TODO(phase 4): encoder theta quantization (theta_round / avoid_split_noise)
-			panic(bandsEncodeTODO)
+			if stereo == 0 || ctx.theta_round == 0 {
+				itheta = (itheta*qn + 8192) >> 14
+				if stereo == 0 && ctx.avoid_split_noise != 0 && itheta > 0 && itheta < qn {
+					// Check if the selected value of theta will cause the bit
+					// allocation to inject noise on one side. If so, make sure the
+					// energy of that side is zero.
+					unquantized := int(fixedmath.Celt_udiv(uint32(itheta*16384), uint32(qn)))
+					imid = int(bitexactCos(int16(unquantized)))
+					iside = int(bitexactCos(int16(16384 - unquantized)))
+					delta = int(fracMul16(int32((N-1)<<7), int32(bitexactLog2tan(iside, imid))))
+					if delta > *b {
+						itheta = qn
+					} else if delta < -*b {
+						itheta = 0
+					}
+				}
+			} else {
+				// Bias quantization towards itheta=0 and itheta=16384.
+				var bias int
+				if itheta > 8192 {
+					bias = 32767 / qn
+				} else {
+					bias = -32767 / qn
+				}
+				down := fixedmath.IMIN(qn-1, fixedmath.IMAX(0, (itheta*qn+bias)>>14))
+				if ctx.theta_round < 0 {
+					itheta = down
+				} else {
+					itheta = down + 1
+				}
+			}
 		}
 		// Entropy coding of the angle. We use a uniform pdf for the time split,
 		// a step for stereo, and a triangular one for the rest.
 		if stereo != 0 && N > 2 {
 			p0 := 3
+			x := itheta
 			x0 := qn / 2
 			ft := p0*(x0+1) + x0
 			// Use a probability of p0 up to itheta=8192 and then use 1 after.
-			fs := int(dec.Decode(uint32(ft)))
-			var x int
-			if fs < (x0+1)*p0 {
-				x = fs / p0
+			if encode != 0 {
+				var fl, fh int
+				if x <= x0 {
+					fl = p0 * x
+					fh = p0 * (x + 1)
+				} else {
+					fl = (x - 1 - x0) + (x0+1)*p0
+					fh = (x - x0) + (x0+1)*p0
+				}
+				ctx.enc.Encode(uint32(fl), uint32(fh), uint32(ft))
 			} else {
-				x = x0 + 1 + (fs - (x0+1)*p0)
+				fs := int(dec.Decode(uint32(ft)))
+				if fs < (x0+1)*p0 {
+					x = fs / p0
+				} else {
+					x = x0 + 1 + (fs - (x0+1)*p0)
+				}
+				var fl, fh int
+				if x <= x0 {
+					fl = p0 * x
+					fh = p0 * (x + 1)
+				} else {
+					fl = (x - 1 - x0) + (x0+1)*p0
+					fh = (x - x0) + (x0+1)*p0
+				}
+				dec.DecUpdate(uint32(fl), uint32(fh), uint32(ft))
+				itheta = x
 			}
-			var fl, fh int
-			if x <= x0 {
-				fl = p0 * x
-				fh = p0 * (x + 1)
-			} else {
-				fl = (x - 1 - x0) + (x0+1)*p0
-				fh = (x - x0) + (x0+1)*p0
-			}
-			dec.DecUpdate(uint32(fl), uint32(fh), uint32(ft))
-			itheta = x
 		} else if B0 > 1 || stereo != 0 {
 			// Uniform pdf.
-			itheta = int(dec.DecUint(uint32(qn + 1)))
-		} else {
-			// Triangular pdf.
-			ft := ((qn >> 1) + 1) * ((qn >> 1) + 1)
-			fm := int(dec.Decode(uint32(ft)))
-			var fl, fs int
-			if fm < ((qn >> 1) * ((qn >> 1) + 1) >> 1) {
-				itheta = (int(fixedmath.Isqrt32(uint32(8*fm+1))) - 1) >> 1
-				fs = itheta + 1
-				fl = itheta * (itheta + 1) >> 1
+			if encode != 0 {
+				ctx.enc.EncUint(uint32(itheta), uint32(qn+1))
 			} else {
-				itheta = (2*(qn+1) - int(fixedmath.Isqrt32(uint32(8*(ft-fm-1)+1)))) >> 1
-				fs = qn + 1 - itheta
-				fl = ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				itheta = int(dec.DecUint(uint32(qn + 1)))
 			}
-			dec.DecUpdate(uint32(fl), uint32(fl+fs), uint32(ft))
+		} else {
+			ft := ((qn >> 1) + 1) * ((qn >> 1) + 1)
+			if encode != 0 {
+				var fl, fs int
+				if itheta <= (qn >> 1) {
+					fs = itheta + 1
+					fl = itheta * (itheta + 1) >> 1
+				} else {
+					fs = qn + 1 - itheta
+					fl = ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				}
+				ctx.enc.Encode(uint32(fl), uint32(fl+fs), uint32(ft))
+			} else {
+				// Triangular pdf.
+				fm := int(dec.Decode(uint32(ft)))
+				var fl, fs int
+				if fm < ((qn >> 1) * ((qn >> 1) + 1) >> 1) {
+					itheta = (int(fixedmath.Isqrt32(uint32(8*fm+1))) - 1) >> 1
+					fs = itheta + 1
+					fl = itheta * (itheta + 1) >> 1
+				} else {
+					itheta = (2*(qn+1) - int(fixedmath.Isqrt32(uint32(8*(ft-fm-1)+1)))) >> 1
+					fs = qn + 1 - itheta
+					fl = ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				}
+				dec.DecUpdate(uint32(fl), uint32(fl+fs), uint32(ft))
+			}
 		}
 		// celt_assert(itheta>=0)
 		itheta = int(fixedmath.Celt_udiv(uint32(itheta*16384), uint32(qn)))
 		if encode != 0 && stereo != 0 {
-			// TODO(phase 4): intensity_stereo / stereo_split on encode
-			panic(bandsEncodeTODO)
+			if itheta == 0 {
+				intensityStereo(m, X, Y, bandE, i, N)
+			} else {
+				stereoSplit(X, Y, N)
+			}
 		}
 	} else if stereo != 0 {
 		if encode != 0 {
-			// TODO(phase 4): inv/intensity_stereo on encode
-			panic(bandsEncodeTODO)
+			inv = b2i(itheta > 8192 && ctx.disable_inv == 0)
+			if inv != 0 {
+				for j := 0; j < N; j++ {
+					Y[j] = -Y[j]
+				}
+			}
+			intensityStereo(m, X, Y, bandE, i, N)
 		}
 		if *b > 2<<bitRes && ctx.remaining_bits > 2<<bitRes {
-			inv = dec.DecBitLogp(2)
+			if encode != 0 {
+				ctx.enc.EncBitLogp(inv, 2)
+			} else {
+				inv = dec.DecBitLogp(2)
+			}
 		} else {
 			inv = 0
 		}
@@ -561,7 +773,7 @@ func computeTheta(ctx *bandCtx, sctx *splitCtx, X, Y []int32, N int, b *int, B, 
 		}
 		itheta = 0
 	}
-	qalloc = int(int32(dec.TellFrac()) - tell)
+	qalloc = int(int32(ctx.tellFrac()) - tell)
 	*b -= qalloc
 
 	switch itheta {
@@ -602,10 +814,11 @@ func quantBandN1(ctx *bandCtx, X, Y, lowbandOut []int32) uint32 {
 		sign := 0
 		if ctx.remaining_bits >= 1<<bitRes {
 			if ctx.encode != 0 {
-				// TODO(phase 4): sign = x[0]<0; ec_enc_bits(ec, sign, 1)
-				panic(bandsEncodeTODO)
+				sign = b2i(x[0] < 0)
+				ctx.enc.EncBits(uint32(sign), 1)
+			} else {
+				sign = int(ctx.dec.DecBits(1))
 			}
-			sign = int(ctx.dec.DecBits(1))
 			ctx.remaining_bits -= 1 << bitRes
 		}
 		if ctx.resynth != 0 {
@@ -721,10 +934,10 @@ func quantPartition(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM in
 			K := getPulses(q)
 			// Finally do the actual quantization.
 			if encode != 0 {
-				// TODO(phase 4): cm = alg_quant(X, N, K, spread, B, ec, gain, resynth, arch)
-				panic(bandsEncodeTODO)
+				cm = AlgQuant(X, N, K, spread, B, ctx.enc, gain, ctx.resynth)
+			} else {
+				cm = AlgUnquant(X, N, K, spread, B, dec, gain)
 			}
-			cm = AlgUnquant(X, N, K, spread, B, dec, gain)
 		} else {
 			// If there's no pulse, fill the band anyway.
 			if ctx.resynth != 0 {
@@ -800,8 +1013,7 @@ func quantBand(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM int, lo
 	for k := 0; k < recombine; k++ {
 		bitInterleaveTable := [16]byte{0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3}
 		if encode != 0 {
-			// TODO(phase 4): haar1(X, N>>k, 1<<k)
-			panic(bandsEncodeTODO)
+			haar1(X, N>>k, 1<<k)
 		}
 		if lowband != nil {
 			haar1(lowband, N>>k, 1<<k)
@@ -814,8 +1026,7 @@ func quantBand(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM int, lo
 	// Increasing the time resolution.
 	for (N_B&1) == 0 && tfChange < 0 {
 		if encode != 0 {
-			// TODO(phase 4): haar1(X, N_B, B)
-			panic(bandsEncodeTODO)
+			haar1(X, N_B, B)
 		}
 		if lowband != nil {
 			haar1(lowband, N_B, B)
@@ -832,8 +1043,7 @@ func quantBand(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM int, lo
 	// Reorganize the samples in time order instead of frequency order.
 	if B0 > 1 {
 		if encode != 0 {
-			// TODO(phase 4): deinterleave_hadamard(X, N_B>>recombine, B0<<recombine, longBlocks)
-			panic(bandsEncodeTODO)
+			deinterleaveHadamard(X, N_B>>recombine, B0<<recombine, longBlocks)
 		}
 		if lowband != nil {
 			deinterleaveHadamard(lowband, N_B>>recombine, B0<<recombine, longBlocks)
@@ -903,8 +1113,13 @@ func quantBandStereo(ctx *bandCtx, X, Y []int32, N, b, B int, lowband []int32, L
 	origFill := fill
 
 	if encode != 0 {
-		// TODO(phase 4): MIN_STEREO_ENERGY copy-down of a near-silent channel
-		panic(bandsEncodeTODO)
+		if ctx.bandE[ctx.i] < minStereoEnergy || ctx.bandE[ctx.m.nbEBands+ctx.i] < minStereoEnergy {
+			if ctx.bandE[ctx.i] > ctx.bandE[ctx.m.nbEBands+ctx.i] {
+				copy(Y[:N], X[:N])
+			} else {
+				copy(X[:N], Y[:N])
+			}
+		}
 	}
 	computeTheta(ctx, &sctx, X, Y, N, &b, B, B, LM, 1, &fill)
 	inv = sctx.inv
@@ -940,10 +1155,12 @@ func quantBandStereo(ctx *bandCtx, X, Y []int32, N, b, B int, lowband []int32, L
 		}
 		if sbits != 0 {
 			if encode != 0 {
-				// TODO(phase 4): sign = ...; ec_enc_bits(ec, sign, 1)
-				panic(bandsEncodeTODO)
+				// Here we only need to encode a sign for the side.
+				sign = b2i(fixedmath.MULT32_32_Q31(x2[0], y2[1])-fixedmath.MULT32_32_Q31(x2[1], y2[0]) < 0)
+				ctx.enc.EncBits(uint32(sign), 1)
+			} else {
+				sign = int(dec.DecBits(1))
 			}
-			sign = int(dec.DecBits(1))
 		}
 		sign = 1 - 2*sign
 		// We use origFill here because we want to fold the side, but if
@@ -1031,7 +1248,8 @@ func specialHybridFolding(m *celtMode, norm, norm2 []int32, start, M, dualStereo
 // on decode).
 func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, collapseMasks []byte,
 	bandE []int32, pulses []int, shortBlocks, spread, dualStereo, intensity int, tfRes []int,
-	totalBits, balance int32, dec *rangecoding.Decoder, LM, codedBands int, seed *uint32, disableInv int) {
+	totalBits, balance int32, enc *rangecoding.Encoder, dec *rangecoding.Decoder, LM, codedBands int,
+	seed *uint32, complexity, disableInv int) {
 	eBands := m.eBands
 	updateLowband := 1
 	C := 1
@@ -1040,11 +1258,8 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 	}
 	// theta_rdo = encode && Y_!=NULL && !dual_stereo && complexity>=8; always 0
 	// on decode. resynth = !encode || theta_rdo.
-	thetaRdo := 0
-	resynth := 0
-	if encode == 0 {
-		resynth = 1
-	}
+	thetaRdo := b2i(encode != 0 && Y_ != nil && dualStereo == 0 && complexity >= 8)
+	resynth := b2i(encode == 0 || thetaRdo != 0)
 	var ctx bandCtx
 
 	M := 1 << LM
@@ -1062,12 +1277,34 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 
 	// For decoding, we can use the last band as scratch space because we don't
 	// need that scratch space for the last band and we don't care about the data
-	// there until we're decoding the last band.
+	// there until we're decoding the last band. When encoding with resynth
+	// (theta-RDO), X_ still holds the real input across all bands, so the scratch
+	// must be a separate allocation instead of aliasing X_'s tail.
+	resynthAlloc := 0
+	if encode != 0 && resynth != 0 {
+		resynthAlloc = M * (int(eBands[m.nbEBands]) - int(eBands[m.nbEBands-1]))
+	}
 	var lowbandScratch []int32
-	lowbandScratch = X_[M*int(eBands[m.effEBands-1]):]
+	if encode != 0 && resynth != 0 {
+		lowbandScratch = make([]int32, resynthAlloc)
+	} else {
+		lowbandScratch = X_[M*int(eBands[m.effEBands-1]):]
+	}
+	// theta-RDO save buffers (X_save/Y_save/X_save2/Y_save2/norm_save2/bytes_save).
+	// Empty unless encode+resynth, and only used on the theta_rdo path.
+	XSave := make([]int32, resynthAlloc)
+	YSave := make([]int32, resynthAlloc)
+	XSave2 := make([]int32, resynthAlloc)
+	YSave2 := make([]int32, resynthAlloc)
+	normSave2 := make([]int32, resynthAlloc)
+	var bytesSave []byte
+	if thetaRdo != 0 {
+		bytesSave = make([]byte, 1275)
+	}
 
 	lowbandOffset := 0
 	ctx.bandE = bandE
+	ctx.enc = enc
 	ctx.dec = dec
 	ctx.encode = encode
 	ctx.intensity = intensity
@@ -1091,7 +1328,7 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 		}
 		N := M*int(eBands[i+1]) - M*int(eBands[i])
 		// celt_assert(N > 0)
-		tell := int32(dec.TellFrac())
+		tell := int32(ctx.tellFrac())
 
 		// Compute how many bits we want to allocate to this band.
 		if i != start {
@@ -1187,11 +1424,6 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 			yCm = quantBand(&ctx, Y, N, b/2, B, lb2, LM, lo2, q31one, lowbandScratch, int(yCm))
 		} else {
 			if Y != nil {
-				if thetaRdo != 0 && i < intensity {
-					// TODO(phase 4): theta-RDO trial loop (encode only)
-					panic(bandsEncodeTODO)
-				}
-				ctx.theta_round = 0
 				var lb, lo []int32
 				if effectiveLowband != -1 {
 					lb = norm[effectiveLowband:]
@@ -1199,7 +1431,65 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 				if last == 0 {
 					lo = norm[M*int(eBands[i])-normOffset:]
 				}
-				xCm = quantBandStereo(&ctx, X, Y, N, b, B, lb, LM, lo, lowbandScratch, int(xCm|yCm))
+				if thetaRdo != 0 && i < intensity {
+					var dist0, dist1 int32
+					var cm2 uint32
+					var w [2]int16
+					computeChannelWeights(bandE[i], bandE[i+m.nbEBands], &w)
+					// Make a copy.
+					cm := int(xCm | yCm)
+					encSave := *enc
+					ctxSave := ctx
+					copy(XSave[:N], X[:N])
+					copy(YSave[:N], Y[:N])
+					// Encode and round down.
+					ctx.theta_round = -1
+					xCm = quantBandStereo(&ctx, X, Y, N, b, B, lb, LM, lo, lowbandScratch, cm)
+					dist0 = fixedmath.MULT16_32_Q15(w[0], celtInnerProdNormShift(XSave, X, N)) + fixedmath.MULT16_32_Q15(w[1], celtInnerProdNormShift(YSave, Y, N))
+
+					// Save first result.
+					cm2 = xCm
+					encSave2 := *enc
+					ctxSave2 := ctx
+					copy(XSave2[:N], X[:N])
+					copy(YSave2[:N], Y[:N])
+					if last == 0 {
+						loOff := M*int(eBands[i]) - normOffset
+						copy(normSave2[:N], norm[loOff:loOff+N])
+					}
+					nstartBytes := encSave.RangeBytes()
+					nendBytes := encSave.Storage()
+					bytesBuf := encSave.Buffer()[nstartBytes:nendBytes]
+					saveBytes := int(nendBytes - nstartBytes)
+					copy(bytesSave[:saveBytes], bytesBuf)
+					// Restore.
+					*enc = encSave
+					ctx = ctxSave
+					copy(X[:N], XSave[:N])
+					copy(Y[:N], YSave[:N])
+					if i == start+1 {
+						specialHybridFolding(m, norm, norm2, start, M, dualStereo)
+					}
+					// Encode and round up.
+					ctx.theta_round = 1
+					xCm = quantBandStereo(&ctx, X, Y, N, b, B, lb, LM, lo, lowbandScratch, cm)
+					dist1 = fixedmath.MULT16_32_Q15(w[0], celtInnerProdNormShift(XSave, X, N)) + fixedmath.MULT16_32_Q15(w[1], celtInnerProdNormShift(YSave, Y, N))
+					if dist0 >= dist1 {
+						xCm = cm2
+						*enc = encSave2
+						ctx = ctxSave2
+						copy(X[:N], XSave2[:N])
+						copy(Y[:N], YSave2[:N])
+						if last == 0 {
+							loOff := M*int(eBands[i]) - normOffset
+							copy(norm[loOff:loOff+N], normSave2[:N])
+						}
+						copy(bytesBuf, bytesSave[:saveBytes])
+					}
+				} else {
+					ctx.theta_round = 0
+					xCm = quantBandStereo(&ctx, X, Y, N, b, B, lb, LM, lo, lowbandScratch, int(xCm|yCm))
+				}
 			} else {
 				var lb, lo []int32
 				if effectiveLowband != -1 {
@@ -1234,8 +1524,22 @@ func QuantAllBands(start, end int, X, Y []int32, collapseMasks []byte, bandE []i
 	pulses []int, shortBlocks, spread, dualStereo, intensity int, tfRes []int,
 	totalBits, balance int32, dec *rangecoding.Decoder, LM, codedBands int, seed *uint32, disableInv int) {
 	quantAllBands(0, &mode48000_960, start, end, X, Y, collapseMasks, bandE, pulses,
-		shortBlocks, spread, dualStereo, intensity, tfRes, totalBits, balance, dec,
-		LM, codedBands, seed, disableInv)
+		shortBlocks, spread, dualStereo, intensity, tfRes, totalBits, balance, nil, dec,
+		LM, codedBands, seed, 0, disableInv)
+}
+
+// QuantAllBandsEncode is the exported encode seam over quantAllBands, bound to
+// the frozen mode48000_960. It drives the pure-Go CELT residual encode
+// (encode==1) so the reftest oracle can pin it bit-exact against libopus. bandE
+// carries the 2*nbEBands band amplitudes (celt_ener) the encoder splits on;
+// complexity selects the theta-RDO path (>=8). seed carries the LCG state in/out.
+func QuantAllBandsEncode(start, end int, X, Y []int32, collapseMasks []byte, bandE []int32,
+	pulses []int, shortBlocks, spread, dualStereo, intensity int, tfRes []int,
+	totalBits, balance int32, enc *rangecoding.Encoder, LM, codedBands int, seed *uint32,
+	complexity, disableInv int) {
+	quantAllBands(1, &mode48000_960, start, end, X, Y, collapseMasks, bandE, pulses,
+		shortBlocks, spread, dualStereo, intensity, tfRes, totalBits, balance, enc, nil,
+		LM, codedBands, seed, complexity, disableInv)
 }
 
 // DenormaliseBands is the exported seam over denormaliseBands bound to
@@ -1275,4 +1579,15 @@ func AntiCollapse(X []int32, collapseMasks []byte, LM, C, size, start, end int,
 // exercised directly through the stereo quant_all_bands decode path.
 func IntensityStereo(X, Y, bandE []int32, bandID, N int) {
 	intensityStereo(&mode48000_960, X, Y, bandE, bandID, N)
+}
+
+// SpreadingDecision is the exported seam over spreadingDecision bound to
+// mode48000_960, letting the refc differential harness drive the pure-Go
+// encoder-only spread decision against libopus. X is the normalized MDCT
+// spectrum (C*(M*shortMdctSize) celt_norm); average / hfAverage / tapsetDecision
+// carry the running state in and out.
+func SpreadingDecision(X []int32, average *int, lastDecision int, hfAverage, tapsetDecision *int,
+	updateHf, end, C, M int, spreadWeight []int) int {
+	return spreadingDecision(&mode48000_960, X, average, lastDecision, hfAverage, tapsetDecision,
+		updateHf, end, C, M, spreadWeight)
 }
