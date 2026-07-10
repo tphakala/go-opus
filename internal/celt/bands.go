@@ -66,6 +66,87 @@ func bitexactLog2tan(isin, icos int) int {
 		int(fracMul16(int32(icos), fracMul16(int32(icos), -2597)+7932))
 }
 
+// computeBandEnergies ports compute_band_energies (bands.c:95, FIXED_POINT): the
+// encoder-direction pass that computes the amplitude (sqrt energy) of each band
+// of the MDCT spectrum X into bandE (celt_ener, opus_val32). The FIXED_POINT
+// branch scales each band by a per-band shift derived from its peak magnitude so
+// the sum-of-squares stays in range, then celt_sqrt32s it back down. arch is
+// unused in the pure-Go build (there is no SIMD override); it is kept for a
+// faithful signature.
+func computeBandEnergies(m *celtMode, X, bandE []int32, end, C, LM, arch int) {
+	_ = arch
+	eBands := m.eBands
+	N := m.shortMdctSize << LM
+	c := 0
+	for {
+		for i := 0; i < end; i++ {
+			var maxval int32
+			var sum int32
+			maxval = celtMaxabs32(X, c*N+int(eBands[i])<<LM, int(eBands[i+1]-eBands[i])<<LM)
+			if maxval > 0 {
+				shift := fixedmath.IMAX(0, 30-fixedmath.Celt_ilog2(maxval+(maxval>>14)+1)-((((int(m.logN[i])+7)>>bitRes)+LM+1)>>1))
+				j := int(eBands[i]) << LM
+				for {
+					x := fixedmath.SHL32(X[j+c*N], shift)
+					sum = fixedmath.ADD32(sum, fixedmath.MULT32_32_Q31(x, x))
+					j++
+					if j >= int(eBands[i+1])<<LM {
+						break
+					}
+				}
+				bandE[i+c*m.nbEBands] = fixedmath.MAX32(maxval, fixedmath.PSHR32(fixedmath.Celt_sqrt32(fixedmath.SHR32(sum, 1)), shift))
+			} else {
+				bandE[i+c*m.nbEBands] = 1 // EPSILON
+			}
+		}
+		c++
+		if c >= C {
+			break
+		}
+	}
+}
+
+// normaliseBands ports normalise_bands (bands.c:125, FIXED_POINT): the
+// encoder-direction pass that normalises each band of freq to unit energy using
+// the previously computed bandE, writing the celt_norm result into X. Each band
+// gets a per-band shift from celt_zlog2(E) so the reciprocal (celt_rcp_norm32)
+// keeps full precision. M is the short-block multiplier (1<<LM).
+func normaliseBands(m *celtMode, freq, X, bandE []int32, end, C, M int) {
+	eBands := m.eBands
+	N := M * m.shortMdctSize
+	c := 0
+	for {
+		i := 0
+		for {
+			E := bandE[i+c*m.nbEBands]
+			// For very low energies, we need this to make sure not to prevent
+			// energy rounding from blowing up the normalized signal.
+			if E < 10 {
+				E += 1 // EPSILON
+			}
+			shift := 30 - fixedmath.Celt_zlog2(E)
+			E = fixedmath.SHL32(E, shift)
+			g := fixedmath.Celt_rcp_norm32(E)
+			j := M * int(eBands[i])
+			for {
+				X[j+c*N] = fixedmath.PSHR32(fixedmath.MULT32_32_Q31(g, fixedmath.SHL32(freq[j+c*N], shift)), 30-normShift)
+				j++
+				if j >= M*int(eBands[i+1]) {
+					break
+				}
+			}
+			i++
+			if i >= end {
+				break
+			}
+		}
+		c++
+		if c >= C {
+			break
+		}
+	}
+}
+
 // denormaliseBands ports denormalise_bands (bands.c:188): apply the per-band log
 // energies to the normalized coefficients to produce the synthesis spectrum.
 func denormaliseBands(m *celtMode, X, freq, bandLogE []int32, start, end, M, downsample, silence int) {
@@ -1162,6 +1243,22 @@ func QuantAllBands(start, end int, X, Y []int32, collapseMasks []byte, bandE []i
 // M*shortMdctSize; X and bandLogE cover the bands being synthesized.
 func DenormaliseBands(X, freq, bandLogE []int32, start, end, M, downsample, silence int) {
 	denormaliseBands(&mode48000_960, X, freq, bandLogE, start, end, M, downsample, silence)
+}
+
+// ComputeBandEnergies is the exported encode seam over computeBandEnergies bound
+// to mode48000_960, letting the refc differential harness drive the pure-Go
+// band-energy computation against libopus. X is the MDCT spectrum (length
+// C*(shortMdctSize<<LM)); bandE receives C*nbEBands amplitudes.
+func ComputeBandEnergies(X, bandE []int32, end, C, LM int) {
+	computeBandEnergies(&mode48000_960, X, bandE, end, C, LM, 0)
+}
+
+// NormaliseBands is the exported encode seam over normaliseBands bound to
+// mode48000_960. freq is the MDCT spectrum, bandE the amplitudes from
+// ComputeBandEnergies, and X receives the C*(M*shortMdctSize) unit-energy
+// coefficients. M is 1<<LM.
+func NormaliseBands(freq, X, bandE []int32, end, C, M int) {
+	normaliseBands(&mode48000_960, freq, X, bandE, end, C, M)
 }
 
 // AntiCollapse is the exported seam over antiCollapse bound to mode48000_960
