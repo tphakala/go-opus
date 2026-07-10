@@ -1,19 +1,28 @@
-// Command gentables converts the libopus CELT static mode data
-// (static_modes_fixed.h + the eband5ms/band_allocation tables in modes.c) into
-// checked-in Go data: internal/celt/static_modes_gen.go, holding the single
-// mode48000_960 needed for 48 kHz fullband. See docs/hard-parts.md section 6:
-// the data is fully precomputed, so this is pure transcription, no mode-building
-// math (compute_pulse_cache runs only under CUSTOM_MODES, which is off).
+// Command gentables converts the libopus CELT and SILK static data into
+// checked-in Go data:
 //
-// Method (robust, avoids fragile header text parsing): compile and run a tiny C
-// program (cdump/dump_modes.c) that #includes the pinned libopus sources with
-// -DFIXED_POINT -DDISABLE_FLOAT_API (non-CUSTOM_MODES, non-QEXT), which prints
-// every array and scalar as a flat token stream. The generator parses that,
-// validates each length against a fixed schema (so an upstream reshape fails
-// loudly), and emits gofmt'd Go. The QEXT tables (qext_*50) are skipped.
+//   - internal/celt/static_modes_gen.go, holding the single mode48000_960
+//     needed for 48 kHz fullband (static_modes_fixed.h + the eband5ms /
+//     band_allocation tables in modes.c).
+//   - internal/silk/tables_gen.go, holding the SILK decoder's static tables
+//     (the NB/MB and WB NLSF codebooks and every leaf entropy/gain/LTP/pitch/
+//     pulse/LSF table).
 //
-// Regenerate with `go generate ./internal/celt/...`. Re-running is idempotent:
-// the output is byte-identical given the same submodule.
+// See docs/hard-parts.md section 6: the data is fully precomputed, so this is
+// pure transcription, no mode-building math (CELT's compute_pulse_cache runs
+// only under CUSTOM_MODES, which is off).
+//
+// Method (robust, avoids fragile header text parsing): compile and run tiny C
+// programs (cdump/dump_modes.c and cdump/dump_silk.c) that #include the pinned
+// libopus sources with -DFIXED_POINT -DDISABLE_FLOAT_API (non-CUSTOM_MODES,
+// non-QEXT), printing every array and scalar as a flat token stream. The
+// generator parses that, validates each length against a fixed schema (so an
+// upstream reshape fails loudly), and emits gofmt'd Go.
+//
+// Regenerate CELT with `go generate ./internal/celt/...` and SILK with
+// `go generate ./internal/silk/...`; a bare `go run ./cmd/gentables` (or
+// `-check`) processes both. Re-running is idempotent: the output is
+// byte-identical given the same submodule.
 package main
 
 import (
@@ -32,11 +41,14 @@ import (
 )
 
 // upstreamTag records the libopus release the data is transcribed from. It is
-// written into the generated file's header for provenance.
+// written into the generated files' headers for provenance.
 const upstreamTag = "v1.6.1"
 
 //go:embed cdump/dump_modes.c
 var dumpModesC []byte
+
+//go:embed cdump/dump_silk.c
+var dumpSilkC []byte
 
 func main() {
 	log.SetFlags(0)
@@ -44,59 +56,110 @@ func main() {
 
 	repoRoot := repoRootFromCaller()
 	defaultLibopus := filepath.Join(repoRoot, "internal", "reftest", "libopus")
-	defaultOut := filepath.Join(repoRoot, "internal", "celt", "static_modes_gen.go")
+	defaultCELTOut := filepath.Join(repoRoot, "internal", "celt", "static_modes_gen.go")
+	defaultSILKOut := filepath.Join(repoRoot, "internal", "silk", "tables_gen.go")
 
 	libopus := flag.String("libopus", defaultLibopus, "path to the pinned libopus source tree")
-	out := flag.String("out", "", "output Go file (default internal/celt/static_modes_gen.go)")
-	cc := flag.String("cc", ccDefault(), "C compiler to build the dumper")
-	check := flag.Bool("check", false, "verify the checked-in file matches a fresh C dump; do not write (exit 1 on drift)")
+	celtOut := flag.String("out", "", "output Go file for the CELT tables (default internal/celt/static_modes_gen.go)")
+	silkOut := flag.String("silk-out", "", "output Go file for the SILK tables (default internal/silk/tables_gen.go)")
+	cc := flag.String("cc", ccDefault(), "C compiler to build the dumpers")
+	check := flag.Bool("check", false, "verify the checked-in files match a fresh C dump; do not write (exit 1 on drift)")
+	target := flag.String("target", "all", "which tables to generate: all, celt, or silk")
 	flag.Parse()
 
-	outPath := *out
+	celtPath := resolveOut(*celtOut, defaultCELTOut)
+	silkPath := resolveOut(*silkOut, defaultSILKOut)
+
+	switch *target {
+	case "all":
+		genCELT(*cc, *libopus, celtPath, *check)
+		genSILK(*cc, *libopus, silkPath, *check)
+	case "celt":
+		genCELT(*cc, *libopus, celtPath, *check)
+	case "silk":
+		genSILK(*cc, *libopus, silkPath, *check)
+	default:
+		log.Fatalf("unknown -target %q (want all, celt, or silk)", *target)
+	}
+}
+
+// resolveOut turns a possibly-empty, possibly-relative -out value into an
+// absolute path, falling back to def. A relative path is resolved against the
+// cwd so the go:generate directives (which run in the package dir) land the
+// file in the package.
+func resolveOut(flagVal, def string) string {
 	switch {
-	case outPath == "":
-		outPath = defaultOut
-	case !filepath.IsAbs(outPath):
+	case flagVal == "":
+		return def
+	case !filepath.IsAbs(flagVal):
 		wd, err := os.Getwd()
 		if err != nil {
 			log.Fatalf("getwd: %v", err)
 		}
-		outPath = filepath.Join(wd, outPath)
+		return filepath.Join(wd, flagVal)
+	default:
+		return flagVal
 	}
+}
 
-	dump, err := runDumper(*cc, *libopus)
+// genCELT dumps and emits the CELT mode data into outPath (or verifies it under
+// -check).
+func genCELT(cc, libopus, outPath string, check bool) {
+	dump, err := runDumper(cc, libopus, "dump_modes.c", dumpModesC)
 	if err != nil {
-		log.Fatalf("run C dumper: %v", err)
+		log.Fatalf("run CELT dumper: %v", err)
 	}
-
 	tables, err := parseDump(dump)
 	if err != nil {
-		log.Fatalf("parse dump: %v", err)
+		log.Fatalf("parse CELT dump: %v", err)
 	}
-	if err := validate(tables); err != nil {
-		log.Fatalf("validate dump: %v", err)
+	if err := validateSchema(tables, celtSchema); err != nil {
+		log.Fatalf("validate CELT dump: %v", err)
 	}
-
-	src, err := emitGo(tables)
+	src, err := emitCELT(tables)
 	if err != nil {
-		log.Fatalf("emit Go: %v", err)
+		log.Fatalf("emit CELT Go: %v", err)
 	}
+	writeOrCheck(outPath, src, check, "./internal/celt/...")
+}
 
-	// -check diffs the freshly dumped data against the checked-in file and fails
-	// on any mismatch, instead of writing. This is the CI gate that a submodule
-	// bump or a manual edit did not silently desync the generated tables.
-	if *check {
+// genSILK dumps and emits the SILK static tables into outPath (or verifies it
+// under -check).
+func genSILK(cc, libopus, outPath string, check bool) {
+	dump, err := runDumper(cc, libopus, "dump_silk.c", dumpSilkC)
+	if err != nil {
+		log.Fatalf("run SILK dumper: %v", err)
+	}
+	tables, err := parseDump(dump)
+	if err != nil {
+		log.Fatalf("parse SILK dump: %v", err)
+	}
+	if err := validateSchema(tables, silkSchema); err != nil {
+		log.Fatalf("validate SILK dump: %v", err)
+	}
+	src, err := emitSILK(tables)
+	if err != nil {
+		log.Fatalf("emit SILK Go: %v", err)
+	}
+	writeOrCheck(outPath, src, check, "./internal/silk/...")
+}
+
+// writeOrCheck writes src to outPath, or under -check diffs the freshly dumped
+// data against the checked-in file and fails on any mismatch instead of
+// writing. This is the CI gate that a submodule bump or a manual edit did not
+// silently desync the generated tables.
+func writeOrCheck(outPath string, src []byte, check bool, genTarget string) {
+	if check {
 		existing, err := os.ReadFile(outPath)
 		if err != nil {
 			log.Fatalf("read %s for -check: %v", outPath, err)
 		}
 		if !bytes.Equal(existing, src) {
-			log.Fatalf("%s is out of date: re-run `go generate ./internal/celt/...`", outPath)
+			log.Fatalf("%s is out of date: re-run `go generate %s`", outPath, genTarget)
 		}
 		log.Printf("%s is up to date", outPath)
 		return
 	}
-
 	if err := os.WriteFile(outPath, src, 0o644); err != nil {
 		log.Fatalf("write %s: %v", outPath, err)
 	}
@@ -121,9 +184,10 @@ func ccDefault() string {
 	return "cc"
 }
 
-// runDumper writes the embedded dumper to a temp dir, compiles it against the
-// libopus tree with the frozen oracle flags, runs it, and returns its stdout.
-func runDumper(cc, libopus string) (string, error) {
+// runDumper writes the embedded dumper source (srcName) to a temp dir, compiles
+// it against the libopus tree with the frozen oracle flags, runs it, and
+// returns its stdout.
+func runDumper(cc, libopus, srcName string, src []byte) (string, error) {
 	if _, err := os.Stat(filepath.Join(libopus, "celt", "static_modes_fixed.h")); err != nil {
 		return "", fmt.Errorf("libopus not found at %s: %w (init the submodule)", libopus, err)
 	}
@@ -134,11 +198,11 @@ func runDumper(cc, libopus string) (string, error) {
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 
-	srcC := filepath.Join(tmp, "dump_modes.c")
-	if err := os.WriteFile(srcC, dumpModesC, 0o644); err != nil {
+	srcC := filepath.Join(tmp, srcName)
+	if err := os.WriteFile(srcC, src, 0o644); err != nil {
 		return "", err
 	}
-	bin := filepath.Join(tmp, "dump_modes")
+	bin := filepath.Join(tmp, strings.TrimSuffix(srcName, ".c"))
 
 	// Mirror internal/reftest/oracle/oracle_cgo.go CFLAGS exactly so the dumper
 	// sees the same frozen build as the differential oracle.
@@ -198,10 +262,29 @@ func parseDump(dump string) (map[string][]int, error) {
 	return tables, nil
 }
 
-// schema is the expected length of every key the dumper emits. validate checks
-// each against it so a submodule reshape (new tag) fails at generation time
-// instead of silently producing wrong data.
-var schema = map[string]int{
+// validateSchema checks every dumped key against its expected length so a
+// submodule reshape (new tag) fails at generation time instead of silently
+// producing wrong data, and rejects unexpected keys.
+func validateSchema(tables map[string][]int, schema map[string]int) error {
+	for key, want := range schema {
+		got, ok := tables[key]
+		if !ok {
+			return fmt.Errorf("missing key %s", key)
+		}
+		if len(got) != want {
+			return fmt.Errorf("key %s: want %d values, got %d", key, want, len(got))
+		}
+	}
+	for key := range tables {
+		if _, ok := schema[key]; !ok {
+			return fmt.Errorf("unexpected key %s in dump", key)
+		}
+	}
+	return nil
+}
+
+// celtSchema is the expected length of every key the CELT dumper emits.
+var celtSchema = map[string]int{
 	"window120":           120,
 	"logN400":             21,
 	"cacheIndex50":        105,
@@ -223,26 +306,9 @@ var schema = map[string]int{
 	"modeScalars":         11,
 }
 
-func validate(tables map[string][]int) error {
-	for key, want := range schema {
-		got, ok := tables[key]
-		if !ok {
-			return fmt.Errorf("missing key %s", key)
-		}
-		if len(got) != want {
-			return fmt.Errorf("key %s: want %d values, got %d", key, want, len(got))
-		}
-	}
-	for key := range tables {
-		if _, ok := schema[key]; !ok {
-			return fmt.Errorf("unexpected key %s in dump", key)
-		}
-	}
-	return nil
-}
-
-// emitGo assembles and gofmt's the generated Go source from the parsed tables.
-func emitGo(t map[string][]int) ([]byte, error) {
+// emitCELT assembles and gofmt's the generated CELT source from the parsed
+// tables.
+func emitCELT(t map[string][]int) ([]byte, error) {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "// Code generated by cmd/gentables; DO NOT EDIT.\n")
