@@ -1,0 +1,131 @@
+# Linting standard shared with github.com/tphakala/go-flac and birdnet-go, with
+# go-opus-specific adaptations for a libopus transliteration codebase:
+#
+#   - A lint boundary (issues.exclusions below) relaxes the style/complexity
+#     linters inside the transliteration packages (internal/celt, internal/silk,
+#     internal/rangecoding, internal/fixedmath, internal/silkmath,
+#     internal/opuscompare). Those packages are deliberately C-shaped: C names,
+#     C control flow, and original comments are preserved so the port stays
+#     diffable against libopus v1.6.1. The quality metric there is fidelity to
+#     the C, not idiomatic Go. Correctness linters (staticcheck SA*, govet,
+#     ineffassign, nilerr) still apply everywhere.
+#   - internal/reftest is a cgo differential harness (build tag refc); it is held
+#     to the idiomatic standard but exempted from a few cgo-hostile checks.
+#   - opus/, oggopus/, cmd/ are idiomatic Go at full strength.
+#   - modernize stays disabled: it panics on Go 1.26 + atomic types in
+#     golangci-lint v2 (known upstream bug), same as go-flac.
+version: "2"
+output:
+  sort-order:
+    - linter
+    - severity
+    - file
+linters:
+  enable:
+    - bodyclose
+    - copyloopvar
+    - dupl
+    - durationcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - iface
+    - ineffassign
+    - misspell
+    - nilerr
+    - nilnil
+    - predeclared
+    - prealloc
+    - revive
+    - staticcheck
+    - testifylint
+    - thelper
+    - unconvert
+    - wastedassign
+  disable:
+    - unused
+  settings:
+    gocognit:
+      min-complexity: 50
+    gocritic:
+      # gocritic auto-enables the ruleguard check when settings.ruleguard.rules
+      # is set; the rules/*.go matchers carry the //go:build ruleguard tag so
+      # the normal toolchain ignores them.
+      disabled-checks:
+        - commentFormatting
+        - commentedOutCode
+      enabled-tags:
+        - style
+        - diagnostic
+        - performance
+      settings:
+        ruleguard:
+          rules: "rules/*.go"
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: true
+    exhaustive:
+      default-signifies-exhaustive: true
+    staticcheck:
+      # ST1003 (naming) and QF1008 (embedded-field selectors) fight the
+      # transliteration style; they are dropped only inside the C-shaped
+      # packages via the exclusion rules below, not globally.
+      checks:
+        - all
+  exclusions:
+    generated: lax
+    rules:
+      # Transliteration packages: relax style/complexity, keep correctness.
+      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare)/
+        linters:
+          - dupl
+          - gocognit
+          - gocritic
+          - gocyclo
+          - goconst
+          - misspell
+          - prealloc
+          - predeclared
+          - revive
+          - unconvert
+      # Transliterated C names (underscores, short receivers) trip staticcheck's
+      # style checks; drop just those in the C-shaped packages.
+      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare)/
+        linters:
+          - staticcheck
+        text: "(ST1003|ST1016|QF1008)"
+      # cgo differential harness: cgo pointer patterns and C-mirroring names.
+      - path: internal/reftest/
+        linters:
+          - gocritic
+          - revive
+      # Test files: table-driven tests are naturally long and repetitive.
+      - path: _test\.go
+        linters:
+          - dupl
+          - gocognit
+          - gocyclo
+          - goconst
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/tphakala/go-opus
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: true
+  new: false

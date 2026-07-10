@@ -1,0 +1,14 @@
+# sha256 checksums for the official Opus conformance test-vector archives.
+#
+# Source of record: docs/test-vectors.md (opus-codec.org static test vectors).
+# scripts/fetch-vectors.sh verifies each downloaded archive against the line
+# below before extracting, and refuses to extract on any mismatch.
+#
+# The RFC 8251 archive (opus_newvectors/) is the one conformance needs: it
+# carries the bitstreams AND the corrected .dec reference decoder outputs. The
+# original RFC 6716 archive (opus_testvectors/) has byte-identical bitstreams
+# but the pre-errata .dec outputs; it is optional (FETCH_RFC6716=1).
+#
+# Format is the standard `sha256sum -c` layout: "<hash>  <archive-filename>".
+6b26a22f9ba87b2b836906a9bb7afec5f8e54d49553b1200382520ee6fedfa55  opus_testvectors-rfc8251.tar.gz
+94ac78ca4f74c4e43bc9fe4ec1ad0aa36f38ab90f45b0727c40dd1e96096e767  opus_testvectors.tar.gz
