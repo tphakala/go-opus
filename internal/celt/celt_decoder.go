@@ -209,6 +209,11 @@ func (st *Decoder) SetDownsample(factor int) error {
 // (OPUS_GET_FINAL_RANGE); bit-exact agreement is the primary differential check.
 func (st *Decoder) Rng() uint32 { return st.rng }
 
+// Window returns the mode's overlap window (celt_mode->window). The Opus-level
+// transition machine reads it for smooth_fade at SILK<->CELT and mode-transition
+// boundaries (src/opus_decoder.c:633, CELT_GET_MODE then celt_mode->window).
+func (st *Decoder) Window() []int16 { return st.mode.window }
+
 // LastFrameTransient / LastFramePostfilter / LastFrameAntiCollapse report
 // per-frame coverage flags from the most recent DecodeWithEC (test support so
 // the differential suite can assert the transient / post-filter / anti-collapse

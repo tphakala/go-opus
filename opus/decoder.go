@@ -1,33 +1,27 @@
 package opus
 
 import (
+	"errors"
 	"fmt"
 
-	"github.com/tphakala/go-opus/internal/celt"
-	"github.com/tphakala/go-opus/internal/packet"
-	"github.com/tphakala/go-opus/internal/rangecoding"
+	"github.com/tphakala/go-opus/internal/opusdec"
 )
 
-// maxPacketSamples is the largest per-channel sample count a single Opus packet
-// can decode to: 120 ms at 48 kHz (RFC 6716 section 3.2.5).
-const maxPacketSamples = 5760
-
-// Decoder decodes Opus packets to interleaved 16-bit PCM, mirroring the CELT
-// branch of libopus opus_decode_frame. In phase 2 it handles CELT-only packets;
-// SILK-only and hybrid packets return ErrUnsupportedMode until phase 3 adds
-// those decoders.
+// Decoder decodes Opus packets to interleaved 16-bit PCM. It is the thin,
+// idiomatic public wrapper over internal/opusdec, which holds the verbatim
+// transliteration of libopus opus_decode_native / opus_decode_frame (the
+// CELT/SILK/hybrid mode-transition machine). All three coding modes decode:
+// CELT-only, SILK-only and hybrid, including the mode transitions and the CELT
+// redundancy frames at SILK<->CELT boundaries.
 //
-// A Decoder is stateful: the underlying CELT decoder carries overlap-add,
-// energy prediction, and post-filter memory across packets, so packets from one
-// stream must be fed to one Decoder in order. It is not safe for concurrent use;
-// use one Decoder per goroutine.
+// A Decoder is stateful: the underlying SILK and CELT decoders carry overlap-add,
+// energy prediction, post-filter, LTP, resampler and transition memory across
+// packets, so packets from one stream must be fed to one Decoder in order. It is
+// not safe for concurrent use; use one Decoder per goroutine.
 type Decoder struct {
 	sampleRate int
 	channels   int
-	celt       *celt.Decoder
-
-	lastPacketDuration int
-	finalRange         uint32
+	dec        *opusdec.OpusDecoder
 }
 
 // NewDecoder returns a decoder producing sampleRate-Hz, channels-channel PCM.
@@ -44,128 +38,79 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		return nil, fmt.Errorf("%w: channels %d (want 1 or 2)", ErrBadArg, channels)
 	}
 
-	cd := celt.NewDecoder(channels)
-	if cd == nil {
-		return nil, fmt.Errorf("%w: celt decoder init", ErrInternal)
+	dec, err := opusdec.NewDecoder(int32(sampleRate), channels)
+	if err != nil {
+		return nil, mapDecErr(err)
 	}
-	// The CELT decoder runs the 48 kHz mode and downsamples to the output rate,
-	// exactly as celt_decoder_init derives resampling_factor(Fs). 48000 keeps the
-	// default factor 1; the lower rates all divide 48000 evenly.
-	if ds := 48000 / sampleRate; ds != 1 {
-		if err := cd.SetDownsample(ds); err != nil {
-			return nil, fmt.Errorf("%w: celt downsample %d: %w", ErrInternal, ds, err)
-		}
-	}
-
 	return &Decoder{
 		sampleRate: sampleRate,
 		channels:   channels,
-		celt:       cd,
+		dec:        dec,
 	}, nil
 }
 
 // Decode decodes one Opus packet into interleaved PCM and returns the number of
 // samples produced per channel. pcm must hold at least that many samples times
-// the channel count; a too-small buffer returns ErrBufferTooSmall without
-// modifying decoder state visible to the caller.
+// the channel count; a too-small buffer returns ErrBufferTooSmall.
 //
-// Phase 2 supports CELT-only packets. A SILK-only or hybrid packet returns
-// ErrUnsupportedMode. A malformed packet returns ErrInvalidPacket; the decoder
-// never panics on hostile input. Like opus_decode, this does not drop the
-// codec pre-skip: dropping it is the container (oggopus) decoder's job.
+// CELT-only, SILK-only and hybrid packets all decode, including mode transitions
+// and redundancy. A nil or empty packet requests packet-loss concealment (PLC)
+// for the frame duration implied by len(pcm), which must be a multiple of 2.5 ms
+// per channel. A malformed packet returns ErrInvalidPacket; the decoder never
+// panics on hostile input. Like opus_decode, this does not drop the codec
+// pre-skip: dropping it is the container (oggopus) decoder's job.
 func (d *Decoder) Decode(pkt []byte, pcm []int16) (int, error) {
-	if len(pkt) == 0 {
-		// A nil or empty packet requests packet-loss concealment in the full API
-		// (see docs/api-design.md). The CELT-only phase 2 decoder does not run PLC
-		// through the public entry point.
-		// TODO(phase 3): conceal a lost frame of the duration implied by len(pcm).
-		return 0, fmt.Errorf("%w: empty packet (PLC not supported in phase 2)", ErrInvalidPacket)
-	}
+	return d.decode(pkt, pcm, 0)
+}
 
-	toc := packet.ParseTOC(pkt[0])
-	if toc.Mode() != packet.ModeCELTOnly {
-		// TODO(phase 3): decode SILK-only and hybrid packets.
-		return 0, fmt.Errorf("%w: %s", ErrUnsupportedMode, toc.Mode())
-	}
+// DecodeFEC reconstructs a lost frame from the in-band FEC (LBRR) data carried by
+// the NEXT received packet, mirroring opus_decode with decode_fec=1. pkt is that
+// next packet; pcm receives the recovered frame and its length per channel must
+// be a multiple of 2.5 ms. If pkt carries no FEC for the lost duration, the
+// decoder falls back to PLC. Returns the per-channel sample count.
+func (d *Decoder) DecodeFEC(pkt []byte, pcm []int16) (int, error) {
+	return d.decode(pkt, pcm, 1)
+}
 
-	p, err := packet.Parse(pkt)
+// decode is the shared body of Decode / DecodeFEC. frameSize is the caller's
+// per-channel buffer capacity, exactly the frame_size opus_decode passes down.
+func (d *Decoder) decode(pkt []byte, pcm []int16, decodeFec int) (int, error) {
+	frameSize := len(pcm) / d.channels
+	n, err := d.dec.Decode(pkt, pcm, frameSize, decodeFec)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %w", ErrInvalidPacket, err)
+		return 0, mapDecErr(err)
 	}
-
-	// Configure the CELT decoder for this packet, mirroring opus_decode_frame:
-	// CELT-only always starts at band 0 (hybrid would start at 17); the end band
-	// follows the TOC bandwidth; the stream channel count follows the TOC stereo
-	// flag. The physical output channels stay fixed at the decoder's channel
-	// count, so a mono packet in a stereo decoder is upmixed by CELT.
-	end := endBandForBandwidth(toc.Bandwidth())
-	if err := d.celt.SetStartBand(0); err != nil {
-		return 0, fmt.Errorf("%w: set start band: %w", ErrInternal, err)
-	}
-	if err := d.celt.SetEndBand(end); err != nil {
-		return 0, fmt.Errorf("%w: set end band %d: %w", ErrInternal, end, err)
-	}
-	if err := d.celt.SetStreamChannels(toc.Channels()); err != nil {
-		return 0, fmt.Errorf("%w: set stream channels %d: %w", ErrInternal, toc.Channels(), err)
-	}
-
-	// Every frame in the packet has the same duration; decode them back to back
-	// into pcm, each frame driven by its own range decoder over its own bytes,
-	// exactly as opus_decode_native loops opus_decode_frame per frame.
-	frameSize := toc.SamplesPerFrame(d.sampleRate)
-	total := 0
-	var rd rangecoding.Decoder
-	for i, frame := range p.Frames {
-		if (total+frameSize)*d.channels > len(pcm) {
-			return 0, fmt.Errorf("%w: pcm holds %d samples, need %d through frame %d",
-				ErrBufferTooSmall, len(pcm), (total+frameSize)*d.channels, i)
-		}
-		rd.Init(frame)
-		n, err := d.celt.DecodeWithEC(frame, pcm[total*d.channels:], frameSize, &rd, 0)
-		if err != nil {
-			return 0, fmt.Errorf("%w: celt frame %d: %w", ErrInvalidPacket, i, err)
-		}
-		total += n
-		// The packet final range is the CELT range-coder state after its last
-		// frame (OPUS_GET_FINAL_RANGE), the value conformance compares.
-		d.finalRange = d.celt.Rng()
-	}
-
-	d.lastPacketDuration = total
-	return total, nil
+	return n, nil
 }
 
 // FinalRange returns the range-coder state after the last decoded frame
 // (OPUS_GET_FINAL_RANGE). For a conformant decode it equals the encoder's final
 // range recorded in the test bitstream, the strong per-packet bit-exactness
-// check.
-func (d *Decoder) FinalRange() uint32 { return d.finalRange }
+// check across all modes, including the mode-transition vectors.
+func (d *Decoder) FinalRange() uint32 { return d.dec.FinalRange() }
 
 // LastPacketDuration returns the number of samples per channel produced by the
 // most recent successful Decode call.
-func (d *Decoder) LastPacketDuration() int { return d.lastPacketDuration }
+func (d *Decoder) LastPacketDuration() int { return d.dec.LastPacketDuration() }
 
-// Reset clears cross-packet decoder state (overlap-add, energy prediction,
-// post-filter memory) while keeping the configured sample rate and channel
-// count, mirroring opus_decoder_ctl(OPUS_RESET_STATE).
+// Reset clears cross-packet decoder state (SILK and CELT overlap-add, energy
+// prediction, post-filter, LTP, resampler and transition memory) while keeping
+// the configured sample rate and channel count, mirroring
+// opus_decoder_ctl(OPUS_RESET_STATE).
 func (d *Decoder) Reset() {
-	d.celt.ResetState()
-	d.lastPacketDuration = 0
-	d.finalRange = 0
+	d.dec.ResetState()
 }
 
-// endBandForBandwidth maps a TOC bandwidth to the CELT end band, mirroring the
-// switch in opus_decode_frame (opus_decoder.c): NB->13, MB and WB->17, SWB->19,
-// FB->21.
-func endBandForBandwidth(bw packet.Bandwidth) int {
-	switch bw {
-	case packet.BandwidthNarrowband:
-		return 13
-	case packet.BandwidthMediumband, packet.BandwidthWideband:
-		return 17
-	case packet.BandwidthSuperwideband:
-		return 19
-	default: // packet.BandwidthFullband
-		return 21
+// mapDecErr translates an internal opusdec error into the public sentinel set.
+func mapDecErr(err error) error {
+	switch {
+	case errors.Is(err, opusdec.ErrBadArg):
+		return fmt.Errorf("%w: %w", ErrBadArg, err)
+	case errors.Is(err, opusdec.ErrBufferTooSmall):
+		return fmt.Errorf("%w: %w", ErrBufferTooSmall, err)
+	case errors.Is(err, opusdec.ErrInvalidPacket):
+		return fmt.Errorf("%w: %w", ErrInvalidPacket, err)
+	default:
+		return fmt.Errorf("%w: %w", ErrInternal, err)
 	}
 }

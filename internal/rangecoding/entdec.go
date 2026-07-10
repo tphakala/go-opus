@@ -294,6 +294,13 @@ func (_this *Decoder) RangeBytes() uint32 { return _this.offs }
 // unquant_coarse_energy / unquant_fine_energy in celt/quant_bands.c).
 func (_this *Decoder) Storage() uint32 { return _this.storage }
 
+// ShrinkStorage reduces the buffer size seen by raw-bit reads from the end,
+// implementing the "dec.storage -= redundancy_bytes" step of opus_decode_frame's
+// redundancy handling (src/opus_decoder.c:526). The redundant CELT frame occupies
+// the last redundancy_bytes of the packet, and the main frame's CELT decode must
+// not read raw bits (read_byte_from_end) into that tail.
+func (_this *Decoder) ShrinkStorage(n uint32) { _this.storage -= n }
+
 // Rng returns the current range register (the rng field), for tests and
 // differential comparison.
 func (_this *Decoder) Rng() uint32 { return _this.rng }

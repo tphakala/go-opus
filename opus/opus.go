@@ -13,8 +13,6 @@ const Version = "0.1.0-dev"
 // map from the libopus OPUS_* error codes (see docs/api-design.md): OPUS_BAD_ARG
 // -> ErrBadArg, OPUS_BUFFER_TOO_SMALL -> ErrBufferTooSmall, OPUS_INVALID_PACKET
 // -> ErrInvalidPacket, OPUS_INTERNAL_ERROR/OPUS_ALLOC_FAIL -> ErrInternal.
-// ErrUnsupportedMode has no libopus analog; it flags the SILK-only and hybrid
-// packets that the phase 2 CELT-only decoder cannot yet handle.
 var (
 	// ErrBadArg reports an invalid argument (bad sample rate, channel count, or
 	// decode parameter).
@@ -28,10 +26,6 @@ var (
 	// ErrInternal reports an internal decoder error that should not occur for
 	// well-formed input.
 	ErrInternal = errors.New("opus: internal error")
-	// ErrUnsupportedMode reports a coding mode the decoder does not yet support.
-	// The phase 2 decoder is CELT-only; SILK-only and hybrid packets return this
-	// until phase 3 lands those decoders.
-	ErrUnsupportedMode = errors.New("opus: unsupported coding mode")
 )
 
 // Mode, Bandwidth, and FrameDuration re-export the packet-inspection types from
