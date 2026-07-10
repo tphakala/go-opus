@@ -98,12 +98,16 @@ linters:
           - predeclared
           - revive
           - unconvert
-      # Transliterated C names (underscores, short receivers) trip staticcheck's
-      # style checks; drop just those in the C-shaped packages.
+      # Transliterated C trips staticcheck style/simplify checks that would force
+      # the port to diverge from the reference. Drop just those in the C-shaped
+      # packages (correctness SA* checks still apply): ST1003/ST1016 (C names,
+      # short receivers), QF1008 (embedded-field selectors), QF1001 (De Morgan
+      # on conditionals, the C keeps `if (!(a < b))`), S1021 (the C keeps a
+      # separate `var x T; x = e` declaration and assignment).
       - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare)/
         linters:
           - staticcheck
-        text: "(ST1003|ST1016|QF1008)"
+        text: "(ST1003|ST1016|QF1001|QF1008|S1021)"
       # cgo differential harness: cgo pointer patterns and C-mirroring names.
       - path: internal/reftest/
         linters:

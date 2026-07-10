@@ -11,6 +11,11 @@
 #include "opus.h"
 #include "opus_private.h" /* MODE_CELT_ONLY, OPUS_SET_FORCE_MODE */
 #include "arch.h"         /* OPUS_FAST_INT64 */
+#include "entcode.h"      /* ec_ctx, ec_tell, ec_tell_frac, ec_range_bytes */
+#include "entenc.h"       /* ec_enc_* */
+#include "entdec.h"       /* ec_dec_* */
+#include <stdlib.h>
+#include <string.h>
 
 /*
  * Freeze the oracle configuration at compile time. A mis-flagged build (missing
@@ -154,4 +159,162 @@ uint64_t oracle_encoder_state_hash(OpusEncoder *enc, int channels)
         h *= FNV_PRIME;
     }
     return h;
+}
+
+/* ------------------------------ range coder -------------------------------- */
+
+struct oracle_ec {
+    ec_ctx ec;           /* the real libopus encoder/decoder state */
+    unsigned char *buf;  /* handle-owned storage; ec.buf points here */
+    int size;
+};
+
+oracle_ec *oracle_ec_enc_create(int size)
+{
+    oracle_ec *h = (oracle_ec *)calloc(1, sizeof(*h));
+    if (h == NULL) return NULL;
+    h->size = size;
+    h->buf = size > 0 ? (unsigned char *)calloc((size_t)size, 1) : NULL;
+    ec_enc_init(&h->ec, h->buf, (opus_uint32)size);
+    return h;
+}
+
+void oracle_ec_enc_encode(oracle_ec *h, unsigned fl, unsigned fh, unsigned ft)
+{ ec_encode(&h->ec, fl, fh, ft); }
+
+void oracle_ec_enc_encode_bin(oracle_ec *h, unsigned fl, unsigned fh, unsigned bits)
+{ ec_encode_bin(&h->ec, fl, fh, bits); }
+
+void oracle_ec_enc_bit_logp(oracle_ec *h, int val, unsigned logp)
+{ ec_enc_bit_logp(&h->ec, val, logp); }
+
+void oracle_ec_enc_icdf(oracle_ec *h, int s, const unsigned char *icdf, unsigned ftb)
+{ ec_enc_icdf(&h->ec, s, icdf, ftb); }
+
+void oracle_ec_enc_uint(oracle_ec *h, opus_uint32 fl, opus_uint32 ft)
+{ ec_enc_uint(&h->ec, fl, ft); }
+
+void oracle_ec_enc_bits(oracle_ec *h, opus_uint32 fl, unsigned bits)
+{ ec_enc_bits(&h->ec, fl, bits); }
+
+void oracle_ec_enc_patch_initial_bits(oracle_ec *h, unsigned val, unsigned nbits)
+{ ec_enc_patch_initial_bits(&h->ec, val, nbits); }
+
+void oracle_ec_enc_shrink(oracle_ec *h, opus_uint32 size)
+{ ec_enc_shrink(&h->ec, size); }
+
+void oracle_ec_enc_done(oracle_ec *h)
+{ ec_enc_done(&h->ec); }
+
+opus_uint32 oracle_ec_enc_range_bytes(oracle_ec *h)
+{ return ec_range_bytes(&h->ec); }
+
+oracle_ec *oracle_ec_dec_create(const unsigned char *buf, int size)
+{
+    oracle_ec *h = (oracle_ec *)calloc(1, sizeof(*h));
+    if (h == NULL) return NULL;
+    h->size = size;
+    h->buf = size > 0 ? (unsigned char *)calloc((size_t)size, 1) : NULL;
+    if (h->buf != NULL && buf != NULL) memcpy(h->buf, buf, (size_t)size);
+    ec_dec_init(&h->ec, h->buf, (opus_uint32)size);
+    return h;
+}
+
+unsigned oracle_ec_dec_decode(oracle_ec *h, unsigned ft)
+{ return ec_decode(&h->ec, ft); }
+
+unsigned oracle_ec_dec_decode_bin(oracle_ec *h, unsigned bits)
+{ return ec_decode_bin(&h->ec, bits); }
+
+void oracle_ec_dec_update(oracle_ec *h, unsigned fl, unsigned fh, unsigned ft)
+{ ec_dec_update(&h->ec, fl, fh, ft); }
+
+int oracle_ec_dec_bit_logp(oracle_ec *h, unsigned logp)
+{ return ec_dec_bit_logp(&h->ec, logp); }
+
+int oracle_ec_dec_icdf(oracle_ec *h, const unsigned char *icdf, unsigned ftb)
+{ return ec_dec_icdf(&h->ec, icdf, ftb); }
+
+opus_uint32 oracle_ec_dec_uint(oracle_ec *h, opus_uint32 ft)
+{ return ec_dec_uint(&h->ec, ft); }
+
+opus_uint32 oracle_ec_dec_bits(oracle_ec *h, unsigned bits)
+{ return ec_dec_bits(&h->ec, bits); }
+
+int oracle_ec_tell(oracle_ec *h)
+{ return ec_tell(&h->ec); }
+
+opus_uint32 oracle_ec_tell_frac(oracle_ec *h)
+{ return ec_tell_frac(&h->ec); }
+
+opus_uint32 oracle_ec_get_rng(oracle_ec *h)
+{ return h->ec.rng; }
+
+opus_uint32 oracle_ec_get_val(oracle_ec *h)
+{ return h->ec.val; }
+
+int oracle_ec_get_error(oracle_ec *h)
+{ return h->ec.error; }
+
+int oracle_ec_copy_out(oracle_ec *h, unsigned char *dst, int n)
+{
+    int m = n;
+    if ((opus_uint32)m > h->ec.storage) m = (int)h->ec.storage;
+    if (m > 0 && h->buf != NULL) memcpy(dst, h->buf, (size_t)m);
+    return m;
+}
+
+void oracle_ec_write_in(oracle_ec *h, const unsigned char *src, int n)
+{
+    if (n > 0 && h->buf != NULL) memcpy(h->buf, src, (size_t)n);
+}
+
+void oracle_ec_copy_region(oracle_ec *h, unsigned char *dst, int start, int n)
+{
+    if (n > 0 && h->buf != NULL) memcpy(dst, h->buf + start, (size_t)n);
+}
+
+void oracle_ec_write_region(oracle_ec *h, const unsigned char *src, int start, int n)
+{
+    if (n > 0 && h->buf != NULL) memcpy(h->buf + start, src, (size_t)n);
+}
+
+void oracle_ec_get_state(oracle_ec *h, oracle_ec_state *s)
+{
+    s->storage = h->ec.storage;
+    s->end_offs = h->ec.end_offs;
+    s->end_window = h->ec.end_window;
+    s->nend_bits = h->ec.nend_bits;
+    s->nbits_total = h->ec.nbits_total;
+    s->offs = h->ec.offs;
+    s->rng = h->ec.rng;
+    s->val = h->ec.val;
+    s->ext = h->ec.ext;
+    s->rem = h->ec.rem;
+    s->error = h->ec.error;
+}
+
+void oracle_ec_set_state(oracle_ec *h, const oracle_ec_state *s)
+{
+    /* buf is intentionally left untouched: it is the same storage the handle
+     * owns, exactly as C's `*enc = saved` keeps the buf pointer (both point into
+     * the same buffer for the whole RDO dance). */
+    h->ec.storage = s->storage;
+    h->ec.end_offs = s->end_offs;
+    h->ec.end_window = s->end_window;
+    h->ec.nend_bits = s->nend_bits;
+    h->ec.nbits_total = s->nbits_total;
+    h->ec.offs = s->offs;
+    h->ec.rng = s->rng;
+    h->ec.val = s->val;
+    h->ec.ext = s->ext;
+    h->ec.rem = s->rem;
+    h->ec.error = s->error;
+}
+
+void oracle_ec_destroy(oracle_ec *h)
+{
+    if (h == NULL) return;
+    free(h->buf);
+    free(h);
 }
