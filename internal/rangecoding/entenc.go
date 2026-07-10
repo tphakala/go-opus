@@ -383,6 +383,11 @@ func (_this *Encoder) Buffer() []byte { return _this.buf }
 // length of the head window buf[0:offs] (ec_range_bytes).
 func (_this *Encoder) RangeBytes() uint32 { return _this.offs }
 
+// Storage returns the current size of the output buffer in bytes (the ec_ctx
+// storage field, which EncShrink can reduce). CELT reads enc->storage*8 as a
+// budget in quant_fine_energy (celt/quant_bands.c).
+func (_this *Encoder) Storage() uint32 { return _this.storage }
+
 // Error returns nonzero if an error has occurred (ec_get_error).
 func (_this *Encoder) Error() int { return _this.error }
 
