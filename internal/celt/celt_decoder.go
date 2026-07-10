@@ -906,8 +906,8 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 	}
 	quantAllBands(0, m, start, end, X, Y, collapseMasks, nil, pulses, shortBlocks,
 		spreadDecision, dualStereo, intensity, tfRes,
-		int32(dlen*(8<<bitRes)-antiCollapseRsv), balance, dec, LM, codedBands,
-		&st.rng, st.disableInv)
+		int32(dlen*(8<<bitRes)-antiCollapseRsv), balance, nil, dec, LM, codedBands,
+		&st.rng, 0, st.disableInv)
 
 	antiCollapseOn := 0
 	if antiCollapseRsv > 0 {
