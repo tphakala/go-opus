@@ -1,0 +1,41 @@
+# Build artifacts
+/bin/
+*.exe
+*.test
+*.out
+
+# Coverage and profiling
+coverage.out
+coverage.txt
+*.cov
+*.prof
+*.pprof
+
+# Conformance test vectors are fetched and sha256-verified, never committed
+# (see scripts/fetch-vectors.sh and testdata/vectors.sha256). Keep the scripts
+# and checksums; ignore the downloaded payloads.
+/testdata/vectors/
+/testdata/*.bit
+/testdata/*.bit.dec
+/testdata/*.tar.gz
+/testdata/*.zip
+
+# Local corpus (bird clips, speech, music) used by differential tests
+/testdata/corpus/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.serena/
+
+# Local tool caches
+cache/
+
+# CodeGraph index database (local code intelligence)
+.codegraph/
+
+# NOTE: docs/ is intentionally tracked in the Forgejo repo (it is the normative
+# plan). Before the GitHub publish after the phase 2 gate, docs/ is excluded
+# from the public mirror, mirroring go-flac.
