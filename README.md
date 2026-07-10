@@ -32,6 +32,22 @@ The internal codec packages (`internal/celt`, `internal/silk`, the range coder,
 and the fixed-point math) are deliberately written in a C-shaped style so they
 stay diffable against upstream libopus; the public API is idiomatic Go.
 
+## Why fixed-point
+
+go-opus tracks the fixed-point build of libopus (`FIXED_POINT +
+DISABLE_FLOAT_API`), not the float build, for one overriding reason: integer
+arithmetic is exactly reproducible across every CPU and compiler, whereas float
+output drifts bit-for-bit (FMA contraction, SIMD reassociation, rounding modes).
+That determinism is what makes bit-exact differential testing against the C
+reference possible at all, and it means go-opus produces byte-identical,
+reproducible output on every platform, which is what archival and analysis
+pipelines need. Quality is that of the fixed-point reference (both libopus builds
+are RFC-conformant and perceptually equivalent); go-opus reproduces it exactly.
+Fixed-point is also SIMD-friendly: the integer multiply-accumulate kernels map
+straight onto SSE and NEON, and because integer SIMD is exact, accelerated
+kernels can stay bit-exact against the same test suites (planned for a later
+phase, behind the scalar function signatures).
+
 ## Packages
 
 - `opus` - the raw packet codec: a `Decoder` (and, later, an `Encoder`)
