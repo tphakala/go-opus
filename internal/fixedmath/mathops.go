@@ -125,6 +125,26 @@ func Celt_sqrt(x int32) int32 {
 	return rt
 }
 
+// Celt_sqrt32 performs fixed-point arithmetic to approximate the square root.
+// When the input is in Qx format, the output will be in Q(x/2 + 16) format.
+// (celt/mathops.c:164)
+func Celt_sqrt32(x int32) int32 {
+	var k int
+	var xFrac int32
+	if x == 0 {
+		return 0
+	} else if x >= 1073741824 {
+		return 2147483647 // 2^31 - 1
+	}
+	k = Celt_ilog2(x) >> 1
+	xFrac = VSHR32(x, 2*(k-14)-1)
+	xFrac = MULT32_32_Q31(Celt_rsqrt_norm32(xFrac), xFrac)
+	if k < 12 {
+		return PSHR32(xFrac, 12-k)
+	}
+	return SHL32(xFrac, k-12)
+}
+
 // celt_cos_pi_2 is _celt_cos_pi_2 (celt/mathops.c:184).
 func celt_cos_pi_2(x int16) int16 {
 	var x2 int16
@@ -188,6 +208,23 @@ func Celt_rcp(x int32) int32 {
 	r = celt_rcp_norm16(EXTRACT16(VSHR32(x, i-15) - 32768))
 	// r is now the Q15 solution to 2/(n+1).
 	return VSHR32(EXTEND32(r), i-16)
+}
+
+// Celt_rcp_norm32 computes a 32-bit approximate reciprocal (1/x) for a
+// normalized Q31 input, resulting in a Q30 output. The expected input range is
+// [0.5f, 1.0f) in Q31 and the expected output range is [1.0f, 2.0f) in Q30.
+// (celt/mathops.c:266)
+func Celt_rcp_norm32(x int32) int32 {
+	var rQ30 int32
+	// celt_sig_assert(x >= 1073741824)
+	rQ30 = SHL32(EXTEND32(celt_rcp_norm16(EXTRACT16(SHR32(x, 15)-32768))), 16)
+	// Solving f(y) = a - 1/y using the Newton Method (f(y)' = 1/y^2):
+	//   r = r - f(r)/f(r)' = r - r*(r*x - 1)
+	// where r is 1/y's approximation and x is a, the function input. It adds 1 to
+	// avoid overflow; -1.0f in Q30 is -1073741824.
+	return SUB32(rQ30, ADD32(SHL32(
+		MULT32_32_Q31(ADD32(MULT32_32_Q31(rQ30, x), -1073741824),
+			rQ30), 1), 1))
 }
 
 // D0..D3 constants for Celt_exp2_frac (celt/mathops.h:413-416).
