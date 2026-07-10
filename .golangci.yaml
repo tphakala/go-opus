@@ -86,7 +86,7 @@ linters:
     generated: lax
     rules:
       # Transliteration packages: relax style/complexity, keep correctness.
-      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare)/
+      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare|opusdec)/
         linters:
           - dupl
           - gocognit
@@ -105,7 +105,7 @@ linters:
       # fight diffability: tagged switches over the C's if/else, De Morgan on
       # conditionals, embedded-field selectors, and so on), and S1021 (the C
       # keeps a separate `var x T; x = e` declaration and assignment).
-      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare)/
+      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare|opusdec)/
         linters:
           - staticcheck
         text: "(ST1003|ST1016|QF1|S1021)"

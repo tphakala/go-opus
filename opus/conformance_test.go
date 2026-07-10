@@ -17,12 +17,12 @@ import (
 // when it is absent.
 const vectorsDir = "../testdata/vectors/opus_newvectors"
 
-// celtVectors are the pure-CELT RFC 6716 test vectors, the phase 2 gate set
-// (docs/test-vectors.md: "Pure-CELT vectors for the phase 2 gate: 01, 07, 11").
-// Every packet in these three streams is CELT-only, so a CELT-only decoder can
-// decode them end to end. Each stream decodes to stereo at 48 kHz; the .dec
-// reference is the stereo opus_demo decode output.
-var celtVectors = []string{"01", "07", "11"}
+// allVectors are all 12 RFC 6716 test vectors, the phase 3 gate set. Vectors
+// 01/07/11 are pure CELT, 02/03/04 pure SILK, 05/06 pure hybrid, and
+// 08/09/10/12 exercise the mode-transition machine (CELT<->SILK<->hybrid with
+// the redundancy crossfades). Each stream is decoded to stereo (.dec reference)
+// and mono (.m.dec reference) at 48 kHz through the public opus.Decoder.
+var allVectors = []string{"01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"}
 
 // bitRecord is one opus_demo record: the encoder final range and the packet.
 type bitRecord struct {
@@ -55,7 +55,7 @@ func readBitRecords(t *testing.T, data []byte) []bitRecord {
 	return recs
 }
 
-// readRefInt16 reads a little-endian 16-bit PCM reference (.dec) file.
+// readRefInt16 reads a little-endian 16-bit PCM reference (.dec / .m.dec) file.
 func readRefInt16(t *testing.T, path string) []int16 {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -69,19 +69,51 @@ func readRefInt16(t *testing.T, path string) []int16 {
 	return out
 }
 
-// TestCELTConformance is the phase 2 gate: it decodes the pure-CELT RFC vectors
-// end to end through the public opus.Decoder and asserts, per vector, that (a)
-// every packet's decoder final range exactly matches the range recorded in the
-// bitstream (bit-exact entropy-decode conformance) and (b) the full decoded PCM
-// passes the ported opus_compare against the RFC 8251 stereo reference at the
-// spec threshold (Quality >= 0, PASS). It reports the opus_compare quality per
-// vector.
-func TestCELTConformance(t *testing.T) {
+// decodeVector decodes every packet of recs through a fresh channels-channel
+// decoder at 48 kHz and returns the concatenated interleaved PCM plus, for the
+// stereo decode, the per-packet final-range match count. The final range is a
+// property of the entropy decode and is independent of the output channel count,
+// so it is only asserted on the stereo pass.
+func decodeVector(t *testing.T, recs []bitRecord, channels int) (pcm []int16, packets, rangeMatches int, firstMismatch string) {
+	t.Helper()
+	dec, err := opus.NewDecoder(48000, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder(48000,%d): %v", channels, err)
+	}
+	buf := make([]int16, 5760*channels) // 120 ms at 48 kHz: max packet
+	for i, rec := range recs {
+		if rec.packet == nil { // opus_demo lost-frame marker (none in the RFC vectors)
+			continue
+		}
+		packets++
+		n, err := dec.Decode(rec.packet, buf)
+		if err != nil {
+			t.Fatalf("packet %d (%d bytes): decode failed: %v", i, len(rec.packet), err)
+		}
+		pcm = append(pcm, buf[:n*channels]...)
+		if got := dec.FinalRange(); got == rec.finalRange {
+			rangeMatches++
+		} else if firstMismatch == "" {
+			firstMismatch = fmt.Sprintf("packet=%d want=%d got=%d", i, rec.finalRange, got)
+		}
+	}
+	return pcm, packets, rangeMatches, firstMismatch
+}
+
+// TestConformance is the phase 3 gate: it decodes all 12 RFC 6716 vectors end to
+// end through the public opus.Decoder and asserts, per vector, that (a) every
+// packet's decoder final range exactly matches the range recorded in the
+// bitstream (bit-exact entropy-decode conformance, which must hold across the
+// CELT-only, SILK-only, hybrid and mode-transition vectors) and (b) the full
+// decoded PCM passes the ported opus_compare against the RFC 8251 stereo (.dec)
+// and mono (.m.dec) references at the spec threshold (Quality >= 0, PASS). It
+// reports the per-vector final-range match and opus_compare quality.
+func TestConformance(t *testing.T) {
 	if _, err := os.Stat(vectorsDir); err != nil {
 		t.Skipf("test vectors not present (%v); run scripts/fetch-vectors.sh", err)
 	}
 
-	for _, name := range celtVectors {
+	for _, name := range allVectors {
 		t.Run("vector"+name, func(t *testing.T) {
 			bitPath := filepath.Join(vectorsDir, "testvector"+name+".bit")
 			bitData, err := os.ReadFile(bitPath)
@@ -90,65 +122,34 @@ func TestCELTConformance(t *testing.T) {
 			}
 			recs := readBitRecords(t, bitData)
 
-			// Decode the whole stream to stereo at 48 kHz, the reference config.
-			dec, err := opus.NewDecoder(48000, 2)
-			if err != nil {
-				t.Fatalf("NewDecoder: %v", err)
-			}
-			buf := make([]int16, 5760*2) // 120 ms at 48 kHz, stereo: max packet
-			var pcm []int16
-
-			var packets, rangeMatches, nonCELT, lost int
-			var firstMismatch string
-			for i, rec := range recs {
-				if rec.packet == nil { // opus_demo lost-frame marker
-					lost++
-					continue
-				}
-				mode, _, _, _ := opus.ParseTOC(rec.packet[0])
-				if mode != opus.ModeCELTOnly {
-					// The census says 01/07/11 are pure CELT; note and skip if not.
-					nonCELT++
-					t.Logf("packet %d is %s, not CELT (unexpected for a pure-CELT vector); skipping", i, mode)
-					continue
-				}
-				packets++
-
-				n, err := dec.Decode(rec.packet, buf)
-				if err != nil {
-					t.Fatalf("packet %d (%d bytes): decode failed: %v", i, len(rec.packet), err)
-				}
-				pcm = append(pcm, buf[:n*2]...)
-
-				if got := dec.FinalRange(); got == rec.finalRange {
-					rangeMatches++
-				} else if firstMismatch == "" {
-					firstMismatch = fmt.Sprintf("packet=%d want=%d got=%d", i, rec.finalRange, got)
-				}
-			}
-
+			// Stereo decode: final-range check + opus_compare vs the stereo .dec.
+			stereoPCM, packets, rangeMatches, firstMismatch := decodeVector(t, recs, 2)
 			if rangeMatches != packets {
 				t.Errorf("final-range match %d/%d packets (first mismatch %s)", rangeMatches, packets, firstMismatch)
 			} else {
 				t.Logf("final-range: %d/%d packets match exactly", rangeMatches, packets)
 			}
-			if lost > 0 {
-				t.Logf("skipped %d opus_demo lost-frame markers", lost)
+
+			stereoRef := readRefInt16(t, filepath.Join(vectorsDir, "testvector"+name+".dec"))
+			stereoRes, err := opuscompare.CompareInt16(stereoRef, stereoPCM, opuscompare.Config{Channels: 2})
+			if err != nil {
+				t.Fatalf("opus_compare stereo: %v (decoded %d samples, reference %d)", err, len(stereoPCM), len(stereoRef))
 			}
-			if nonCELT > 0 {
-				t.Logf("skipped %d non-CELT packets (deferred to phase 3)", nonCELT)
+			t.Logf("stereo opus_compare: Quality=%.4f Passed=%v Frames=%d", stereoRes.Quality, stereoRes.Passed, stereoRes.Frames)
+			if !stereoRes.Passed {
+				t.Errorf("vector %s FAILS stereo opus_compare: Quality=%.4f (want >= 0)", name, stereoRes.Quality)
 			}
 
-			// opus_compare against the stereo reference (.dec).
-			refPath := filepath.Join(vectorsDir, "testvector"+name+".dec")
-			ref := readRefInt16(t, refPath)
-			res, err := opuscompare.CompareInt16(ref, pcm, opuscompare.Config{Channels: 2})
+			// Mono decode: opus_compare vs the mono .m.dec reference.
+			monoPCM, _, _, _ := decodeVector(t, recs, 1)
+			monoRef := readRefInt16(t, filepath.Join(vectorsDir, "testvector"+name+"m.dec"))
+			monoRes, err := opuscompare.CompareInt16(monoRef, monoPCM, opuscompare.Config{Channels: 1})
 			if err != nil {
-				t.Fatalf("opus_compare: %v (decoded %d samples, reference %d)", err, len(pcm), len(ref))
+				t.Fatalf("opus_compare mono: %v (decoded %d samples, reference %d)", err, len(monoPCM), len(monoRef))
 			}
-			t.Logf("opus_compare: Quality=%.4f Passed=%v Frames=%d", res.Quality, res.Passed, res.Frames)
-			if !res.Passed {
-				t.Errorf("vector %s FAILS opus_compare: Quality=%.4f (want >= 0)", name, res.Quality)
+			t.Logf("mono opus_compare: Quality=%.4f Passed=%v Frames=%d", monoRes.Quality, monoRes.Passed, monoRes.Frames)
+			if !monoRes.Passed {
+				t.Errorf("vector %s FAILS mono opus_compare: Quality=%.4f (want >= 0)", name, monoRes.Quality)
 			}
 		})
 	}
@@ -170,4 +171,47 @@ func TestDecoderRejectsBadConfig(t *testing.T) {
 			t.Errorf("NewDecoder(%d,1) err = %v, want nil", rate, err)
 		}
 	}
+}
+
+// FuzzDecode asserts the decoder never panics on arbitrary input. It feeds fuzz
+// bytes as an Opus packet to a fresh decoder (and, on nil, exercises the PLC
+// entry), for both mono and stereo, requiring only that Decode returns rather
+// than panics or writes out of bounds.
+func FuzzDecode(f *testing.F) {
+	// Seed with a few real packets from a vector when available, plus edge cases.
+	if bitData, err := os.ReadFile(filepath.Join(vectorsDir, "testvector08.bit")); err == nil {
+		off, seeded := 0, 0
+		for off+8 <= len(bitData) && seeded < 16 {
+			length := int(binary.BigEndian.Uint32(bitData[off:]))
+			off += 8
+			if length == 0 || off+length > len(bitData) {
+				continue
+			}
+			f.Add(bitData[off : off+length])
+			off += length
+			seeded++
+		}
+	}
+	f.Add([]byte{})
+	f.Add([]byte{0x00})
+	f.Add([]byte{0xFF})
+	f.Add([]byte{0xFF, 0xFF})
+	f.Add([]byte{0x0C, 0x00, 0x00}) // hybrid TOC, code 0
+	f.Add([]byte{0x60, 0x03})       // SILK code-3, truncated
+
+	f.Fuzz(func(t *testing.T, pkt []byte) {
+		for _, channels := range []int{1, 2} {
+			dec, err := opus.NewDecoder(48000, channels)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			pcm := make([]int16, 5760*channels)
+			// Must not panic. Any (n, err) result is acceptable; a successful
+			// decode must not claim more samples than the buffer can hold.
+			n, derr := dec.Decode(pkt, pcm)
+			if derr == nil && n*channels > len(pcm) {
+				t.Fatalf("Decode reported %d samples/ch (%d total) into a %d buffer", n, n*channels, len(pcm))
+			}
+		}
+	})
 }
