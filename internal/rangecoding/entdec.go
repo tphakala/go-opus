@@ -268,6 +268,16 @@ func (_this *Decoder) DecBits(_bits uint32) uint32 {
 // Tell returns the number of whole bits used so far (ec_tell).
 func (_this *Decoder) Tell() int { return ecTell(_this.nbits_total, _this.rng) }
 
+// SetTellForSilence fast-forwards the whole-bit counter so that Tell() reports
+// targetBits, mirroring celt_decoder.c:1324 (dec->nbits_total += tell -
+// ec_tell(dec)) when the CELT silence flag is set: the decoder pretends it has
+// consumed all remaining bits so every subsequent budget check fails and no more
+// symbols are read. ADDED for the phase-2 CELT decoder port; it is the only
+// write accessor the port needs on the range decoder.
+func (_this *Decoder) SetTellForSilence(targetBits int) {
+	_this.nbits_total += targetBits - _this.Tell()
+}
+
 // TellFrac returns the number of bits used so far scaled by 2**BITRES
 // (ec_tell_frac).
 func (_this *Decoder) TellFrac() uint32 { return ecTellFrac(_this.nbits_total, _this.rng) }
@@ -278,6 +288,11 @@ func (_this *Decoder) Error() int { return _this.error }
 // RangeBytes returns the number of range coder bytes consumed so far
 // (ec_range_bytes).
 func (_this *Decoder) RangeBytes() uint32 { return _this.offs }
+
+// Storage returns the size of the input buffer in bytes (the ec_ctx storage
+// field). CELT reads dec->storage*8 as its total bit budget (e.g.
+// unquant_coarse_energy / unquant_fine_energy in celt/quant_bands.c).
+func (_this *Decoder) Storage() uint32 { return _this.storage }
 
 // Rng returns the current range register (the rng field), for tests and
 // differential comparison.
