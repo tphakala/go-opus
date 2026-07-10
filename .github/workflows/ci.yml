@@ -54,6 +54,27 @@ jobs:
   # directly, so only a C compiler is needed (no autotools). This job is the
   # phase 0 gate; it runs on amd64 and arm64. It stays green until the phase 0
   # reftest harness lands (no `refc`-tagged tests yet).
+  reftest:
+    name: Reftest (libopus oracle)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Run differential harness
+        env:
+          CGO_ENABLED: '1'
+        run: go test -tags refc -timeout 20m ./internal/reftest/...
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

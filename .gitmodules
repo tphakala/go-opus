@@ -1,0 +1,3 @@
+[submodule "internal/reftest/libopus"]
+	path = internal/reftest/libopus
+	url = https://github.com/xiph/opus.git
