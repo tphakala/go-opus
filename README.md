@@ -12,7 +12,7 @@ the strong sense: byte-identical to libopus.
 
 - **Decoder: complete.** The full Opus decoder passes RFC 6716 conformance,
   decoding all 12 official test vectors with the per-packet range state matching
-  libopus exactly. This covers CELT, SILK and hybrid modes, mode switching and
+  libopus exactly. This covers CELT, SILK, and hybrid modes, mode switching and
   redundancy (including the SILK/CELT crossovers), packet-loss concealment, and
   inband FEC/LBRR.
 - **Encoder: in development.** A CELT-only fixed-point encoder is being built to
