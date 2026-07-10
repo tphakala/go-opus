@@ -1,0 +1,271 @@
+package packet
+
+// Repacketizer merges the frames of several equally-configured Opus packets, or
+// splits one packet, into new packets. It transliterates the OpusRepacketizer
+// API from libopus src/repacketizer.c (init, cat, out_range, out,
+// get_nb_frames). Extension/DRED padding metadata handled by the C code is out
+// of scope here; padding is treated as opaque filler.
+//
+// Typical use: init, Cat one or more input packets whose TOC bytes agree in the
+// mode/bandwidth/duration/stereo fields (the low two frame-count bits may
+// differ), then Out into a caller-provided buffer.
+type Repacketizer struct {
+	toc       byte
+	nbFrames  int
+	frames    [MaxFrames][]byte
+	framesize int // samples per frame at 8 kHz, used for the 120 ms cap
+}
+
+// NewRepacketizer returns an initialised, empty Repacketizer.
+func NewRepacketizer() *Repacketizer { return &Repacketizer{} }
+
+// Init resets the repacketizer to empty so it can be reused. It mirrors
+// opus_repacketizer_init().
+func (rp *Repacketizer) Init() { rp.nbFrames = 0 }
+
+// GetNbFrames returns the number of frames accumulated so far.
+func (rp *Repacketizer) GetNbFrames() int { return rp.nbFrames }
+
+// Cat appends the frames of data to the repacketizer. The first packet fixes
+// the TOC; every subsequent packet must share the mode/bandwidth/duration/
+// stereo configuration (TOC byte with the low two bits masked off). It returns
+// ErrInvalidPacket on a configuration mismatch, a malformed packet, or when the
+// combined duration would exceed 120 ms. Mirrors opus_repacketizer_cat().
+func (rp *Repacketizer) Cat(data []byte) error {
+	return rp.catImpl(data, false)
+}
+
+func (rp *Repacketizer) catImpl(data []byte, selfDelimited bool) error {
+	if len(data) < 1 {
+		return ErrInvalidPacket
+	}
+	if rp.nbFrames == 0 {
+		rp.toc = data[0]
+		rp.framesize = samplesPerFrame(data[0], 8000)
+	} else if rp.toc&0xFC != data[0]&0xFC {
+		return ErrInvalidPacket
+	}
+
+	currNbFrames, err := CountFrames(data)
+	if err != nil {
+		return err
+	}
+	if currNbFrames < 1 {
+		return ErrInvalidPacket
+	}
+	// Enforce the 120 ms (960 samples at 8 kHz) maximum across all frames.
+	if (currNbFrames+rp.nbFrames)*rp.framesize > 960 {
+		return ErrInvalidPacket
+	}
+
+	pkt, err := parse(data, selfDelimited)
+	if err != nil {
+		return err
+	}
+	if rp.nbFrames+len(pkt.Frames) > MaxFrames {
+		return ErrInvalidPacket
+	}
+	for _, f := range pkt.Frames {
+		rp.frames[rp.nbFrames] = f
+		rp.nbFrames++
+	}
+	return nil
+}
+
+// Out writes all accumulated frames as a single packet into data and returns the
+// packet length, or ErrBufferTooSmall if data is too short. Mirrors
+// opus_repacketizer_out().
+func (rp *Repacketizer) Out(data []byte) (int, error) {
+	return rp.outRangeImpl(0, rp.nbFrames, data, false, false)
+}
+
+// OutRange writes frames [begin, end) as a single packet into data and returns
+// the packet length. begin and end are frame indices in [0, GetNbFrames()].
+// Mirrors opus_repacketizer_out_range().
+func (rp *Repacketizer) OutRange(begin, end int, data []byte) (int, error) {
+	return rp.outRangeImpl(begin, end, data, false, false)
+}
+
+// outRangeImpl transliterates opus_repacketizer_out_range_impl() from libopus,
+// without the extension handling. It selects frame-count code 0/1/2/3, writes
+// the header and frame lengths, copies the frame payloads, and optionally pads
+// to len(data).
+func (rp *Repacketizer) outRangeImpl(begin, end int, data []byte, selfDelimited, pad bool) (int, error) {
+	if begin < 0 || begin >= end || end > rp.nbFrames {
+		return 0, ErrBadArg
+	}
+	frames := rp.frames[begin:end]
+	count := len(frames)
+	maxlen := len(data)
+
+	ptr, totSize, err := rp.writeHeader(data, frames, selfDelimited, pad)
+	if err != nil {
+		return 0, err
+	}
+
+	// Self-delimited framing carries the last frame length explicitly.
+	if selfDelimited {
+		ptr += encodeSize(len(frames[count-1]), data[ptr:])
+	}
+
+	for _, f := range frames {
+		copy(data[ptr:], f)
+		ptr += len(f)
+	}
+
+	if pad { // fill any remaining space with zero padding bytes
+		for ptr < maxlen {
+			data[ptr] = 0
+			ptr++
+		}
+	}
+	return totSize, nil
+}
+
+// writeHeader writes the TOC byte plus any count byte, padding descriptor, and
+// frame-length fields, returning the write cursor positioned at the first frame
+// payload and the running total size. It first tries code 0/1/2 for one or two
+// frames, then promotes to code 3 when there are more than two frames or when
+// padding must be added.
+func (rp *Repacketizer) writeHeader(data []byte, frames [][]byte, selfDelimited, pad bool) (ptr, totSize int, err error) {
+	count := len(frames)
+	maxlen := len(data)
+	totSize = selfDelimHeaderSize(frames, selfDelimited)
+
+	switch count {
+	case 1:
+		// Code 0: a single frame.
+		totSize += len(frames[0]) + 1
+		if totSize > maxlen {
+			return 0, 0, ErrBufferTooSmall
+		}
+		data[0] = rp.toc & 0xFC
+		ptr = 1
+	case 2:
+		ptr, totSize, err = rp.writeTwoFrames(data, frames, totSize)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+
+	if count > 2 || (pad && totSize < maxlen) {
+		return rp.writeCode3(data, frames, selfDelimited, pad)
+	}
+	return ptr, totSize, nil
+}
+
+// writeTwoFrames writes a code 1 (two equal frames) or code 2 (two unequal
+// frames) header.
+func (rp *Repacketizer) writeTwoFrames(data []byte, frames [][]byte, totSize int) (ptr, newTot int, err error) {
+	maxlen := len(data)
+	if len(frames[1]) == len(frames[0]) {
+		// Code 1: two frames of equal length.
+		totSize += 2*len(frames[0]) + 1
+		if totSize > maxlen {
+			return 0, 0, ErrBufferTooSmall
+		}
+		data[0] = (rp.toc & 0xFC) | 0x1
+		return 1, totSize, nil
+	}
+	// Code 2: two frames, the first length signalled explicitly.
+	totSize += len(frames[0]) + len(frames[1]) + 2
+	if len(frames[0]) >= 252 {
+		totSize++
+	}
+	if totSize > maxlen {
+		return 0, 0, ErrBufferTooSmall
+	}
+	data[0] = (rp.toc & 0xFC) | 0x2
+	ptr = 1 + encodeSize(len(frames[0]), data[1:])
+	return ptr, totSize, nil
+}
+
+// writeCode3 writes a code 3 header (count byte, optional padding descriptor,
+// and VBR frame-length fields), returning the cursor at the first frame payload.
+func (rp *Repacketizer) writeCode3(data []byte, frames [][]byte, selfDelimited, pad bool) (ptr, totSize int, err error) {
+	count := len(frames)
+	maxlen := len(data)
+	totSize = selfDelimHeaderSize(frames, selfDelimited)
+
+	vbr := false
+	for i := 1; i < count; i++ {
+		if len(frames[i]) != len(frames[0]) {
+			vbr = true
+			break
+		}
+	}
+
+	if vbr {
+		totSize += 2
+		for i := range count - 1 {
+			totSize += 1 + len(frames[i])
+			if len(frames[i]) >= 252 {
+				totSize++
+			}
+		}
+		totSize += len(frames[count-1])
+		if totSize > maxlen {
+			return 0, 0, ErrBufferTooSmall
+		}
+		data[0] = (rp.toc & 0xFC) | 0x3
+		data[1] = byte(count) | 0x80
+	} else {
+		totSize += count*len(frames[0]) + 2
+		if totSize > maxlen {
+			return 0, 0, ErrBufferTooSmall
+		}
+		data[0] = (rp.toc & 0xFC) | 0x3
+		data[1] = byte(count)
+	}
+	ptr = 2
+
+	padAmount := 0
+	if pad {
+		padAmount = maxlen - totSize
+	}
+	if padAmount != 0 {
+		ptr, err = writePadding(data, ptr, totSize, padAmount)
+		if err != nil {
+			return 0, 0, err
+		}
+		totSize += padAmount
+	}
+
+	if vbr { // frame-length fields follow the padding descriptor
+		for i := range count - 1 {
+			ptr += encodeSize(len(frames[i]), data[ptr:])
+		}
+	}
+	return ptr, totSize, nil
+}
+
+// writePadding sets the padding flag in the count byte and writes the padding
+// length descriptor: a run of 0xFF bytes followed by a final remainder byte.
+func writePadding(data []byte, ptr, totSize, padAmount int) (int, error) {
+	maxlen := len(data)
+	data[1] |= 0x40
+	nb255s := (padAmount - 1) / 255
+	if totSize+nb255s+1 > maxlen {
+		return 0, ErrBufferTooSmall
+	}
+	for range nb255s {
+		data[ptr] = 255
+		ptr++
+	}
+	data[ptr] = byte(padAmount - 255*nb255s - 1)
+	ptr++
+	return ptr, nil
+}
+
+// selfDelimHeaderSize returns the number of extra header bytes self-delimited
+// framing needs for the explicit last-frame length: 1, or 2 when that frame is
+// at least 252 bytes.
+func selfDelimHeaderSize(frames [][]byte, selfDelimited bool) int {
+	if !selfDelimited {
+		return 0
+	}
+	if len(frames[len(frames)-1]) >= 252 {
+		return 2
+	}
+	return 1
+}
