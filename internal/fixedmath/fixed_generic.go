@@ -88,10 +88,10 @@ func ROUND16(x int32, a int) int16 { return EXTRACT16(PSHR32(x, a)) }
 // SROUND16 shifts by a with round-to-nearest, saturates to the int16 range, then
 // truncates to 16 bits. (fixed_generic.h:141)
 //
-// NOTE: internal/celt carries package-local duplicates of these three macros
-// (sround16 and div32 in celt_lpc.go, div32_16 in bands_math.go) that predate
-// this file. They must stay bit-identical to these; the direct differential test
-// in internal/reftest/oracle guards the definitions here against drift.
+// NOTE: internal/celt keeps package-local wrappers (sround16 and div32 in
+// celt_lpc.go, div32_16 in bands_math.go) for their pre-existing decoder call
+// sites; they delegate to these three functions, so there is a single
+// implementation to keep bit-exact.
 func SROUND16(x int32, a int) int16 { return EXTRACT16(SATURATE(PSHR32(x, a), 32767)) }
 
 // DIV32 is a 32-bit integer division. (fixed_generic.h:203)
