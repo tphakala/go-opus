@@ -541,3 +541,112 @@ func TestEncodeRateModes(t *testing.T) {
 		})
 	}
 }
+
+// TestEncoderBitrateDoesNotWrap pins the 64-bit-to-int32 narrowing in NewEncoder.
+// EncoderConfig.Bitrate is an int, so a value above MaxInt32 wraps on conversion to
+// the opus_int32 the ctl takes, and the wrap is silent: 4294966296 wraps to -1000,
+// which is OPUS_AUTO, so the encoder quietly ignores the requested bitrate instead
+// of clamping to the documented [500, 750000*Channels] maximum. Nothing in a packet
+// reveals that, so no differential test can catch it.
+func TestEncoderBitrateDoesNotWrap(t *testing.T) {
+	const ch = 1
+	maxBitrate := 750000 * ch
+
+	ref := encodeOneFrame(t, EncoderConfig{SampleRate: 48000, Channels: ch, Bitrate: maxBitrate})
+	auto := encodeOneFrame(t, EncoderConfig{SampleRate: 48000, Channels: ch})
+
+	if bytes.Equal(ref, auto) {
+		t.Fatal("vacuous: the clamped-max bitrate encodes identically to OPUS_AUTO, so " +
+			"this test cannot tell a wrap from a clamp")
+	}
+
+	for _, bitrate := range []int{
+		maxBitrate + 1,     // just over the documented ceiling
+		1 << 31,            // MaxInt32 + 1: the first value that wraps
+		4294966296,         // wraps to -1000 == OPUS_AUTO: the silent case
+		4294967396,         // wraps to 100: would clamp UP to 500, not down to the max
+		math.MaxInt32 * 16, // absurd, still must clamp rather than wrap
+	} {
+		got := encodeOneFrame(t, EncoderConfig{SampleRate: 48000, Channels: ch, Bitrate: bitrate})
+		if !bytes.Equal(got, ref) {
+			if bytes.Equal(got, auto) {
+				t.Errorf("Bitrate=%d wrapped to OPUS_AUTO: the requested bitrate was "+
+					"silently ignored, want a clamp to %d", bitrate, maxBitrate)
+				continue
+			}
+			t.Errorf("Bitrate=%d did not clamp to %d (packet differs from the clamped-max "+
+				"reference)", bitrate, maxBitrate)
+		}
+	}
+}
+
+// TestEncoderFinalRangeZeroedOnError pins a value the packet gate cannot see.
+// opus_encode_native zeroes st->rangeFinal BEFORE its rejection rules
+// (opus_encoder.c:1223), so in libopus a rejected call leaves OPUS_GET_FINAL_RANGE
+// reading 0. Returning the previous packet's range instead would let a consumer
+// compare ranges against a reference decoder and silently succeed on a frame that
+// was never encoded.
+func TestEncoderFinalRangeZeroedOnError(t *testing.T) {
+	e, err := NewEncoder(EncoderConfig{SampleRate: 48000, Channels: 1})
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	pcm := make([]int16, 960)
+	for i := range pcm {
+		pcm[i] = int16(i * 7 % 4096)
+	}
+	buf := make([]byte, 1500)
+
+	if _, err := e.Encode(pcm, buf); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if e.FinalRange() == 0 {
+		t.Fatal("vacuous: FinalRange is 0 after a SUCCESSFUL encode, so this test cannot " +
+			"detect a stale range after a failed one")
+	}
+
+	for _, tc := range []struct {
+		name string
+		pcm  []int16
+		buf  []byte
+	}{
+		{"bad frame size", make([]int16, 961), buf},
+		{"unsupported duration", make([]int16, 1920), buf},
+		{"empty buffer", pcm, nil},
+		{"empty pcm", nil, buf},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := e.Encode(tc.pcm, tc.buf); err == nil {
+				t.Fatalf("Encode(%s) succeeded, want an error", tc.name)
+			}
+			if got := e.FinalRange(); got != 0 {
+				t.Errorf("FinalRange after a rejected Encode = %#x, want 0 "+
+					"(libopus zeroes rangeFinal before its rejection rules, "+
+					"opus_encoder.c:1223); this is the previous packet's range", got)
+			}
+		})
+		// Re-prime so each subtest starts from a non-zero range.
+		if _, err := e.Encode(pcm, buf); err != nil {
+			t.Fatalf("re-prime Encode: %v", err)
+		}
+	}
+}
+
+// encodeOneFrame encodes a single deterministic frame and returns the packet.
+func encodeOneFrame(t *testing.T, cfg EncoderConfig) []byte {
+	t.Helper()
+	e, err := NewEncoder(cfg)
+	if err != nil {
+		t.Fatalf("NewEncoder(%+v): %v", cfg, err)
+	}
+	pcm := make([]int16, 960*cfg.Channels)
+	for i := range pcm {
+		pcm[i] = int16((i*2654435761)>>16) % 8192
+	}
+	buf := make([]byte, 4000)
+	n, err := e.Encode(pcm, buf)
+	if err != nil {
+		t.Fatalf("Encode(%+v): %v", cfg, err)
+	}
+	return bytes.Clone(buf[:n])
+}

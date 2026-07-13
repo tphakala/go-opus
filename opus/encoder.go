@@ -143,7 +143,20 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 
 	bitrate := int32(opusenc.OpusAuto)
 	if cfg.Bitrate > 0 {
-		bitrate = int32(cfg.Bitrate)
+		// Clamp in Go BEFORE narrowing to int32. EncoderConfig.Bitrate is a 64-bit
+		// int, so a value above MaxInt32 wraps on conversion and silently becomes
+		// something else entirely: 4294966296 wraps to -1000, which is OPUS_AUTO, so
+		// the encoder ignores the caller's request without any error. The C ctl takes
+		// an opus_int32 and cannot express these inputs at all, so there is no C
+		// behaviour to match here; clamping honours the documented
+		// [500, 750000*Channels] contract rather than wrapping into it. Values that
+		// do fit int32 are left to SetBitrate, which applies the same clamp the C does
+		// (opus_encoder.c:2817).
+		if maxBitrate := 750000 * cfg.Channels; cfg.Bitrate > maxBitrate {
+			bitrate = int32(maxBitrate)
+		} else {
+			bitrate = int32(cfg.Bitrate)
+		}
 	}
 	complexity := cfg.Complexity
 	if complexity == 0 {
@@ -196,15 +209,24 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 // CBR at a very high bitrate can ask for more, and then it pads up to whatever buf
 // allows.
 func (e *Encoder) Encode(pcm []int16, buf []byte) (int, error) {
+	// opus_encode_native zeroes st->rangeFinal BEFORE its rejection rules
+	// (opus_encoder.c:1223), so in libopus a rejected call leaves OPUS_GET_FINAL_RANGE
+	// reading 0 rather than the previous packet's range. The internal layer mirrors
+	// that (internal/opusenc/encode.go:272), but these checks reject before reaching
+	// it, so clear it here too. Without this, FinalRange after a failed Encode still
+	// reports the last successful packet, which no packet-level test can see.
 	if len(pcm) == 0 || len(pcm)%e.channels != 0 {
+		e.enc.ClearFinalRange()
 		return 0, fmt.Errorf("%w: len(pcm) is %d, want a positive multiple of %d (the channel count)",
 			ErrBadArg, len(pcm), e.channels)
 	}
 	frameSize := len(pcm) / e.channels
 	if err := e.checkFrameSize(frameSize); err != nil {
+		e.enc.ClearFinalRange()
 		return 0, err
 	}
 	if len(buf) == 0 {
+		e.enc.ClearFinalRange()
 		return 0, fmt.Errorf("%w: the output buffer is empty", ErrBufferTooSmall)
 	}
 

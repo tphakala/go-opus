@@ -185,29 +185,55 @@ func TestEncoderEmptyInput(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	cr, pkts := readContainer(t, bytes.NewReader(buf.Bytes()))
-	if len(pkts) != 0 {
-		t.Fatalf("empty input produced %d audio packets, want 0", len(pkts))
+
+	// An empty stream still carries ONE coded audio packet. A header-only Ogg Opus
+	// file is not forbidden by RFC 7845, but libavformat refuses to open one
+	// ("Error opening input: End of file"), so emitting one would hand an
+	// ffmpeg-based consumer a file it cannot read. libopusenc does not produce one
+	// either: ope_encoder_drain always codes at least one frame. The granule is
+	// preSkip + 0 = preSkip, so the whole frame is end-trimmed away and the stream
+	// still decodes to exactly zero samples.
+	if len(pkts) != 1 {
+		t.Fatalf("empty input produced %d audio packets, want 1 (a header-only stream "+
+			"is unopenable by libavformat)", len(pkts))
 	}
 	if int(cr.head.preSkip) != expectedPreSkip {
 		t.Fatalf("pre-skip = %d, want %d", cr.head.preSkip, expectedPreSkip)
 	}
-	// RFC 7845 section 4.5: with no audio pages, the OpusTags page carries the EOS
-	// flag, and its granule stays 0. The end padding in Close deliberately does NOT
-	// run here: there is no last audio page to stamp, and padding would invent a
-	// packet nobody asked for.
 	last := cr.pages[len(cr.pages)-1]
 	if last.flags&flagEOS == 0 {
 		t.Fatalf("empty stream: last page is not flagged end-of-stream (flags %#x)", last.flags)
 	}
-	if last.granule != 0 {
-		t.Fatalf("empty stream: final granule = %d, want 0", last.granule)
-	}
-	if len(cr.pages) != 2 {
-		t.Fatalf("empty stream has %d pages, want 2 (OpusHead, OpusTags)", len(cr.pages))
+	// RFC 7845 section 4.5: the EOS granule must not be smaller than pre-skip.
+	if last.granule != int64(expectedPreSkip) {
+		t.Fatalf("empty stream: final granule = %d, want %d (preSkip + 0 samples)",
+			last.granule, expectedPreSkip)
 	}
 	got, _ := decodeOgg(t, buf.Bytes())
 	if len(got) != 0 {
 		t.Fatalf("empty stream decoded to %d samples, want 0", len(got))
+	}
+
+	// The entire reason the frame is coded is that a real demuxer must accept the
+	// file. Asserting our own reader parses it proves nothing: it parsed the broken
+	// header-only shape too, which is exactly how that shape survived. Skips when no
+	// external tool is installed.
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not available; skipping external validation of the empty stream")
+	}
+	cmd := exec.Command(ffmpeg, "-v", "error", "-i", "pipe:0", "-f", "s16le", "-acodec", "pcm_s16le", "-")
+	cmd.Stdin = bytes.NewReader(buf.Bytes())
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("ffmpeg could not open the empty stream (%v): %s\n"+
+			"a header-only Ogg Opus file fails here with \"End of file\"; the stream must "+
+			"carry at least one coded frame", err, errb.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("ffmpeg decoded the empty stream to %d bytes, want 0", out.Len())
 	}
 }
 

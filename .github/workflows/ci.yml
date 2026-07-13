@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Tier B of the phase 4 gate is far too slow for the push path but it is the only
+  # thing that runs a full-length RFC vector through one encoder lifetime, so it runs
+  # nightly. See the gate-long job.
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
 
 env:
   GO_VERSION: '1.26'
@@ -99,6 +105,40 @@ jobs:
         env:
           CGO_ENABLED: '1'
         run: go test -tags refc -timeout 30m ./internal/reftest/...
+
+  gate-long:
+    name: Phase 4 gate, tier B (full-length corpus)
+    # Tier A of the gate runs on every push, inside the reftest job, over 2 s excerpts.
+    # Tier B is the only thing that pushes a full-length RFC vector (21 to 32 s) through
+    # a single encoder lifetime, which is where a one-LSB error in the delay ring, the
+    # dc_reject memory, the CELT energy history or the VBR reservoir would finally
+    # accumulate into a divergence. Without this job that tier is dead code: it skips
+    # unless -gate.long is passed, and nothing passed it.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Cache conformance vectors
+        uses: actions/cache@v4
+        with:
+          path: testdata/vectors/opus_testvectors-rfc8251.tar.gz
+          key: opus-vectors-rfc8251-${{ hashFiles('testdata/vectors.sha256') }}
+      # Tier B IS the real audio, so a missing corpus is a failure here, not a skip.
+      - name: Fetch conformance vectors
+        run: scripts/fetch-vectors.sh
+      - name: Run tier B
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go test -tags refc -count=1 -timeout 150m -v \
+            ./internal/reftest/oracle/ -run 'TestOpusencPhase4GateLong' -gate.long
 
   lint:
     name: Lint

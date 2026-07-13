@@ -260,13 +260,23 @@ func (e *Encoder) Close() error {
 	// the decoder needs them to reconstruct the tail of the real audio, and the
 	// end-trimmed granule then discards them.
 	//
-	// A stream with no audio at all is left alone: it has no last audio page to
-	// stamp, and padding it would invent a packet nobody asked for.
-	if e.cw.audioCount > 0 {
-		for e.coded48k < e.cw.preSkip+src48k {
-			if err := e.encodeSilenceFrame(); err != nil {
-				return err
-			}
+	// A stream with no audio at all still needs one audio page. RFC 7845 does not
+	// forbid a header-only stream, but libavformat will not open one: ffmpeg exits
+	// with "Error opening input: End of file", so a caller who hands us an empty clip
+	// gets a file no ffmpeg-based consumer can read. That is reachable in the pooled
+	// short-clip workload this API is meant for. The reference encoder does not
+	// produce one either: libopusenc's ope_encoder_drain always codes at least one
+	// frame. Emit a single silence frame; the granule is then preSkip + 0 = preSkip,
+	// which end-trims the whole frame away, so the stream still decodes to exactly
+	// zero samples and ffmpeg accepts it.
+	if e.cw.audioCount == 0 {
+		if err := e.encodeSilenceFrame(); err != nil {
+			return err
+		}
+	}
+	for e.coded48k < e.cw.preSkip+src48k {
+		if err := e.encodeSilenceFrame(); err != nil {
+			return err
 		}
 	}
 
