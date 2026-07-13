@@ -459,15 +459,29 @@ func TestFMQConst(t *testing.T) {
 		x    float64
 		bits int
 	}
-	cases := []qc{
+	// QCONST16 casts to opus_val16 (opus_int16), so the C macro is undefined
+	// behavior unless .5+x*2^bits fits int16: gcc/amd64 truncates to 16 bits, while
+	// clang/arm64 elides the conversion and yields garbage. The oracle only
+	// constrains the port inside the representable range. Every QCONST16 call site
+	// in libopus stays there, including the sole bits=30 one
+	// (celt_encoder.c:1707, .0000031f*2^30 = 3329).
+	cases16 := []qc{
+		{0.5, 15}, {1.0, 14}, {-0.5, 15}, {0.8, 15}, {-1.0, 14},
+		{0.0009765625, 15}, {0.85, 15}, {0.0, 15}, {0.25, 15}, {-0.25, 15},
+		{0.0000031, 30},
+	}
+	for _, c := range cases16 {
+		if got, want := int32(fm.QCONST16(c.x, c.bits)), cQCONST16(c.x, c.bits); got != want {
+			t.Fatalf("QCONST16(%g,%d)=%d want %d", c.x, c.bits, got, want)
+		}
+	}
+	// QCONST32 casts to opus_val32 (opus_int32), so Q30 constants are representable.
+	cases32 := []qc{
 		{0.5, 15}, {1.0, 14}, {-0.5, 15}, {0.8, 15}, {-1.0, 14},
 		{0.0009765625, 15}, {0.85, 15}, {0.0, 15}, {0.25, 15}, {-0.25, 15},
 		{1.0, 30}, {0.001, 30}, {-0.001, 30}, {0.5, 30}, {0.99, 30}, {-0.99, 30},
 	}
-	for _, c := range cases {
-		if got, want := int32(fm.QCONST16(c.x, c.bits)), cQCONST16(c.x, c.bits); got != want {
-			t.Fatalf("QCONST16(%g,%d)=%d want %d", c.x, c.bits, got, want)
-		}
+	for _, c := range cases32 {
 		if got, want := fm.QCONST32(c.x, c.bits), cQCONST32(c.x, c.bits); got != want {
 			t.Fatalf("QCONST32(%g,%d)=%d want %d", c.x, c.bits, got, want)
 		}
