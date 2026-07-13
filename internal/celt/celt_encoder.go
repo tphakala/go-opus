@@ -458,7 +458,7 @@ func transientAnalysis(in []int32, length, C int, tfEstimate *int16, tfChan *int
 	}
 	// Prevent confusing the partial cycle of a very low frequency tone with a
 	// transient.
-	if toneishness > fixedmath.QCONST32(0.98, 29) && toneFreq < fixedmath.QCONST16(0.026, 13) {
+	if toneishness > qconst0_98Q29 && toneFreq < fixedmath.QCONST16(0.026, 13) {
 		isTransient = 0
 		maskMetric = 0
 	}
@@ -666,9 +666,9 @@ func toneLpc(x []int16, length, delay int, lpc []int32) int {
 	}
 	num0 := fixedmath.MULT32_32_Q31(r00, r12) - fixedmath.MULT32_32_Q31(r02, r01)
 	if fixedmath.HALF32(num0) >= den {
-		lpc[0] = fixedmath.QCONST32(1.999999, 29)
+		lpc[0] = qconst1_999999Q29
 	} else if fixedmath.HALF32(num0) <= -den {
-		lpc[0] = -fixedmath.QCONST32(1.999999, 29)
+		lpc[0] = -qconst1_999999Q29
 	} else {
 		lpc[0] = fixedmath.Frac_div32_q29(num0, den)
 	}
@@ -752,7 +752,7 @@ func (st *Encoder) runPrefilter(in, prefilterMem []int32, CC, N, prefilterTapset
 
 	// If the signal is dominated by a single tone, don't rely on the standard
 	// pitch estimator (it can become unreliable).
-	if enabled != 0 && toneishness > fixedmath.QCONST32(0.99, 29) {
+	if enabled != 0 && toneishness > qconst0_99Q29 {
 		multiple := 1
 		// Using an aliased postfilter above 24 kHz. First value is purposely just
 		// above pi to avoid triggering for Fs=48kHz.

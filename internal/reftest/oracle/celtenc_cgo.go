@@ -468,3 +468,14 @@ func (e *cCeltencHandle) Close() {
 		e.h = nil
 	}
 }
+
+// Compile-time constant accessors: see the comment block in celtenc_shim.h. These let
+// the Go port assert it picked the float32-rounded or float64 helper that matches the
+// literal the C source actually writes at each call site.
+func cConstQ29_098f() int32      { return int32(C.oracle_const_q29_098f()) }
+func cConstQ29_099f() int32      { return int32(C.oracle_const_q29_099f()) }
+func cConstQ29_1_999999f() int32 { return int32(C.oracle_const_q29_1_999999f()) }
+func cConstQ29_3_999999d() int32 { return int32(C.oracle_const_q29_3_999999d()) }
+func cConstQ31Sqrt2Inv() int32   { return int32(C.oracle_const_q31_sqrt2inv()) }
+func cConstGconst31_9() int32    { return int32(C.oracle_const_gconst_31_9()) }
+func cConstGconst0_0062() int32  { return int32(C.oracle_const_gconst_0_0062()) }

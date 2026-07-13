@@ -49,6 +49,20 @@ var (
 	gconst12         = fixedmath.QCONST32(12, dbShift)             // GCONST(12.f)
 	qconst0_98Q29    = qconst32Float(0.98, 29)                     // QCONST32(.98f, 29)
 	qconst120DivPiQ9 = fixedmath.QCONST16(120/float64(math.Pi), 9) // QCONST16(120/M_PI, 9)
+
+	// The C source writes these as *float* literals, so the constant is rounded in
+	// float32 before the shift, which does not agree with a float64 evaluation:
+	// QCONST32(.99f,29) is 531502208 but the float64 form gives 531502203, and
+	// QCONST32(1.999999f,29) is 1073741312 against 1073741287. The difference is a
+	// handful of ULPs, but these constants are compared against toneishness and
+	// lpc[0] directly, so a value landing inside the gap takes a different branch
+	// than the C and the whole packet diverges from there on.
+	//
+	// Note QCONST32(3.999999, 29) at celt_encoder.c:1387 is deliberately NOT here:
+	// that literal has no "f" suffix, so it is a double and fixedmath.QCONST32 is
+	// the correct helper for it. The suffix decides, per call site.
+	qconst0_99Q29     = qconst32Float(0.99, 29)     // QCONST32(.99f, 29)      celt_encoder.c:1440
+	qconst1_999999Q29 = qconst32Float(1.999999, 29) // QCONST32(1.999999f, 29) celt_encoder.c:1354
 )
 
 // medianOf5 is median_of_5 (celt_encoder.c:990): the median of x[0..5), computed
@@ -381,4 +395,23 @@ func DynallocAnalysis(bandLogE, bandLogE2, oldBandE []int32, nbEBands, start, en
 		toneFreq, toneishness)
 	res.TotBoost = totBoost
 	return res
+}
+
+// FloatLiteralConsts exposes, for the differential oracle, every QCONST/GCONST whose
+// value depends on whether the C source writes the literal as a float (rounded in
+// float32 before the shift) or as a double. The oracle asserts each against the
+// compile-time C constant, so the per-site choice between qconst32Float and
+// fixedmath.QCONST32 is pinned by the reference rather than by a comment. Note the
+// deliberate mix: QCONST32(3.999999, 29) at celt_encoder.c:1387 carries no "f" suffix
+// and so must NOT use the float32 helper.
+func FloatLiteralConsts() map[string]int32 {
+	return map[string]int32{
+		"QCONST32(.98f,29)":       qconst0_98Q29,
+		"QCONST32(.99f,29)":       qconst0_99Q29,
+		"QCONST32(1.999999f,29)":  qconst1_999999Q29,
+		"QCONST32(3.999999,29)":   fixedmath.QCONST32(3.999999, 29),
+		"QCONST32(.70710678f,31)": sqrt2Inv31,
+		"GCONST(31.9f)":           gconst31_9,
+		"GCONST(.0062f)":          gconst0_0062,
+	}
 }

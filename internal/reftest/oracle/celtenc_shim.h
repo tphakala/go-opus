@@ -597,4 +597,18 @@ static void oracle_celtenc_h_destroy(void *h)
    free(H);
 }
 
+/* Compile-time QCONST/GCONST constants, evaluated by the C compiler with EXACTLY the
+   literal each call site in celt_encoder.c / bands.c writes. A literal with an "f"
+   suffix is a float and is rounded in float32 before the shift; an unsuffixed literal
+   is a double. The two disagree by a few ULPs, which is enough to flip a comparison
+   and diverge the whole packet, so the Go port has to pick the matching helper per
+   site. These wrappers pin that choice against the C rather than against a comment. */
+static int32_t oracle_const_q29_098f(void)      { return QCONST32(.98f, 29); }        /* celt_encoder.c:447, :2242 */
+static int32_t oracle_const_q29_099f(void)      { return QCONST32(.99f, 29); }        /* celt_encoder.c:1440 */
+static int32_t oracle_const_q29_1_999999f(void) { return QCONST32(1.999999f, 29); }   /* celt_encoder.c:1354 */
+static int32_t oracle_const_q29_3_999999d(void) { return QCONST32(3.999999, 29); }    /* celt_encoder.c:1387, DOUBLE (no f) */
+static int32_t oracle_const_q31_sqrt2inv(void)  { return QCONST32(.70710678f, 31); }  /* bands.c:631 */
+static int32_t oracle_const_gconst_31_9(void)   { return GCONST(31.9f); }             /* celt_encoder.c:1055 */
+static int32_t oracle_const_gconst_0_0062(void) { return GCONST(.0062f); }            /* celt_encoder.c:1108 */
+
 #endif /* GOOPUS_CELTENC_SHIM_H */

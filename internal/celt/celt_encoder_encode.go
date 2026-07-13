@@ -666,7 +666,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	normaliseBands(m, freq, X, bandE, effEnd, C, M)
 
 	enableTfAnalysis := effectiveBytes >= 15*C && hybrid == 0 && st.complexity >= 2 &&
-		st.lfe == 0 && toneishness < fixedmath.QCONST32(0.98, 29)
+		st.lfe == 0 && toneishness < qconst0_98Q29
 
 	offsets := make([]int, nbEBands)
 	importance := make([]int, nbEBands)
