@@ -1,5 +1,13 @@
 # go-opus
 
+[![CI](https://github.com/tphakala/go-opus/actions/workflows/ci.yml/badge.svg)](https://github.com/tphakala/go-opus/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tphakala/go-opus.svg)](https://pkg.go.dev/github.com/tphakala/go-opus)
+[![codecov](https://codecov.io/gh/tphakala/go-opus/branch/main/graph/badge.svg)](https://codecov.io/gh/tphakala/go-opus)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/tphakala/go-opus)](go.mod)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/tphakala/go-opus/badge)](https://scorecard.dev/viewer/?uri=github.com/tphakala/go-opus)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/github/sponsors/tphakala?logo=githubsponsors&color=ea4aaa&label=Sponsor)](https://github.com/sponsors/tphakala)
+
 A native Go implementation of the [Opus](https://opus-codec.org/) audio codec
 (RFC 6716), built as a pure-Go port of [libopus](https://gitlab.xiph.org/xiph/opus).
 No cgo and no external libraries in the published module.
