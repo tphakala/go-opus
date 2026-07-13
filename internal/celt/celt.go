@@ -77,6 +77,35 @@ var combGains = [3][3]int16{
 	{26208, 3280, 0},    // 0.7998046875, 0.1000976562, 0.f
 }
 
+// ResamplingFactor is resampling_factor (celt.c:62): the integer ratio between
+// the 48 kHz CELT mode and the rate the caller is running at. It is the ONLY
+// place a sample rate enters the CELT layer: the mode is always the 48 kHz / 960
+// one, and a lower rate is coded by zero-stuffing the input up to 48 kHz (the
+// encoder's st->upsample, celt_encoder.c:255) and decimating the output back down
+// (the decoder's st->downsample, celt_decoder.c:235).
+//
+// The C returns 0 for an unsupported rate, after a celt_assert(0) that is compiled
+// out in the frozen (no ENABLE_ASSERTIONS) config; a 0 would then divide by zero in
+// celt_preemphasis. This port returns 0 too, and every CALLER rejects it, which is
+// how the "never accept a rate we cannot encode" invariant is enforced rather than
+// asserted. 96000 is ENABLE_QEXT-only and is therefore NOT supported here.
+func ResamplingFactor(rate int32) int {
+	switch rate {
+	case 48000:
+		return 1
+	case 24000:
+		return 2
+	case 16000:
+		return 3
+	case 12000:
+		return 4
+	case 8000:
+		return 6
+	default:
+		return 0
+	}
+}
+
 // sig2word16 is SIG2WORD16 / SIG2WORD16_generic (fixed_generic.h:209): shift a
 // celt_sig down by SIG_SHIFT and clamp to the int16 range.
 func sig2word16(x int32) int16 {

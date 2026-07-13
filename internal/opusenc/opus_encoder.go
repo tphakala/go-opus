@@ -189,7 +189,12 @@ func NewEncoder(fs int32, channels, application int) *Encoder {
 	st.channels = channels
 	st.Fs = fs
 
-	st.celt = celt.NewEncoder(channels)
+	// opus_encoder.c:281. Fs is THREADED INTO CELT, where it becomes
+	// st->upsample = resampling_factor(Fs) (celt_encoder.c:255) and nothing else:
+	// the CELT mode stays the 48 kHz / 960 one at every rate. A rate CELT cannot
+	// resample makes this nil, which is the second line of defence behind the Fs
+	// check above.
+	st.celt = celt.NewEncoder(fs, channels)
 	if st.celt == nil {
 		return nil
 	}

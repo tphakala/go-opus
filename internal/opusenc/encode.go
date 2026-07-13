@@ -147,21 +147,30 @@ type Witness struct {
 	// rate down to bits_to_bitrate(max_data_bytes*8).
 	CBRBufferLimited bool
 	// CBRFloor1 reports that IMAX(1, cbr_bytes) at :1333 raised a zero budget. It
-	// needs under ~4 bits per frame, so at 48 kHz only the short frame sizes can
-	// reach it (2.5 ms at the 500 bps floor gives bits == 1 -> cbr_bytes == 0).
+	// needs under ~4 bits per frame, so only the short frame sizes can reach it
+	// (2.5 ms at the 500 bps floor gives bits == 1 -> cbr_bytes == 0). That is true
+	// at EVERY rate: see CBRIMinFired for why bits per frame depends only on the
+	// DURATION.
 	CBRFloor1 bool
 	// CBRIMinFired reports that the IMIN against max_data_bytes at :1330 actually
 	// LOWERED cbr_bytes.
 	//
-	// IT IS ASSERTED DEAD, and the differential test fails if it ever fires.
-	// user_bitrate_to_bitrate (:745) has ALREADY clamped the rate to
-	// bits_to_bitrate(max_data_bytes*8, Fs, frame_size), and at 48 kHz the two
-	// conversions round-trip exactly (6*Fs/frame_size is a whole number for every
-	// legal frame size), so bitrate_to_bits of that is exactly max_data_bytes*8 and
-	// (max_data_bytes*8 + 4)/8 is exactly max_data_bytes. The :1330 IMIN therefore
-	// has nothing left to clamp and is defensive code. Recording it (rather than
-	// claiming to have covered it) is the honest way to report a branch the frozen
-	// configuration cannot reach.
+	// IT IS ASSERTED DEAD AT EVERY SAMPLE RATE, and the differential test fails if it
+	// ever fires. user_bitrate_to_bitrate (:745) has ALREADY clamped the rate to
+	// bits_to_bitrate(max_data_bytes*8, Fs, frame_size), and the two conversions
+	// round-trip EXACTLY, so bitrate_to_bits of that is exactly max_data_bytes*8 and
+	// (max_data_bytes*8 + 4)/8 is exactly max_data_bytes.
+	//
+	// THE ROUND-TRIP IS RATE-INDEPENDENT, which is not obvious and is worth writing
+	// down. Both conversions (celt/celt.h:147,:151) turn on the single quantity
+	// R = 6*Fs/frame_size, and for the phase-4 durations frame_size is Fs/400, Fs/200,
+	// Fs/100 or Fs/50, so R is 2400, 1200, 600 or 300 -- a function of the DURATION
+	// ALONE, with Fs cancelling. R is a whole number (no truncation in the divide) and
+	// is divisible by 6 at all four, so bits_to_bitrate(b) = b*(R/6) is exact and
+	// bitrate_to_bits inverts it. The :1330 IMIN therefore has nothing left to clamp
+	// at 8, 12, 16, 24 or 48 kHz alike, and is defensive code. Recording it (rather
+	// than claiming to have covered it) is the honest way to report a branch the
+	// frozen configuration cannot reach.
 	CBRIMinFired bool
 	// OrigMaxDataBytes is what opus_encode_native handed to
 	// opus_encode_frame_native (:1840), and FrameMaxDataBytes is the :1893 clamp
@@ -181,8 +190,11 @@ type Witness struct {
 	CurrBandwidth int
 	EndBand       int
 	// DelayMoveBranch / DelayCopyBranch are the two arms of :2304. Both must fire
-	// across a sweep: MOVE needs frame_size < encoder_buffer-total_buffer (288 at
-	// 48 kHz, so LM0/LM1), COPY needs frame_size >= that (LM2/LM3).
+	// across a sweep: MOVE needs frame_size < encoder_buffer-total_buffer, which is
+	// Fs/100 - Fs/250 = Fs*3/500 (288 at 48 kHz, 48 at 8 kHz), and COPY needs
+	// frame_size >= that. The threshold scales with Fs exactly as the frame sizes do,
+	// so the split lands between LM1 and LM2 at EVERY rate: MOVE is LM0/LM1, COPY is
+	// LM2/LM3.
 	DelayMoveBranch bool
 	DelayCopyBranch bool
 	// StereoFadeRan reports that :2344 stereo_fade fired (stereo, and the width

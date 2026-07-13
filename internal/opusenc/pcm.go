@@ -38,10 +38,14 @@ package opusenc
 // that is either dead (the SILK block) or independent of the PCM buffers (the
 // CELT ctl setup), which is why they can be split here without changing a bit.
 //
-// Frozen config: 48 kHz, OPUS_APPLICATION_AUDIO, forced MODE_CELT_ONLY,
-// FIXED_POINT, no RES24 (so opus_res is opus_int16 and RES_SHIFT is 0), no QEXT.
-// encoder_buffer = Fs/100 = 480, delay_compensation = Fs/250 = 192, so
-// total_buffer = 192 and the delay-compensation ring is live.
+// Frozen config: OPUS_APPLICATION_AUDIO, forced MODE_CELT_ONLY, FIXED_POINT, no
+// RES24 (so opus_res is opus_int16 and RES_SHIFT is 0), no QEXT. Everything here is
+// expressed AT Fs, which is any of 8/12/16/24/48 kHz: encoder_buffer = Fs/100 and
+// delay_compensation = Fs/250, so total_buffer = Fs/250 and the delay-compensation
+// ring is live at every rate (480/192 samples at 48 kHz, 80/32 at 8 kHz). dc_reject
+// and stereo_fade both take Fs and scale with it; stereo_fade additionally decimates
+// the CELT window by IMAX(1, 48000/Fs), because the window belongs to the 48 kHz
+// mode CELT always runs.
 
 import (
 	"github.com/tphakala/go-opus/internal/fixedmath"

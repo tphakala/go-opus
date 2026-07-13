@@ -396,7 +396,7 @@ func TestCeltEncodeWithECMatchesEncode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mk := func() *celt.Encoder {
-				st := celt.NewEncoder(tc.channels)
+				st := celt.NewEncoder(48000, tc.channels)
 				st.SetSignalling(tc.signalling)
 				st.SetVBR(tc.vbr)
 				st.SetComplexity(9)

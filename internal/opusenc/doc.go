@@ -7,11 +7,20 @@
 //
 // # Frozen phase-4 configuration
 //
-// OPUS_APPLICATION_AUDIO + OPUS_SET_FORCE_MODE(MODE_CELT_ONLY) at 48 kHz. The
-// application matters: only AUDIO (and VOIP) keep encoder_buffer = Fs/100 = 480
-// and delay_compensation = Fs/250 = 192 (opus_encoder.c:305,:313), so the
-// delay-compensation ring exists. RESTRICTED_LOWDELAY zeroes both and the ring
-// vanishes.
+// OPUS_APPLICATION_AUDIO + OPUS_SET_FORCE_MODE(MODE_CELT_ONLY). The application
+// matters: only AUDIO (and VOIP) keep encoder_buffer = Fs/100 and
+// delay_compensation = Fs/250 (opus_encoder.c:305,:313), so the delay-compensation
+// ring exists. RESTRICTED_LOWDELAY zeroes both and the ring vanishes.
+//
+// ALL FIVE SAMPLE RATES are supported (8/12/16/24/48 kHz), and every rate is
+// pinned byte-for-byte against the C by TestOpusencEncodeSampleRateSweep. The rate
+// is NOT a CELT mode: celt_encoder_init builds the 48 kHz / 960 mode whatever Fs
+// is, and threads the rate in as st->upsample = resampling_factor(Fs)
+// (celt_encoder.c:255), which zero-stuffs the input up to 48 kHz. Everything at
+// this layer is expressed at Fs (encoder_buffer, delay_compensation, the frame-size
+// domain Fs/400..Fs/50, the Nyquist bandwidth clamps at :1643-1650) and CELT
+// converts once, at celt_encode_with_ec:1837. Frame durations above 20 ms need the
+// multiframe repacketizer and are rejected with OPUS_UNIMPLEMENTED.
 //
 // The build config is FIXED_POINT + DISABLE_FLOAT_API with no QEXT/RES24/DRED, so
 // opus_res is opus_int16 and the API input is int16 throughout. Consequently the

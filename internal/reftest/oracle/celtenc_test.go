@@ -301,7 +301,7 @@ func TestCeltencRunPrefilterMatchesC(t *testing.T) {
 
 	for _, cc := range []int{1, 2} {
 		r := rand.New(rand.NewSource(int64(0x9F17 + cc)))
-		goEnc := celt.NewEncoder(cc)
+		goEnc := celt.NewEncoder(48000, cc)
 		// Carried scalar prefilter state and C-side carried buffers.
 		period, gainv, tapset := 0, 0, 0
 		cInMem := make([]int32, cc*overlap)
@@ -496,7 +496,7 @@ func runPrefilterOnce(t *testing.T, cc, N, complexity, lossRate, period, gainv, 
 	enabled, tfEstimate, nbAvail, toneFreq int, toneishness int32,
 	base, inMemSeed, preMemSeed []int32) (pitch, gain, qg, pfOn int) {
 	t.Helper()
-	goEnc := celt.NewEncoder(cc)
+	goEnc := celt.NewEncoder(48000, cc)
 	goEnc.SetComplexity(complexity)
 	goEnc.SetLossRate(lossRate)
 	goEnc.SetPrefilterState(period, int16(gainv), tapset)
