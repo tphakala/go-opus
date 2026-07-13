@@ -1,5 +1,13 @@
 # go-opus
 
+[![CI](https://github.com/tphakala/go-opus/actions/workflows/ci.yml/badge.svg)](https://github.com/tphakala/go-opus/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tphakala/go-opus.svg)](https://pkg.go.dev/github.com/tphakala/go-opus)
+[![codecov](https://codecov.io/gh/tphakala/go-opus/branch/main/graph/badge.svg)](https://codecov.io/gh/tphakala/go-opus)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/tphakala/go-opus)](go.mod)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/tphakala/go-opus/badge)](https://scorecard.dev/viewer/?uri=github.com/tphakala/go-opus)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/github/sponsors/tphakala?logo=githubsponsors&color=ea4aaa&label=Sponsor)](https://github.com/sponsors/tphakala)
+
 A native Go implementation of the [Opus](https://opus-codec.org/) audio codec
 (RFC 6716), built as a pure-Go port of [libopus](https://gitlab.xiph.org/xiph/opus).
 No cgo and no external libraries in the published module.
@@ -15,8 +23,15 @@ the strong sense: byte-identical to libopus.
   libopus exactly. This covers CELT, SILK, and hybrid modes, mode switching and
   redundancy (including the SILK/CELT crossovers), packet-loss concealment, and
   inband FEC/LBRR.
-- **Encoder: in development.** A CELT-only fixed-point encoder is being built to
-  the same bit-exact standard.
+- **Encoder: the codec is complete and bit-exact; the public API is landing.**
+  The CELT-only fixed-point encoder now produces whole Opus packets, TOC byte
+  included, that are byte-identical to the C reference: every analysis stage, the
+  band quantizer, the VBR rate controller, the `celt_encode_with_ec` pipeline, and
+  the `opus_encoder.c` wrapper around it (delay compensation, the CBR byte budget,
+  framing). Each layer is asserted packet-for-packet and state-field-for-state-field
+  against libopus. What remains is the public `opus.Encoder` surface, the Ogg Opus
+  writer, and the full encoder gate sweep; until those land, encoding is reachable
+  only through the internal packages.
 
 ## Approach
 
