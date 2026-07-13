@@ -78,9 +78,42 @@ while IFS= read -r src; do
       printf '// celtenc_shim.h (celtenc_cgo.go) so the CP8a encoder differential test can\n'
       printf '// reach its file-static stage functions; a second TU compiling it here would\n'
       printf '// duplicate celt_encode_with_ec / celt_encoder_init / celt_preemphasis and fail\n'
-      printf '// to link. celtdec_shim.h and w_src_opus_encoder.c reference celt_encode_with_ec\n'
+      printf '// to link. celtdec_shim.h and opusenc_shim.h reference celt_encode_with_ec\n'
       printf '// extern and resolve against celtenc_shim.h at link time.\n'
       printf 'typedef int goopus_w_celt_celt_encoder_neutralized;\n'
+    } > "$name"
+    count=$((count + 1))
+    continue
+  fi
+  if [ "$src" = "src/opus_encoder.c" ]; then
+    # Same Option A treatment as celt/celt_encoder.c, for the same reason.
+    # opus_encoder.c defines `struct OpusEncoder` at :76 and the stage statics
+    # gen_toc / dc_reject / stereo_fade / user_bitrate_to_bitrate /
+    # compute_equiv_rate INSIDE the .c: there is no header, so the struct is
+    # opaque and the statics are unreachable from any other translation unit.
+    # The CP9 top-level encoder differential test needs BOTH (a field-level state
+    # dump and flat wrappers over the statics), so opusenc_shim.h (opusenc_cgo.go)
+    # #includes opus_encoder.c and becomes its SOLE translation unit. A second TU
+    # here would duplicate opus_encode / opus_encoder_create / opus_encoder_ctl /
+    # opus_encoder_init / frame_size_select / compute_stereo_width /
+    # is_digital_silence / downmix_int and fail to link.
+    #
+    # shim.c and opusdec_shim.h keep calling opus_encoder_create / opus_encode /
+    # opus_encoder_ctl through the PUBLIC prototypes in opus.h; those resolve at
+    # link time against the definitions inside opusenc_shim.h, exactly as
+    # celtdec_shim.h resolves celt_encode_with_ec against celtenc_shim.h today.
+    {
+      printf '//go:build refc\n\n'
+      printf '// NEUTRALIZED wrapper for src/opus_encoder.c. Compiled SOLELY by\n'
+      printf '// opusenc_shim.h (opusenc_cgo.go) so the CP9 top-level encoder differential\n'
+      printf '// test can reach `struct OpusEncoder` (defined in the .c, not in any header)\n'
+      printf '// and the file statics gen_toc / dc_reject / stereo_fade /\n'
+      printf '// user_bitrate_to_bitrate / compute_equiv_rate; a second TU compiling it here\n'
+      printf '// would duplicate opus_encode / opus_encoder_create / opus_encoder_ctl /\n'
+      printf '// opus_encoder_init / frame_size_select / downmix_int and fail to link.\n'
+      printf '// shim.c and opusdec_shim.h call the public opus.h prototypes and resolve\n'
+      printf '// against opusenc_shim.h at link time.\n'
+      printf 'typedef int goopus_w_src_opus_encoder_neutralized;\n'
     } > "$name"
     count=$((count + 1))
     continue

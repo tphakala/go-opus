@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/tphakala/go-opus/internal/celt"
+	"github.com/tphakala/go-opus/internal/opusenc"
 )
 
 func TestFloatLiteralConstsMatchC(t *testing.T) {
@@ -60,5 +61,30 @@ func TestFloatLiteralConstsMatchC(t *testing.T) {
 	if f64 := int32(0.5 + x*float64(shift)); cConstQ29_099f() == f64 {
 		t.Fatalf("vacuous: QCONST32(.99f,29) equals its float64 evaluation (%d), so this "+
 			"test cannot detect the wrong-helper bug it exists to catch", f64)
+	}
+
+	// The same rule, applied to the constants the top-level Opus encoder (CP9) derives
+	// from a C float literal. internal/opusenc has its own map because the constant
+	// lives in that package; the len() check on each map is what forces a NEW constant
+	// to be pinned here rather than silently trusted.
+	wantEnc := map[string]int32{
+		// opus_encoder.c:1975, VARIABLE_HP_SMTH_COEF2 = 0.015f (an "f"-suffixed FLOAT).
+		"SILK_FIX_CONST(VARIABLE_HP_SMTH_COEF2,16)": cConstSilkVariableHPSmthCoef2Q16(),
+	}
+	gotEnc := opusenc.FloatLiteralConsts()
+	if len(gotEnc) != len(wantEnc) {
+		t.Fatalf("opusenc constant count: go has %d, oracle pins %d. A new float-literal "+
+			"constant must be pinned against the C compiler here.", len(gotEnc), len(wantEnc))
+	}
+	for name, w := range wantEnc {
+		g, ok := gotEnc[name]
+		if !ok {
+			t.Fatalf("%s: missing from opusenc.FloatLiteralConsts", name)
+		}
+		if g != w {
+			t.Errorf("%s: go=%d c=%d (delta %d). The Go side evaluated the literal in the "+
+				"wrong precision: an \"f\"-suffixed C literal rounds to float32 BEFORE the "+
+				"shift.", name, g, w, int64(g)-int64(w))
+		}
 	}
 }
