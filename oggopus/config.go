@@ -1,11 +1,20 @@
 package oggopus
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/tphakala/go-opus/opus"
+)
 
 // libVersion is the go-opus version reported in the default OpusTags vendor
-// string. It is a placeholder until the codec phase unifies it with the
-// opus.Version constant the raw package will export.
-const libVersion = "0.1.0-dev"
+// string. It DERIVES from opus.Version rather than restating it: the two used to be
+// independent "0.1.0-dev" literals, which is a version string that can go stale in
+// exactly one of the two places a consumer reads it, and nothing in a packet or a
+// container byte would say so (the vendor string is free-form text, so no gate can
+// tell a stale one from a correct one). Now the container cannot claim a version the
+// codec does not. TestVendorStringDerivesFromOpusVersion is the guard on the
+// FORMAT ("go-opus <version>"); the equality itself is enforced by the compiler.
+const libVersion = opus.Version
 
 // maxComplexity is the top of the Opus complexity range, and defaultComplexity is
 // what Config.Complexity's zero value selects. The zero value MUST mean the

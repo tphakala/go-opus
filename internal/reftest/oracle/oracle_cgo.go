@@ -173,10 +173,59 @@ func (d *Decoder) FinalRange() uint32 {
 	return uint32(C.oracle_decoder_final_range(d.dec))
 }
 
+// LastPacketDuration returns the decoder's OPUS_GET_LAST_PACKET_DURATION: the
+// per-channel sample count the last Decode produced. Nothing in a packet depends
+// on it, so the PCM/final-range comparison is blind to a divergence here; it is
+// pinned on its own by opusenc_ctl_test.go.
+func (d *Decoder) LastPacketDuration() int {
+	return int(C.oracle_decoder_last_packet_duration(d.dec))
+}
+
+// Reset applies OPUS_RESET_STATE to the decoder.
+func (d *Decoder) Reset() error {
+	if code := C.oracle_decoder_reset(d.dec); code != C.OPUS_OK {
+		return fmt.Errorf("OPUS_RESET_STATE: %w", errString(code))
+	}
+	return nil
+}
+
 // Close frees the decoder. Safe to call once; the pointer is nilled.
 func (d *Decoder) Close() {
 	if d.dec != nil {
 		C.oracle_decoder_destroy(d.dec)
 		d.dec = nil
 	}
+}
+
+// OPUS_* return codes (include/opus_defines.h) the packet-inspection wrappers can
+// return in place of a count.
+const (
+	oOpusBadArg        = -1 // OPUS_BAD_ARG
+	oOpusInvalidPacket = -4 // OPUS_INVALID_PACKET
+)
+
+// PacketGetNbFrames is opus_packet_get_nb_frames (src/opus_decoder.c:1273). It
+// returns the frame count, or a negative OPUS_* code: OPUS_BAD_ARG for an empty
+// packet, OPUS_INVALID_PACKET for a code-3 packet truncated before its frame-count
+// byte. A nil pkt is passed through as (NULL, 0), which is the OPUS_BAD_ARG case.
+func PacketGetNbFrames(pkt []byte) int {
+	return int(C.oracle_packet_get_nb_frames(cPacketPtr(pkt), C.int(len(pkt))))
+}
+
+// PacketGetNbSamples is opus_packet_get_nb_samples (src/opus_decoder.c:1289): the
+// packet duration in samples per channel at fs, or a negative OPUS_* code. Note
+// that the "over 120 ms" rejection is fs-dependent, so fs is part of the domain
+// being compared and not a formality.
+func PacketGetNbSamples(pkt []byte, fs int) int {
+	return int(C.oracle_packet_get_nb_samples(cPacketPtr(pkt), C.int(len(pkt)), C.opus_int32(fs)))
+}
+
+// cPacketPtr is the base pointer of pkt, or NULL when it is empty. Both C
+// functions check len < 1 before dereferencing, so NULL is the correct value to
+// hand them for an empty packet (and taking &pkt[0] would panic).
+func cPacketPtr(pkt []byte) *C.uchar {
+	if len(pkt) == 0 {
+		return nil
+	}
+	return (*C.uchar)(unsafe.Pointer(&pkt[0]))
 }

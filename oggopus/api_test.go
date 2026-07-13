@@ -47,6 +47,42 @@ func TestConfigVendorDefault(t *testing.T) {
 	}
 }
 
+// TestVendorStringDerivesFromOpusVersion pins the OpusTags vendor string to
+// opus.Version. The two were independent "0.1.0-dev" literals (config.go admitted
+// the duplication in its own comment), and a version string is precisely the kind of
+// value NO bit-exactness gate can check: OpusTags vendor text is free-form, so a
+// container claiming go-opus 0.1.0-dev while the codec inside it is 0.4.0 produces a
+// perfectly valid, perfectly wrong file. libVersion now derives from opus.Version at
+// compile time, so drift is impossible; what remains testable, and what this pins, is
+// that the derivation is actually WIRED (a re-introduced literal that happened to
+// match today would still pass an equality check against the string, but not against
+// the constant) and that the "go-opus <version>" shape is what lands in the tags.
+func TestVendorStringDerivesFromOpusVersion(t *testing.T) {
+	if libVersion != opus.Version {
+		t.Fatalf("libVersion = %q, opus.Version = %q: the oggopus vendor version has drifted "+
+			"from the codec's; libVersion must be defined as opus.Version, not restated",
+			libVersion, opus.Version)
+	}
+	if opus.Version == "" {
+		t.Fatal("opus.Version is empty")
+	}
+	want := "go-opus " + opus.Version
+	if got := (&Config{}).vendorString(); got != want {
+		t.Fatalf("default vendor string = %q, want %q", got, want)
+	}
+
+	// And the string really is what reaches the bytes: encode a stream and find it in
+	// the OpusTags header page. A constant that is right but unused would pass every
+	// check above.
+	var buf bytes.Buffer
+	if err := EncodeInterleaved(&buf, Config{SampleRate: 48000, Channels: 1}, make([]byte, 960*2)); err != nil {
+		t.Fatalf("EncodeInterleaved: %v", err)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte(want)) {
+		t.Fatalf("the encoded stream does not carry the vendor string %q", want)
+	}
+}
+
 // TestEncoderSeamWired confirms the codec seam is live: the PCM entry points do
 // real work and no longer report a stub. It is the successor to TestEncoderSeam,
 // which asserted the pre-codec errCodecNotWired behaviour.
