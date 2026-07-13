@@ -172,7 +172,7 @@ func TestCeltencTfAnalysisMatchesC(t *testing.T) {
 						lambda := lambdas[r.Intn(len(lambdas))]
 						// tf_estimate is opus_val16 Q14 in [0, 1<<14] at the call
 						// site (transient_analysis output), which is the common case.
-						// Every 5th rep instead uses an EXTREME opus_val16, including
+						// The last rep of each group instead uses an EXTREME opus_val16, including
 						// negatives and the int16 endpoints: bias is computed as
 						// MULT16_16_Q14(QCONST16(.04,15), MAX16(-QCONST16(.25,14),
 						// QCONST16(.5,14)-tf_estimate)) (celt_encoder.c:682), where

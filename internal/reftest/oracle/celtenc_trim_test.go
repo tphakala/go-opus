@@ -469,7 +469,10 @@ func TestCeltencAllocTrimAnalysisMatchesC(t *testing.T) {
 // including on a frame where the negative, non-exact `/6` at :931 is live.
 func TestCeltencAllocTrimAnalysisRandomMatchesC(t *testing.T) {
 	r := rand.New(rand.NewSource(0xC8B_7822))
-	ends := []int{13, 17, 21}
+	// 19 is the wideband end band and is reachable in production. There is no branch
+	// on end here, but the weights (2+2*i-end) and the divisor (C*(end-1)) both depend
+	// on it, so every reachable end value is swept.
+	ends := []int{13, 17, 19, 21}
 	rates := []int32{8000, 31999, 32000, 63999, 64000, 64512, 70000, 79999, 80000, 128000, 510000}
 	// Small tilts keep the :931 MIN32/MAX32 unclamped, which is the only regime in
 	// which the `/6` rounding direction can reach trim at all.
