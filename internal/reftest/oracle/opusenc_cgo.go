@@ -323,3 +323,12 @@ func (e *cOpusencHandle) Close() {
 		e.h = nil
 	}
 }
+
+// cConstSilkVariableHPSmthCoef2Q16 is SILK_FIX_CONST(VARIABLE_HP_SMTH_COEF2, 16) as
+// the C compiler evaluates it. See the comment on the wrapper in opusenc_shim.h and
+// the float-literal rule in celtenc_const_test.go: the "f" suffix on the literal
+// decides the precision of the product, so the Go constant is asserted against the C
+// rather than against a hand-derivation.
+func cConstSilkVariableHPSmthCoef2Q16() int32 {
+	return int32(C.oracle_const_silk_variable_hp_smth_coef2_q16())
+}

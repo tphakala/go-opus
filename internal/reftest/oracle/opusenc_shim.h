@@ -329,4 +329,17 @@ static void oracle_topenc_destroy(oracle_topenc_h *h)
    free(h);
 }
 
+/* Compile-time float-literal constant, pinned the same way as the celt QCONST32 /
+   GCONST wrappers in celtenc_shim.h. SILK_FIX_CONST, like QCONST32, evaluates its
+   product IN THE PRECISION OF THE LITERAL: VARIABLE_HP_SMTH_COEF2 is 0.015f
+   (silk/tuning_parameters.h:63), an "f"-suffixed FLOAT, so the int64 shift is
+   converted to float rather than the literal to double. Here the two readings
+   happen to agree, but that is a fact to be VERIFIED against the C compiler, not
+   assumed: this is the exact class of constant that produced two real packet
+   divergences in CP8c. Used at opus_encoder.c:1975. */
+static int32_t oracle_const_silk_variable_hp_smth_coef2_q16(void)
+{
+   return (int32_t)SILK_FIX_CONST(VARIABLE_HP_SMTH_COEF2, 16);
+}
+
 #endif /* GOOPUS_OPUSENC_SHIM_H */

@@ -86,6 +86,23 @@ const (
 	variableHPSmthCoef2Q16 = 983
 )
 
+// FloatLiteralConsts exposes the constants in this package that are derived from a
+// float literal in the C, so the oracle can assert each one against the value the C
+// COMPILER produces from that literal rather than against a hand-derivation in a
+// comment. It is the internal/opusenc counterpart of celt.FloatLiteralConsts and is
+// consumed by TestFloatLiteralConstsMatchC.
+//
+// The rule it enforces: SILK_FIX_CONST / QCONST32 / GCONST evaluate their product IN
+// THE PRECISION OF THE LITERAL, so an "f"-suffixed literal is rounded to float32
+// before the shift and an unsuffixed one is not. The two readings differ by a few
+// ULPs, which is enough to flip a comparison and diverge an entire packet; that was a
+// real bug twice in CP8c. Every new float-derived constant belongs in this map.
+func FloatLiteralConsts() map[string]int32 {
+	return map[string]int32{
+		"SILK_FIX_CONST(VARIABLE_HP_SMTH_COEF2,16)": variableHPSmthCoef2Q16,
+	}
+}
+
 // DCReject is dc_reject (opus_encoder.c:479), the FIXED_POINT variant. It is a
 // one-pole DC-blocking highpass run independently per channel over interleaved
 // samples, with the pole state carried across frames in hp_mem.
