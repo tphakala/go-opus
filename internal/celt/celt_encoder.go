@@ -308,6 +308,16 @@ func (st *Encoder) SetEnergyMask(mask []int32) { st.energyMask = mask }
 // (OPUS_GET_FINAL_RANGE).
 func (st *Encoder) Rng() uint32 { return st.rng }
 
+// Overlap is celt_mode->overlap. The Opus layer fetches the CELT mode with
+// CELT_GET_MODE (opus_encoder.c:1957) purely so it can pass celt_mode->overlap
+// and celt_mode->window to gain_fade (:2317) and stereo_fade (:2344), which run
+// in the Opus PCM domain, not inside CELT. This accessor is that seam.
+func (st *Encoder) Overlap() int { return st.mode.overlap }
+
+// Window is celt_mode->window, the MDCT overlap window (celt_coef, Q15 int16 in
+// this fixed-point build) that stereo_fade cross-fades with. See Overlap.
+func (st *Encoder) Window() []int16 { return st.mode.window }
+
 // BitrateToBits is bitrate_to_bits (celt.h:151), the static inline the VBR path
 // of celt_encode_with_ec (:1903) uses to turn st->bitrate into a per-frame bit
 // budget: bitrate*6/(6*Fs/frame_size). All three operands are opus_int32 and the

@@ -161,6 +161,12 @@ type Encoder struct {
 	// See the State doc.
 
 	celt *celt.Encoder
+
+	// wit records which branches the last EncodeRaw took. It is NOT encoder state:
+	// nothing reads it, it is not reset by OPUS_RESET_STATE, and it has no C
+	// counterpart. It exists so the differential test can prove its sweep is not
+	// vacuous. See Witness in encode.go.
+	wit Witness
 }
 
 // NewEncoder is opus_encoder_init (opus_encoder.c:204) for the frozen config: Fs

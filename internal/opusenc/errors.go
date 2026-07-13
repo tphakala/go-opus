@@ -13,6 +13,14 @@ var (
 	ErrBufferTooSmall = errors.New("opusenc: buffer too small")
 	// ErrInternal maps OPUS_INTERNAL_ERROR.
 	ErrInternal = errors.New("opusenc: internal error")
+	// ErrUnimplemented maps OPUS_UNIMPLEMENTED. This port returns it for the two
+	// configurations phase 4 deliberately defers rather than mishandles: frames
+	// longer than 20 ms (which libopus splits across the repacketizer at
+	// opus_encoder.c:1698) and the OPUS_AUTO mode decision (:1473, which needs
+	// compute_stereo_width). libopus itself SUPPORTS both; returning an error here
+	// is a divergence, and it is on purpose, because the alternative is a silently
+	// wrong packet.
+	ErrUnimplemented = errors.New("opusenc: unimplemented in this build")
 )
 
 // codeErr maps an internal negative Opus error code to its sentinel error. A
@@ -24,6 +32,8 @@ func codeErr(code int) error {
 		return ErrBadArg
 	case opusBufferTooSmall:
 		return ErrBufferTooSmall
+	case opusUnimplemented:
+		return ErrUnimplemented
 	default: // opusInternalError and any unexpected code
 		return ErrInternal
 	}
