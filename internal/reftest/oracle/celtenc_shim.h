@@ -315,4 +315,300 @@ static int oracle_celtenc_stereo_analysis(const int32_t *X, int LM, int N0)
    return stereo_analysis(oracle_celtenc_mode(), (const celt_norm *)X, LM, N0);
 }
 
+/* ==========================================================================
+ * CP8c wave 1: compute_vbr, hysteresis_decision, and the CELT ENCODER HANDLE
+ * (create / configure / encode-one-frame / dump-state / destroy) that lets a Go
+ * test drive N frames on the SAME C encoder and compare the evolved state after
+ * every frame.
+ *
+ * The handle exists because struct OpusCustomEncoder is defined INSIDE
+ * celt_encoder.c and is therefore an opaque incomplete type everywhere else;
+ * only this TU (the sole one that #includes celt_encoder.c) can read its fields.
+ * That is also why oracle_celtenc_create/encode/destroy in celtdec_shim.h cannot
+ * be extended with a state dump: they see CELTEncoder only as a forward
+ * declaration. Those stay as they are (CBR-only packet producers for the DECODER
+ * test); the encoder differential test uses the handle below.
+ * ========================================================================== */
+
+/* --- compute_vbr (celt_encoder.c:1604, static) ---------------------------- */
+
+/* Flat-scalar wrapper over compute_vbr. ARG_QEXT(x) expands to nothing without
+   ENABLE_QEXT (celt.h:49), so there is NO enable_qext parameter in this build,
+   and under DISABLE_FLOAT_API the AnalysisInfo* reduces to `(void)analysis;`
+   (:1671) -- a zeroed struct is passed to keep it inert.
+   stereo_saving and tf_estimate are opus_val16 (int16) and are truncated to that
+   on the way in, exactly as the C call site at :2456-2464 does; maxDepth,
+   surround_masking and temporal_vbr are celt_glog (int32). Returns the target in
+   8th bits per frame. compute_vbr touches NO st-> field: it is a pure function
+   of these arguments. */
+static int32_t oracle_celtenc_compute_vbr(int32_t base_target, int LM, int32_t bitrate,
+      int lastCodedBands, int C, int intensity, int constrained_vbr,
+      int stereo_saving, int tot_boost, int tf_estimate, int pitch_change,
+      int32_t maxDepth, int lfe, int has_surround_mask, int32_t surround_masking,
+      int32_t temporal_vbr)
+{
+   const CELTMode *m = oracle_celtenc_mode();
+   AnalysisInfo analysis;
+   memset(&analysis, 0, sizeof(analysis));
+   return (int32_t)compute_vbr(m, &analysis, (opus_int32)base_target, LM,
+         (opus_int32)bitrate, lastCodedBands, C, intensity, constrained_vbr,
+         (opus_val16)stereo_saving, tot_boost, (opus_val16)tf_estimate,
+         pitch_change, (celt_glog)maxDepth, lfe, has_surround_mask,
+         (celt_glog)surround_masking, (celt_glog)temporal_vbr);
+}
+
+/* --- hysteresis_decision (bands.c:46, NON-static) -------------------------- */
+
+/* thresholds and hysteresis are N opus_val16 (int16). val is opus_val16 too; it
+   arrives as an int and is truncated to 16 bits here, matching the encoder's own
+   `(opus_val16)(equiv_rate/1000)` cast at :2403. */
+static int oracle_celtenc_hysteresis_decision(int val, const int16_t *thresholds,
+      const int16_t *hysteresis, int N, int prev)
+{
+   return hysteresis_decision((opus_val16)val, (const opus_val16 *)thresholds,
+         (const opus_val16 *)hysteresis, N, prev);
+}
+
+/* --- the encoder handle --------------------------------------------------- */
+
+/* Number of SCALAR words in the state dump. See oracle_celtenc_h_dump for the
+   canonical order, which is the declaration order of the struct's reset region
+   (celt_encoder.c:91-127) and MUST match celt.EncoderState (Go). */
+#define ORACLE_ENC_NSCALARS 23
+
+/* nbEBands is 21 for the frozen 48 kHz / 960 mode; 32 leaves headroom for the
+   C*nbEBands energy_mask copy the handle owns. */
+#define ORACLE_ENC_MAX_EBANDS 32
+
+typedef struct {
+   CELTEncoder *st;
+   int channels;    /* CC, the allocation channel count */
+   int nbEBands;
+   int overlap;
+   /* st->energy_mask is a BORROWED pointer that must outlive the encode call, so
+      the handle owns the storage. Only the multistream/surround encoder ever
+      sets it; on the frozen CELT-only path it stays NULL. */
+   celt_glog energy_mask[2 * ORACLE_ENC_MAX_EBANDS];
+} OracleEncHandle;
+
+/* Create an encoder in the state celt_encoder_init leaves it in (no ctls
+   applied): CBR, bitrate OPUS_BITRATE_MAX, complexity 5, lsb_depth 24, start 0,
+   end effEBands, constrained_vbr 1, clip 1, signalling 1. Call
+   oracle_celtenc_h_configure next. */
+static void *oracle_celtenc_h_create(int channels)
+{
+   OracleEncHandle *H;
+   int size;
+   if (channels < 1 || channels > 2)
+      return NULL;
+   H = (OracleEncHandle *)calloc(1, sizeof(OracleEncHandle));
+   if (!H)
+      return NULL;
+   size = celt_encoder_get_size(channels);
+   H->st = (CELTEncoder *)malloc((size_t)size);
+   if (!H->st) {
+      free(H);
+      return NULL;
+   }
+   if (celt_encoder_init(H->st, 48000, channels, 0) != OPUS_OK) {
+      free(H->st);
+      free(H);
+      return NULL;
+   }
+   H->channels = channels;
+   H->nbEBands = H->st->mode->nbEBands;
+   H->overlap = H->st->mode->overlap;
+   return H;
+}
+
+/* Apply the full ctl set. Returns 0 on success, or -(1-based ctl index) for the
+   first request opus_custom_encoder_ctl rejected, so a Go test failure points at
+   the exact ctl.
+
+   force_intra and disable_prefilter are set on the struct DIRECTLY: the only ctl
+   that reaches them is CELT_SET_PREDICTION (:2972), which couples them
+   (disable_pf = value<=1; force_intra = value==0) and so cannot express the two
+   flags independently. The Go celt.Encoder exposes SetForceIntra/SetDisablePf
+   for the same reason. Every other field goes through the real ctl, including
+   its validation and the OPUS_SET_BITRATE clamp to 750000*channels (:3006). */
+static int oracle_celtenc_h_configure(void *h, int stream_channels, int complexity,
+      int vbr, int vbr_constraint, int32_t bitrate, int lfe, int force_intra,
+      int packet_loss, int lsb_depth, int disable_prefilter, int start, int end,
+      int disable_inv)
+{
+   OracleEncHandle *H = (OracleEncHandle *)h;
+   CELTEncoder *st = H->st;
+   if (opus_custom_encoder_ctl(st, CELT_SET_CHANNELS_REQUEST, (opus_int32)stream_channels) != OPUS_OK)
+      return -1;
+   if (opus_custom_encoder_ctl(st, OPUS_SET_COMPLEXITY_REQUEST, (opus_int32)complexity) != OPUS_OK)
+      return -2;
+   if (opus_custom_encoder_ctl(st, OPUS_SET_VBR_REQUEST, (opus_int32)vbr) != OPUS_OK)
+      return -3;
+   if (opus_custom_encoder_ctl(st, OPUS_SET_VBR_CONSTRAINT_REQUEST, (opus_int32)vbr_constraint) != OPUS_OK)
+      return -4;
+   if (opus_custom_encoder_ctl(st, OPUS_SET_BITRATE_REQUEST, (opus_int32)bitrate) != OPUS_OK)
+      return -5;
+   if (opus_custom_encoder_ctl(st, OPUS_SET_LFE_REQUEST, (opus_int32)lfe) != OPUS_OK)
+      return -6;
+   if (opus_custom_encoder_ctl(st, OPUS_SET_PACKET_LOSS_PERC_REQUEST, (opus_int32)packet_loss) != OPUS_OK)
+      return -7;
+   if (opus_custom_encoder_ctl(st, OPUS_SET_LSB_DEPTH_REQUEST, (opus_int32)lsb_depth) != OPUS_OK)
+      return -8;
+   if (opus_custom_encoder_ctl(st, CELT_SET_START_BAND_REQUEST, (opus_int32)start) != OPUS_OK)
+      return -9;
+   if (opus_custom_encoder_ctl(st, CELT_SET_END_BAND_REQUEST, (opus_int32)end) != OPUS_OK)
+      return -10;
+   if (opus_custom_encoder_ctl(st, OPUS_SET_PHASE_INVERSION_DISABLED_REQUEST, (opus_int32)disable_inv) != OPUS_OK)
+      return -11;
+   st->force_intra = force_intra;
+   st->disable_pf = disable_prefilter;
+   return 0;
+}
+
+/* Install (a copy of) the surround masking curve, C*nbEBands celt_glog, or clear
+   it with len==0. Returns 0, or -1 if len exceeds the handle's storage. The
+   frozen single-stream CELT config never sets it (only OPUS_SET_ENERGY_MASK from
+   the multistream encoder does), so the surround-masking block of
+   celt_encode_with_ec (:2108-2185) is inert unless a test calls this. */
+static int oracle_celtenc_h_set_energy_mask(void *h, const int32_t *mask, int len)
+{
+   OracleEncHandle *H = (OracleEncHandle *)h;
+   int i;
+   if (len < 0 || len > 2 * ORACLE_ENC_MAX_EBANDS)
+      return -1;
+   if (len == 0) {
+      (void)opus_custom_encoder_ctl(H->st, OPUS_SET_ENERGY_MASK_REQUEST, (celt_glog *)NULL);
+      return 0;
+   }
+   for (i = 0; i < len; i++)
+      H->energy_mask[i] = (celt_glog)mask[i];
+   (void)opus_custom_encoder_ctl(H->st, OPUS_SET_ENERGY_MASK_REQUEST, H->energy_mask);
+   return 0;
+}
+
+/* Encode ONE frame (enc==NULL, so celt_encode_with_ec runs its own ec_enc over
+   buf, which is the path the Go driver takes). Returns the celt_encode_with_ec
+   return value (packet length in bytes, or a negative OPUS_* error) and reports
+   st->rng, i.e. OPUS_GET_FINAL_RANGE. */
+static int oracle_celtenc_h_encode(void *h, const int16_t *pcm, int frame_size,
+      int nb_bytes, unsigned char *buf, uint32_t *rng_out)
+{
+   OracleEncHandle *H = (OracleEncHandle *)h;
+   int ret;
+   memset(buf, 0, (size_t)nb_bytes);
+   ret = celt_encode_with_ec(H->st, (const opus_res *)pcm, frame_size, buf,
+         nb_bytes, NULL);
+   *rng_out = (uint32_t)H->st->rng;
+   return ret;
+}
+
+/* Full flat state dump, in the CANONICAL ORDER (identical to Go's
+   celt.EncoderState, whose doc comment carries the same list). It is the
+   declaration order of the reset region (celt_encoder.c:91-127), skipping the
+   fields that are dead in the frozen CELT-only config (analysis, silk_info) and
+   the energy_mask POINTER (an input, not evolved state), followed by the six
+   trailing VLA arrays:
+
+     scalars[ 0] rng               scalars[12] preemph_memE[1]
+     scalars[ 1] spread_decision   scalars[13] preemph_memD[0]
+     scalars[ 2] delayedIntra      scalars[14] preemph_memD[1]
+     scalars[ 3] tonal_average     scalars[15] vbr_reservoir
+     scalars[ 4] lastCodedBands    scalars[16] vbr_drift
+     scalars[ 5] hf_average        scalars[17] vbr_offset
+     scalars[ 6] tapset_decision   scalars[18] vbr_count
+     scalars[ 7] prefilter_period  scalars[19] overlap_max
+     scalars[ 8] prefilter_gain    scalars[20] stereo_saving
+     scalars[ 9] prefilter_tapset  scalars[21] intensity
+     scalars[10] consec_transient  scalars[22] spec_avg
+     scalars[11] preemph_memE[0]
+
+   then in_mem, prefilter_mem, oldBandE, oldLogE, oldLogE2, energyError.
+
+   prefilter_gain (opus_val16) and stereo_saving (opus_val16) are sign-extended
+   into int32_t here; the Go side stores them back into int16 fields, so the
+   16-bit truncation semantics are preserved where they matter (in the encoder,
+   not in the transport).
+
+   Buffer sizes the caller must provide: scalars[ORACLE_ENC_NSCALARS],
+   in_mem[CC*overlap], prefilter_mem[CC*COMBFILTER_MAXPERIOD], and
+   oldBandE/oldLogE/oldLogE2/energyError[CC*nbEBands] each. */
+static void oracle_celtenc_h_dump(void *h, int32_t *scalars, int32_t *in_mem,
+      int32_t *prefilter_mem, int32_t *oldBandE, int32_t *oldLogE,
+      int32_t *oldLogE2, int32_t *energyError)
+{
+   OracleEncHandle *H = (OracleEncHandle *)h;
+   CELTEncoder *st = H->st;
+   int CC = H->channels;
+   int nbEBands = H->nbEBands;
+   int overlap = H->overlap;
+   /* Same pointer arithmetic as celt_encode_with_ec:1854-1858 (QEXT_SCALE is the
+      identity without ENABLE_QEXT). */
+   celt_sig *c_prefilter_mem = st->in_mem + CC * overlap;
+   celt_glog *c_oldBandE = (celt_glog *)(st->in_mem + CC * (overlap + COMBFILTER_MAXPERIOD));
+   celt_glog *c_oldLogE = c_oldBandE + CC * nbEBands;
+   celt_glog *c_oldLogE2 = c_oldLogE + CC * nbEBands;
+   celt_glog *c_energyError = c_oldLogE2 + CC * nbEBands;
+   int i;
+   int k = 0;
+
+   scalars[k++] = (int32_t)st->rng;
+   scalars[k++] = (int32_t)st->spread_decision;
+   scalars[k++] = (int32_t)st->delayedIntra;
+   scalars[k++] = (int32_t)st->tonal_average;
+   scalars[k++] = (int32_t)st->lastCodedBands;
+   scalars[k++] = (int32_t)st->hf_average;
+   scalars[k++] = (int32_t)st->tapset_decision;
+   scalars[k++] = (int32_t)st->prefilter_period;
+   scalars[k++] = (int32_t)st->prefilter_gain;
+   scalars[k++] = (int32_t)st->prefilter_tapset;
+   scalars[k++] = (int32_t)st->consec_transient;
+   scalars[k++] = (int32_t)st->preemph_memE[0];
+   scalars[k++] = (int32_t)st->preemph_memE[1];
+   scalars[k++] = (int32_t)st->preemph_memD[0];
+   scalars[k++] = (int32_t)st->preemph_memD[1];
+   scalars[k++] = (int32_t)st->vbr_reservoir;
+   scalars[k++] = (int32_t)st->vbr_drift;
+   scalars[k++] = (int32_t)st->vbr_offset;
+   scalars[k++] = (int32_t)st->vbr_count;
+   scalars[k++] = (int32_t)st->overlap_max;
+   scalars[k++] = (int32_t)st->stereo_saving;
+   scalars[k++] = (int32_t)st->intensity;
+   scalars[k++] = (int32_t)st->spec_avg;
+   celt_assert(k == ORACLE_ENC_NSCALARS);
+
+   for (i = 0; i < CC * overlap; i++)
+      in_mem[i] = (int32_t)st->in_mem[i];
+   for (i = 0; i < CC * COMBFILTER_MAXPERIOD; i++)
+      prefilter_mem[i] = (int32_t)c_prefilter_mem[i];
+   for (i = 0; i < CC * nbEBands; i++) {
+      oldBandE[i] = (int32_t)c_oldBandE[i];
+      oldLogE[i] = (int32_t)c_oldLogE[i];
+      oldLogE2[i] = (int32_t)c_oldLogE2[i];
+      energyError[i] = (int32_t)c_energyError[i];
+   }
+}
+
+static void oracle_celtenc_h_destroy(void *h)
+{
+   OracleEncHandle *H = (OracleEncHandle *)h;
+   if (!H)
+      return;
+   free(H->st);
+   free(H);
+}
+
+/* Compile-time QCONST/GCONST constants, evaluated by the C compiler with EXACTLY the
+   literal each call site in celt_encoder.c / bands.c writes. A literal with an "f"
+   suffix is a float and is rounded in float32 before the shift; an unsuffixed literal
+   is a double. The two disagree by a few ULPs, which is enough to flip a comparison
+   and diverge the whole packet, so the Go port has to pick the matching helper per
+   site. These wrappers pin that choice against the C rather than against a comment. */
+static int32_t oracle_const_q29_098f(void)      { return QCONST32(.98f, 29); }        /* celt_encoder.c:447, :2242 */
+static int32_t oracle_const_q29_099f(void)      { return QCONST32(.99f, 29); }        /* celt_encoder.c:1440 */
+static int32_t oracle_const_q29_1_999999f(void) { return QCONST32(1.999999f, 29); }   /* celt_encoder.c:1354 */
+static int32_t oracle_const_q29_3_999999d(void) { return QCONST32(3.999999, 29); }    /* celt_encoder.c:1387, DOUBLE (no f) */
+static int32_t oracle_const_q31_sqrt2inv(void)  { return QCONST32(.70710678f, 31); }  /* bands.c:631 */
+static int32_t oracle_const_gconst_31_9(void)   { return GCONST(31.9f); }             /* celt_encoder.c:1055 */
+static int32_t oracle_const_gconst_0_0062(void) { return GCONST(.0062f); }            /* celt_encoder.c:1108 */
+
 #endif /* GOOPUS_CELTENC_SHIM_H */

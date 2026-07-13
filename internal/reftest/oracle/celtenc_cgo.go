@@ -7,7 +7,12 @@ package oracle
 */
 import "C"
 
-import "unsafe"
+import (
+	"fmt"
+	"unsafe"
+
+	"github.com/tphakala/go-opus/internal/celt"
+)
 
 // This file exposes the pinned libopus CELT encoder FRONT-HALF stage functions
 // (celt/celt_encoder.c: celt_preemphasis, transient_analysis,
@@ -259,3 +264,218 @@ func cCeltencStereoAnalysis(x []int32, LM, N0 int) int {
 	return int(C.oracle_celtenc_stereo_analysis(
 		(*C.int32_t)(unsafe.Pointer(&x[0])), C.int(LM), C.int(N0)))
 }
+
+// ---------------------------------------------------------------------------
+// CP8c: compute_vbr, hysteresis_decision, and the CELT encoder handle.
+// ---------------------------------------------------------------------------
+
+// cCeltencComputeVbr runs compute_vbr (celt_encoder.c:1604) and returns the VBR
+// target in 8th bits per frame. compute_vbr is a PURE function of its arguments
+// (it reads no st-> field), so no handle is involved: all the cross-frame VBR
+// state lives in the caller at :2435-2533. There is no enable_qext parameter in
+// this build (ARG_QEXT expands to nothing). stereoSaving and tfEstimate are
+// opus_val16 in C and truncate to 16 bits.
+func cCeltencComputeVbr(baseTarget int32, LM int, bitrate int32, lastCodedBands, C_, intensity,
+	constrainedVbr int, stereoSaving int16, totBoost int, tfEstimate int16, pitchChange int,
+	maxDepth int32, lfe, hasSurroundMask int, surroundMasking, temporalVbr int32) int32 {
+	return int32(C.oracle_celtenc_compute_vbr(
+		C.int32_t(baseTarget), C.int(LM), C.int32_t(bitrate), C.int(lastCodedBands),
+		C.int(C_), C.int(intensity), C.int(constrainedVbr), C.int(stereoSaving),
+		C.int(totBoost), C.int(tfEstimate), C.int(pitchChange), C.int32_t(maxDepth),
+		C.int(lfe), C.int(hasSurroundMask), C.int32_t(surroundMasking),
+		C.int32_t(temporalVbr)))
+}
+
+// cCeltencHysteresisDecision runs hysteresis_decision (bands.c:46). thresholds
+// and hysteresis are N opus_val16; val is truncated to opus_val16 by the shim,
+// like the encoder's own (opus_val16)(equiv_rate/1000) cast at :2403.
+func cCeltencHysteresisDecision(val int, thresholds, hysteresis []int16, N, prev int) int {
+	return int(C.oracle_celtenc_hysteresis_decision(C.int(val),
+		(*C.int16_t)(unsafe.Pointer(&thresholds[0])),
+		(*C.int16_t)(unsafe.Pointer(&hysteresis[0])),
+		C.int(N), C.int(prev)))
+}
+
+// celtencConfig is the full ctl set the encoder handle applies. The zero value is
+// NOT valid (end must be >= 1); build it from celtencDefaultConfig.
+type celtencConfig struct {
+	StreamChannels   int // CELT_SET_CHANNELS: coded channels C (<= CC)
+	Complexity       int // OPUS_SET_COMPLEXITY, 0..10
+	VBR              int // OPUS_SET_VBR
+	VBRConstraint    int // OPUS_SET_VBR_CONSTRAINT
+	Bitrate          int32
+	LFE              int // OPUS_SET_LFE
+	ForceIntra       int // st->force_intra (see below)
+	PacketLoss       int // OPUS_SET_PACKET_LOSS_PERC, 0..100
+	LsbDepth         int // OPUS_SET_LSB_DEPTH, 8..24
+	DisablePrefilter int // st->disable_pf (see below)
+	Start            int // CELT_SET_START_BAND
+	End              int // CELT_SET_END_BAND
+	DisableInv       int // OPUS_SET_PHASE_INVERSION_DISABLED, 0/1
+}
+
+// celtencDefaultConfig returns the post-celt_encoder_init defaults
+// (celt_encoder.c:194-221) for the given coded-channel count, so a test only has
+// to override what it is sweeping.
+func celtencDefaultConfig(streamChannels int) celtencConfig {
+	return celtencConfig{
+		StreamChannels: streamChannels,
+		Complexity:     5,
+		VBR:            0,
+		VBRConstraint:  1,
+		Bitrate:        -1, // OPUS_BITRATE_MAX
+		LsbDepth:       24,
+		Start:          0,
+		End:            21, // mode->effEBands
+	}
+}
+
+// cCeltencHandle is a live libopus CELT encoder that a test drives frame by
+// frame in lockstep with the Go celt.Encoder, reading its full cross-frame state
+// after every frame. Close it when done.
+type cCeltencHandle struct {
+	h        unsafe.Pointer
+	channels int // CC
+	nbEBands int
+	overlap  int
+}
+
+// newCCeltencHandle creates a C CELT encoder for CC channels, in the state
+// celt_encoder_init leaves it in. Apply a config with Configure before encoding.
+func newCCeltencHandle(channels int) (*cCeltencHandle, error) {
+	p := C.oracle_celtenc_h_create(C.int(channels))
+	if p == nil {
+		return nil, fmt.Errorf("oracle_celtenc_h_create(channels=%d) failed", channels)
+	}
+	return &cCeltencHandle{
+		h:        p,
+		channels: channels,
+		nbEBands: cCeltencNbebands(),
+		overlap:  cCeltencOverlap(),
+	}, nil
+}
+
+// Configure applies the full ctl set. force_intra and disable_prefilter are
+// written to the struct directly (the only ctl that reaches them,
+// CELT_SET_PREDICTION, couples the two); everything else goes through the real
+// opus_custom_encoder_ctl, including its validation and the OPUS_SET_BITRATE
+// clamp to 750000*channels. The Go celt.Encoder setters mirror the same
+// semantics.
+func (e *cCeltencHandle) Configure(cfg celtencConfig) error {
+	rc := C.oracle_celtenc_h_configure(e.h,
+		C.int(cfg.StreamChannels), C.int(cfg.Complexity), C.int(cfg.VBR),
+		C.int(cfg.VBRConstraint), C.int32_t(cfg.Bitrate), C.int(cfg.LFE),
+		C.int(cfg.ForceIntra), C.int(cfg.PacketLoss), C.int(cfg.LsbDepth),
+		C.int(cfg.DisablePrefilter), C.int(cfg.Start), C.int(cfg.End),
+		C.int(cfg.DisableInv))
+	if rc != 0 {
+		return fmt.Errorf("oracle_celtenc_h_configure: ctl #%d rejected (%+v)", -int(rc), cfg)
+	}
+	return nil
+}
+
+// SetEnergyMask installs a copy of the surround masking curve (C*nbEBands
+// celt_glog), or clears it when mask is empty. Only the multistream encoder ever
+// sets it, so the frozen CELT-only path leaves it nil and the surround-masking
+// block of celt_encode_with_ec is inert.
+func (e *cCeltencHandle) SetEnergyMask(mask []int32) error {
+	var p *C.int32_t
+	if len(mask) > 0 {
+		p = (*C.int32_t)(unsafe.Pointer(&mask[0]))
+	}
+	if rc := C.oracle_celtenc_h_set_energy_mask(e.h, p, C.int(len(mask))); rc != 0 {
+		return fmt.Errorf("oracle_celtenc_h_set_energy_mask(len=%d) rejected", len(mask))
+	}
+	return nil
+}
+
+// Encode encodes one interleaved int16 frame (frameSize samples per PHYSICAL
+// channel) into at most nbBytes bytes with enc==NULL, the path the Go driver
+// takes. It returns the raw celt_encode_with_ec return value (packet length, or
+// a negative OPUS_* error), the packet bytes (nil when ret<0) and st->rng.
+func (e *cCeltencHandle) Encode(pcm []int16, frameSize, nbBytes int) (ret int, pkt []byte, rng uint32) {
+	buf := make([]byte, nbBytes)
+	var cRng C.uint32_t
+	n := int(C.oracle_celtenc_h_encode(e.h,
+		(*C.int16_t)(unsafe.Pointer(&pcm[0])), C.int(frameSize), C.int(nbBytes),
+		(*C.uchar)(unsafe.Pointer(&buf[0])), &cRng))
+	if n < 0 {
+		return n, nil, uint32(cRng)
+	}
+	return n, buf[:n], uint32(cRng)
+}
+
+// State dumps the C encoder's persistent cross-frame state into a
+// celt.EncoderState, in the canonical field order documented on that type (and
+// on oracle_celtenc_h_dump). Both sides are then hashed by the SAME Go
+// EncoderState.Hash, so there is no cross-language serialization risk; the test
+// can also diff field by field to localize a mismatch.
+func (e *cCeltencHandle) State() celt.EncoderState {
+	const nScalars = 23 // ORACLE_ENC_NSCALARS
+	nb := e.channels * e.nbEBands
+	scalars := make([]int32, nScalars)
+	inMem := make([]int32, e.channels*e.overlap)
+	prefilterMem := make([]int32, e.channels*cCeltencMaxperiod())
+	oldBandE := make([]int32, nb)
+	oldLogE := make([]int32, nb)
+	oldLogE2 := make([]int32, nb)
+	energyError := make([]int32, nb)
+
+	C.oracle_celtenc_h_dump(e.h,
+		(*C.int32_t)(unsafe.Pointer(&scalars[0])),
+		(*C.int32_t)(unsafe.Pointer(&inMem[0])),
+		(*C.int32_t)(unsafe.Pointer(&prefilterMem[0])),
+		(*C.int32_t)(unsafe.Pointer(&oldBandE[0])),
+		(*C.int32_t)(unsafe.Pointer(&oldLogE[0])),
+		(*C.int32_t)(unsafe.Pointer(&oldLogE2[0])),
+		(*C.int32_t)(unsafe.Pointer(&energyError[0])))
+
+	return celt.EncoderState{
+		Rng:             uint32(scalars[0]),
+		SpreadDecision:  int(scalars[1]),
+		DelayedIntra:    scalars[2],
+		TonalAverage:    int(scalars[3]),
+		LastCodedBands:  int(scalars[4]),
+		HfAverage:       int(scalars[5]),
+		TapsetDecision:  int(scalars[6]),
+		PrefilterPeriod: int(scalars[7]),
+		PrefilterGain:   int16(scalars[8]),
+		PrefilterTapset: int(scalars[9]),
+		ConsecTransient: int(scalars[10]),
+		PreemphMemE:     [2]int32{scalars[11], scalars[12]},
+		PreemphMemD:     [2]int32{scalars[13], scalars[14]},
+		VbrReservoir:    scalars[15],
+		VbrDrift:        scalars[16],
+		VbrOffset:       scalars[17],
+		VbrCount:        scalars[18],
+		OverlapMax:      scalars[19],
+		StereoSaving:    int16(scalars[20]),
+		Intensity:       int(scalars[21]),
+		SpecAvg:         scalars[22],
+		InMem:           inMem,
+		PrefilterMem:    prefilterMem,
+		OldBandE:        oldBandE,
+		OldLogE:         oldLogE,
+		OldLogE2:        oldLogE2,
+		EnergyError:     energyError,
+	}
+}
+
+// Close frees the C encoder.
+func (e *cCeltencHandle) Close() {
+	if e.h != nil {
+		C.oracle_celtenc_h_destroy(e.h)
+		e.h = nil
+	}
+}
+
+// Compile-time constant accessors: see the comment block in celtenc_shim.h. These let
+// the Go port assert it picked the float32-rounded or float64 helper that matches the
+// literal the C source actually writes at each call site.
+func cConstQ29_098f() int32      { return int32(C.oracle_const_q29_098f()) }
+func cConstQ29_099f() int32      { return int32(C.oracle_const_q29_099f()) }
+func cConstQ29_1_999999f() int32 { return int32(C.oracle_const_q29_1_999999f()) }
+func cConstQ29_3_999999d() int32 { return int32(C.oracle_const_q29_3_999999d()) }
+func cConstQ31Sqrt2Inv() int32   { return int32(C.oracle_const_q31_sqrt2inv()) }
+func cConstGconst31_9() int32    { return int32(C.oracle_const_gconst_31_9()) }
+func cConstGconst0_0062() int32  { return int32(C.oracle_const_gconst_0_0062()) }

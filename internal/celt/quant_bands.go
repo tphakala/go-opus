@@ -365,9 +365,14 @@ func quantCoarseEnergyImpl(m *celtMode, start, end int, eBands, oldEBands []int3
 // bytes back over the shared buffer window. delayedIntra carries the RDO bias
 // across frames. This is the first range-coder snapshot/splice site
 // (docs/hard-parts.md 1); see the comment on rangecoding.Encoder.
+//
+// It returns the intra decision it settled on (0 = inter, 1 = intra). C returns
+// void; the value is exposed only so the celt_encode_with_ec differential test
+// can prove non-vacuously that the intra branch fired (it is otherwise buried in
+// the bitstream), and no caller acts on it.
 func quantCoarseEnergy(m *celtMode, start, end, effEnd int, eBands, oldEBands []int32,
 	budget uint32, error []int32, enc *rangecoding.Encoder, C, LM, nbAvailableBytes,
-	forceIntra int, delayedIntra *int32, twoPass, lossRate, lfe int) {
+	forceIntra int, delayedIntra *int32, twoPass, lossRate, lfe int) int {
 	var intra int
 	var maxDecay int32
 
@@ -444,6 +449,7 @@ func quantCoarseEnergy(m *celtMode, start, end, effEnd int, eBands, oldEBands []
 		*delayedIntra = fixedmath.ADD32(fixedmath.MULT16_32_Q15(int16(fixedmath.MULT16_16_Q15(predCoef[LM], predCoef[LM])), *delayedIntra),
 			newDistortion)
 	}
+	return intra
 }
 
 // quantFineEnergy ports quant_fine_energy (celt/quant_bands.c:360): the
@@ -584,7 +590,7 @@ func EcLaplaceEncode(enc *rangecoding.Encoder, value *int, fs uint32, decay int)
 func QuantCoarseEnergy(start, end, effEnd int, eBands, oldEBands []int32, budget uint32,
 	error []int32, enc *rangecoding.Encoder, C, LM, nbAvailableBytes, forceIntra int,
 	delayedIntra *int32, twoPass, lossRate, lfe int) {
-	quantCoarseEnergy(&mode48000_960, start, end, effEnd, eBands, oldEBands, budget, error,
+	_ = quantCoarseEnergy(&mode48000_960, start, end, effEnd, eBands, oldEBands, budget, error,
 		enc, C, LM, nbAvailableBytes, forceIntra, delayedIntra, twoPass, lossRate, lfe)
 }
 

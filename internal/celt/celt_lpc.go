@@ -58,6 +58,27 @@ func celtMaxabs16(x []int16, len_ int) int32 {
 	return fixedmath.MAX32(fixedmath.EXTEND32(maxval), -fixedmath.EXTEND32(minval))
 }
 
+// celtMaxabsRes is celt_maxabs_res (mathops.h:118) with an explicit base offset,
+// so a caller can express C's celt_maxabs_res(pcm + off, len). ENABLE_RES24 is
+// not defined in the frozen config, so celt_maxabs_res is a #define for
+// celt_maxabs16 and opus_res is opus_int16: this is exactly celtMaxabs16 over
+// x[xOff:xOff+len_]. celt_encode_with_ec:1972-1973 uses both the offset form
+// (st->overlap_max) and the plain form (sample_max); note the lengths there are
+// scaled by C == stream_channels, not CC == channels.
+func celtMaxabsRes(x []int16, xOff, len_ int) int32 {
+	var maxval, minval int16
+	for i := 0; i < len_; i++ {
+		v := x[xOff+i]
+		if v > maxval {
+			maxval = v
+		}
+		if v < minval {
+			minval = v
+		}
+	}
+	return fixedmath.MAX32(fixedmath.EXTEND32(maxval), -fixedmath.EXTEND32(minval))
+}
+
 // celtMaxabs32 is celt_maxabs32 (mathops.h:122): max |x[i]| for opus_val32 input.
 func celtMaxabs32(x []int32, xOff, len_ int) int32 {
 	var maxval, minval int32

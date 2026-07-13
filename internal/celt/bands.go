@@ -40,6 +40,38 @@ const minStereoEnergy = 2
 // other SPREAD_* values live in vq.go, celt.go and bands_math.go).
 const spreadLight = 1
 
+// hysteresisDecision is hysteresis_decision (bands.c:46), a NON-static helper.
+// It picks the index of the first threshold that val does not reach, then keeps
+// the previous decision if val has not moved far enough past the neighbouring
+// threshold (the hysteresis band). The encoder calls it at celt_encoder.c:2403 to
+// update st->intensity (stereo only). thresholds and hysteresis are opus_val16
+// (int16) arrays of length N; prev is the previous decision, in [0,N].
+//
+// Note the C indexes thresholds[prev] / hysteresis[prev] whenever i>prev, which
+// requires prev<N, and thresholds[prev-1] / hysteresis[prev-1] whenever i<prev,
+// which requires prev>0. Both are guaranteed by i in [0,N] and the comparisons
+// themselves; transliterated as-is.
+//
+// C's usual arithmetic conversions promote the opus_val16 operands of
+// thresholds[prev]+hysteresis[prev] (and the corresponding subtraction) to int,
+// so those sums do NOT wrap at 16 bits. They are computed in int here for the
+// same reason.
+func hysteresisDecision(val int16, thresholds, hysteresis []int16, N, prev int) int {
+	var i int
+	for i = 0; i < N; i++ {
+		if val < thresholds[i] {
+			break
+		}
+	}
+	if i > prev && int(val) < int(thresholds[prev])+int(hysteresis[prev]) {
+		i = prev
+	}
+	if i < prev && int(val) > int(thresholds[prev-1])-int(hysteresis[prev-1]) {
+		i = prev
+	}
+	return i
+}
+
 // celtLcgRand is celt_lcg_rand (bands.c:61): the linear congruential generator
 // that drives the folding noise and anti-collapse fill. uint32 arithmetic wraps,
 // matching opus_uint32.
@@ -1590,4 +1622,10 @@ func SpreadingDecision(X []int32, average *int, lastDecision int, hfAverage, tap
 	updateHf, end, C, M int, spreadWeight []int) int {
 	return spreadingDecision(&mode48000_960, X, average, lastDecision, hfAverage, tapsetDecision,
 		updateHf, end, C, M, spreadWeight)
+}
+
+// HysteresisDecision is the exported seam over hysteresisDecision (bands.c:46),
+// which celt_encode_with_ec uses at :2403 to update st->intensity. Stateless.
+func HysteresisDecision(val int16, thresholds, hysteresis []int16, N, prev int) int {
+	return hysteresisDecision(val, thresholds, hysteresis, N, prev)
 }

@@ -204,9 +204,103 @@ func (st *Encoder) SetLFE(v int) { st.lfe = v }
 // SetDisablePf disables the prefilter/postfilter (CELT_SET_DISABLE_PREFILTER).
 func (st *Encoder) SetDisablePf(v int) { st.disablePf = v }
 
+// SetForceIntra forces intra coarse-energy coding. In C, disable_pf and
+// force_intra are set together by CELT_SET_PREDICTION (celt_encoder.c:2972:
+// disable_pf = value<=1, force_intra = value==0); the port keeps the two fields
+// independently settable, which is a strict superset of the ctl.
+func (st *Encoder) SetForceIntra(v int) { st.forceIntra = v }
+
+// SetVBR mirrors OPUS_SET_VBR (celt_encoder.c:2995). The ctl does not validate.
+func (st *Encoder) SetVBR(v int) { st.vbr = v }
+
+// SetConstrainedVBR mirrors OPUS_SET_VBR_CONSTRAINT (celt_encoder.c:2989). The
+// ctl does not validate.
+func (st *Encoder) SetConstrainedVBR(v int) { st.constrainedVbr = v }
+
+// SetBitrate mirrors OPUS_SET_BITRATE (celt_encoder.c:3001): OPUS_BITRATE_MAX
+// (-1) means "no limit"; any other value <= 500 is OPUS_BAD_ARG and leaves the
+// bitrate unchanged; otherwise the value is clamped to 750000*channels (CC).
+// Reports whether the value was accepted.
+func (st *Encoder) SetBitrate(v int32) bool {
+	if v <= 500 && v != opusBitrateMax {
+		return false
+	}
+	st.bitrate = fixedmath.MIN32(v, 750000*int32(st.channels))
+	return true
+}
+
+// SetLsbDepth mirrors OPUS_SET_LSB_DEPTH (celt_encoder.c:3018): 8..24, otherwise
+// OPUS_BAD_ARG (unchanged). Reports whether the value was accepted.
+func (st *Encoder) SetLsbDepth(v int) bool {
+	if v < 8 || v > 24 {
+		return false
+	}
+	st.lsbDepth = v
+	return true
+}
+
+// SetDisableInv mirrors OPUS_SET_PHASE_INVERSION_DISABLED
+// (celt_encoder.c:3032): 0 or 1, otherwise OPUS_BAD_ARG (unchanged). Reports
+// whether the value was accepted.
+func (st *Encoder) SetDisableInv(v int) bool {
+	if v < 0 || v > 1 {
+		return false
+	}
+	st.disableInv = v
+	return true
+}
+
+// SetStartBand mirrors CELT_SET_START_BAND (celt_encoder.c:2956): 0..nbEBands-1,
+// otherwise OPUS_BAD_ARG (unchanged). Reports whether the value was accepted.
+func (st *Encoder) SetStartBand(v int) bool {
+	if v < 0 || v >= st.mode.nbEBands {
+		return false
+	}
+	st.start = v
+	return true
+}
+
+// SetEndBand mirrors CELT_SET_END_BAND (celt_encoder.c:2964): 1..nbEBands,
+// otherwise OPUS_BAD_ARG (unchanged). Reports whether the value was accepted.
+func (st *Encoder) SetEndBand(v int) bool {
+	if v < 1 || v > st.mode.nbEBands {
+		return false
+	}
+	st.end = v
+	return true
+}
+
+// SetStreamChannels mirrors CELT_SET_CHANNELS (celt_encoder.c:3010): the number
+// of CODED channels C (1 or 2), which may be less than the number of physical
+// channels CC the encoder was allocated for. Reports whether the value was
+// accepted.
+func (st *Encoder) SetStreamChannels(v int) bool {
+	if v < 1 || v > 2 {
+		return false
+	}
+	st.streamChannels = v
+	return true
+}
+
+// SetEnergyMask mirrors OPUS_SET_ENERGY_MASK (celt_encoder.c:3144): the surround
+// masking curve (C*nbEBands celt_glog), or nil for none. Only the multistream
+// (surround) encoder ever sets it, so on the frozen single-stream CELT path it
+// stays nil and the surround-masking block of celt_encode_with_ec is inert. The
+// slice is aliased, not copied, exactly like the C pointer.
+func (st *Encoder) SetEnergyMask(mask []int32) { st.energyMask = mask }
+
 // Rng returns the encoder range-coder state after the last frame
 // (OPUS_GET_FINAL_RANGE).
 func (st *Encoder) Rng() uint32 { return st.rng }
+
+// bitrateToBits is bitrate_to_bits (celt.h:151), the static inline the VBR path
+// of celt_encode_with_ec (:1903) uses to turn st->bitrate into a per-frame bit
+// budget: bitrate*6/(6*Fs/frame_size). All three operands are opus_int32 and the
+// inner 6*Fs/frame_size division truncates BEFORE the outer one, so the two
+// divisions must not be folded.
+func bitrateToBits(bitrate, Fs, frameSize int32) int32 {
+	return bitrate * 6 / (6 * Fs / frameSize)
+}
 
 // celt_preemphasis (celt_encoder.c:557) for the frozen config: apply the mode's
 // pre-emphasis high-pass to one channel of int16 PCM, writing celt_sig into inp
@@ -364,7 +458,7 @@ func transientAnalysis(in []int32, length, C int, tfEstimate *int16, tfChan *int
 	}
 	// Prevent confusing the partial cycle of a very low frequency tone with a
 	// transient.
-	if toneishness > fixedmath.QCONST32(0.98, 29) && toneFreq < fixedmath.QCONST16(0.026, 13) {
+	if toneishness > qconst0_98Q29 && toneFreq < fixedmath.QCONST16(0.026, 13) {
 		isTransient = 0
 		maskMetric = 0
 	}
@@ -572,9 +666,9 @@ func toneLpc(x []int16, length, delay int, lpc []int32) int {
 	}
 	num0 := fixedmath.MULT32_32_Q31(r00, r12) - fixedmath.MULT32_32_Q31(r02, r01)
 	if fixedmath.HALF32(num0) >= den {
-		lpc[0] = fixedmath.QCONST32(1.999999, 29)
+		lpc[0] = qconst1_999999Q29
 	} else if fixedmath.HALF32(num0) <= -den {
-		lpc[0] = -fixedmath.QCONST32(1.999999, 29)
+		lpc[0] = -qconst1_999999Q29
 	} else {
 		lpc[0] = fixedmath.Frac_div32_q29(num0, den)
 	}
@@ -658,7 +752,7 @@ func (st *Encoder) runPrefilter(in, prefilterMem []int32, CC, N, prefilterTapset
 
 	// If the signal is dominated by a single tone, don't rely on the standard
 	// pitch estimator (it can become unreliable).
-	if enabled != 0 && toneishness > fixedmath.QCONST32(0.99, 29) {
+	if enabled != 0 && toneishness > qconst0_99Q29 {
 		multiple := 1
 		// Using an aliased postfilter above 24 kHz. First value is purposely just
 		// above pi to avoid triggering for Fs=48kHz.
@@ -937,6 +1031,48 @@ func (st *Encoder) RunPrefilter(in, prefilterMem []int32, CC, N, prefilterTapset
 // EncoderState is a copyable snapshot of the encoder's persistent (reset-region)
 // state. It is hashed for the per-frame differential comparison, exactly like the
 // decoder's celt.State.
+//
+// CANONICAL STATE ORDER (the contract shared with the C-side dump in
+// internal/reftest/oracle/celtenc_shim.h, oracle_celtenc_h_dump_state). It is the
+// declaration order of struct OpusCustomEncoder's reset region
+// (celt_encoder.c:91-127), skipping the fields that are dead in the frozen
+// CELT-only config (analysis, silk_info) and the energy_mask POINTER (an input,
+// not evolved state):
+//
+//	 1 rng              (u32)
+//	 2 spread_decision  (i32)
+//	 3 delayedIntra     (i32, opus_val32)
+//	 4 tonal_average    (i32)
+//	 5 lastCodedBands   (i32)
+//	 6 hf_average       (i32)
+//	 7 tapset_decision  (i32)
+//	 8 prefilter_period (i32)
+//	 9 prefilter_gain   (i16, opus_val16)
+//	10 prefilter_tapset (i32)
+//	11 consec_transient (i32)
+//	12 preemph_memE[0]  (i32)
+//	13 preemph_memE[1]  (i32)
+//	14 preemph_memD[0]  (i32)
+//	15 preemph_memD[1]  (i32)
+//	16 vbr_reservoir    (i32)
+//	17 vbr_drift        (i32)
+//	18 vbr_offset       (i32)
+//	19 vbr_count        (i32)
+//	20 overlap_max      (i32, opus_val32)
+//	21 stereo_saving    (i16, opus_val16)
+//	22 intensity        (i32)
+//	23 spec_avg         (i32, celt_glog)
+//	24 in_mem[]         (i32 x channels*overlap)
+//	25 prefilter_mem[]  (i32 x channels*COMBFILTER_MAXPERIOD)
+//	26 oldBandE[]       (i32 x channels*nbEBands)
+//	27 oldLogE[]        (i32 x channels*nbEBands)
+//	28 oldLogE2[]       (i32 x channels*nbEBands)
+//	29 energyError[]    (i32 x channels*nbEBands)
+//
+// Fields 16-22 (the VBR reservoir/drift/offset/count, stereo_saving and
+// intensity) are mutated by celt_encode_with_ec and persist across frames; they
+// were missing from the snapshot until CP8c, which meant a broken VBR loop could
+// pass a state-hash comparison unnoticed.
 type EncoderState struct {
 	Rng             uint32
 	SpreadDecision  int
@@ -951,7 +1087,13 @@ type EncoderState struct {
 	ConsecTransient int
 	PreemphMemE     [2]int32
 	PreemphMemD     [2]int32
+	VbrReservoir    int32
+	VbrDrift        int32
+	VbrOffset       int32
+	VbrCount        int32
 	OverlapMax      int32
+	StereoSaving    int16
+	Intensity       int
 	SpecAvg         int32
 	InMem           []int32
 	PrefilterMem    []int32
@@ -977,7 +1119,13 @@ func (st *Encoder) State() EncoderState {
 		ConsecTransient: st.consecTransient,
 		PreemphMemE:     st.preemphMemE,
 		PreemphMemD:     st.preemphMemD,
+		VbrReservoir:    st.vbrReservoir,
+		VbrDrift:        st.vbrDrift,
+		VbrOffset:       st.vbrOffset,
+		VbrCount:        st.vbrCount,
 		OverlapMax:      st.overlapMax,
+		StereoSaving:    st.stereoSaving,
+		Intensity:       st.intensity,
 		SpecAvg:         st.specAvg,
 		InMem:           append([]int32(nil), st.inMem...),
 		PrefilterMem:    append([]int32(nil), st.prefilterMem...),
@@ -989,8 +1137,9 @@ func (st *Encoder) State() EncoderState {
 }
 
 // Hash returns an FNV-1a-64 hash over a canonical little-endian serialization of
-// the persistent state, matching the decoder State.Hash convention so a C-side
-// dump built into the same struct hashes identically.
+// the persistent state (the CANONICAL STATE ORDER documented on EncoderState),
+// matching the decoder State.Hash convention so a C-side dump built into the same
+// struct hashes identically.
 func (s EncoderState) Hash() uint64 {
 	h := fnv.New64a()
 	var b [8]byte
@@ -1024,7 +1173,13 @@ func (s EncoderState) Hash() uint64 {
 	putI32(s.PreemphMemE[1])
 	putI32(s.PreemphMemD[0])
 	putI32(s.PreemphMemD[1])
+	putI32(s.VbrReservoir)
+	putI32(s.VbrDrift)
+	putI32(s.VbrOffset)
+	putI32(s.VbrCount)
 	putI32(s.OverlapMax)
+	putI16(s.StereoSaving)
+	putI(s.Intensity)
 	putI32(s.SpecAvg)
 	for _, v := range s.InMem {
 		putI32(v)
