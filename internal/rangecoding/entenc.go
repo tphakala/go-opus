@@ -370,6 +370,17 @@ func (_this *Encoder) EncDone() {
 // Tell returns the number of whole bits used so far (ec_tell).
 func (_this *Encoder) Tell() int { return ecTell(_this.nbits_total, _this.rng) }
 
+// SetTellForSilence fast-forwards the whole-bit counter so that Tell() reports
+// targetBits, mirroring celt_encoder.c:2006 (enc->nbits_total += tell -
+// ec_tell(enc)) on the CELT silence path: with tell = nbCompressedBytes*8 the
+// encoder pretends it has already filled every remaining bit with zeros, so every
+// subsequent budget check fails and no further symbols are coded. This is the
+// encoder-side twin of Decoder.SetTellForSilence (entdec.go:277) and, like it,
+// is the only write accessor the CELT port needs on the bit counter.
+func (_this *Encoder) SetTellForSilence(targetBits int) {
+	_this.nbits_total += targetBits - _this.Tell()
+}
+
 // TellFrac returns the number of bits used so far scaled by 2**BITRES
 // (ec_tell_frac).
 func (_this *Encoder) TellFrac() uint32 { return ecTellFrac(_this.nbits_total, _this.rng) }
