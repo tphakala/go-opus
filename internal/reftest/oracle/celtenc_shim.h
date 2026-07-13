@@ -183,4 +183,136 @@ static int oracle_celtenc_run_prefilter(int channels, int N,
    return pf_on;
 }
 
+/* ==========================================================================
+ * CP8b: the five ANALYSIS-stage statics (tf_analysis, tf_encode,
+ * dynalloc_analysis, alloc_trim_analysis, stereo_analysis).
+ *
+ * All signatures are flattened to scalars + flat arrays; no Go struct is ever
+ * marshalled into C. The CELTMode is always the frozen 48 kHz / 960 mode, so
+ * m / m->logN / m->eBands are supplied here rather than passed from Go.
+ *
+ * The `arch` argument is pinned to 0 (C fallback) and `AnalysisInfo *analysis`
+ * is a zeroed local: under DISABLE_FLOAT_API both dynalloc_analysis (:1223) and
+ * alloc_trim_analysis (:934) reduce the analysis pointer to `(void)analysis;`,
+ * so it is inert. A zeroed struct (valid==0) keeps it inert even if the float
+ * API were ever re-enabled, and avoids passing NULL into a deref-shaped param.
+ *
+ * ARG_QEXT(arg) expands to nothing without ENABLE_QEXT (celt.h:49), so
+ * dynalloc_analysis has NO qext_scale parameter in this build.
+ * ========================================================================== */
+
+/* --- tf_analysis (celt_encoder.c:663) ------------------------------------- */
+
+/* X is C*N0 celt_norm (read-only: tf_analysis copies each band into a scratch
+   buffer). importance[0..len) is read; tf_res[0..len) is written. Returns
+   tf_select. NOTE: the C reads importance[i] over [0,len), while
+   dynalloc_analysis only defines importance over [start,end) -- do not drive
+   this with start>0 (see CP8b brief; unreachable in the frozen config). */
+static int oracle_celtenc_tf_analysis(int len, int isTransient, int *tf_res,
+      int lambda, const int32_t *X, int N0, int LM, int tf_estimate, int tf_chan,
+      const int *importance)
+{
+   const CELTMode *m = oracle_celtenc_mode();
+   return tf_analysis(m, len, isTransient, tf_res, lambda, (celt_norm *)X, N0, LM,
+         (opus_val16)tf_estimate, tf_chan, (int *)importance);
+}
+
+/* --- tf_encode (celt_encoder.c:824) --------------------------------------- */
+
+/* Range-coder writer. Drives a real ec_enc over buf (buflen bytes, so
+   enc->storage == buflen and the unsigned `budget = storage*8` arithmetic is
+   exercised for real), optionally advancing the coder first with prefill_bits
+   ec_enc_bit_logp(bit,1) calls (bit i = (prefill_pat >> (i&31)) & 1) so the test
+   can sweep the starting `tell` and hit the budget-exhaustion path at :849.
+
+   tf_res[start..end) is MUTATED IN PLACE (unaffordable bands forced to curr,
+   then every entry remapped through tf_select_table at :859-860); the caller
+   must compare it. buf receives the FINALIZED bitstream (ec_enc_done is called
+   last), while tell/rng/val are captured BEFORE ec_enc_done. */
+static void oracle_celtenc_tf_encode(int start, int end, int isTransient,
+      int *tf_res, int LM, int tf_select, int prefill_bits, uint32_t prefill_pat,
+      unsigned char *buf, int buflen, int *tell_before_out, int *tell_out,
+      uint32_t *rng_out, uint32_t *val_out, int *err_out)
+{
+   ec_enc enc;
+   int i;
+   memset(buf, 0, (size_t)buflen);
+   ec_enc_init(&enc, buf, (opus_uint32)buflen);
+   for (i = 0; i < prefill_bits; i++)
+      ec_enc_bit_logp(&enc, (int)((prefill_pat >> (i & 31)) & 1u), 1);
+   *tell_before_out = ec_tell(&enc);
+
+   tf_encode(start, end, isTransient, tf_res, LM, tf_select, &enc);
+
+   *tell_out = ec_tell(&enc);
+   *rng_out = (uint32_t)enc.rng;
+   *val_out = (uint32_t)enc.val;
+   *err_out = ec_get_error(&enc);
+   ec_enc_done(&enc);
+}
+
+/* --- dynalloc_analysis (celt_encoder.c:1049) ------------------------------ */
+
+/* bandLogE / bandLogE2 / oldBandE are C*nbEBands celt_glog; surround_dynalloc is
+   nbEBands celt_glog (read-only). offsets (nbEBands, OPUS_CLEAR'd inside),
+   importance (written only over [start,end)) and spread_weight (written over
+   [0,end)) are out-params. logN and eBands come from the frozen mode, matching
+   the celt_encode_with_ec call site (:2248-2250). Returns maxDepth; *tot_boost
+   is the second output. */
+static int32_t oracle_celtenc_dynalloc_analysis(const int32_t *bandLogE,
+      const int32_t *bandLogE2, const int32_t *oldBandE, int nbEBands, int start,
+      int end, int C, int *offsets, int lsb_depth, int isTransient, int vbr,
+      int constrained_vbr, int LM, int effectiveBytes, int32_t *tot_boost_out,
+      int lfe, const int32_t *surround_dynalloc, int *importance,
+      int *spread_weight, int tone_freq, int32_t toneishness)
+{
+   const CELTMode *m = oracle_celtenc_mode();
+   AnalysisInfo analysis;
+   opus_int32 tot_boost = 0;
+   celt_glog maxDepth;
+   memset(&analysis, 0, sizeof(analysis));
+   maxDepth = dynalloc_analysis((const celt_glog *)bandLogE,
+         (const celt_glog *)bandLogE2, (const celt_glog *)oldBandE, nbEBands,
+         start, end, C, offsets, lsb_depth, m->logN, isTransient, vbr,
+         constrained_vbr, m->eBands, LM, effectiveBytes, &tot_boost, lfe,
+         (celt_glog *)surround_dynalloc, &analysis, importance, spread_weight,
+         (opus_val16)tone_freq, (opus_val32)toneishness);
+   *tot_boost_out = (int32_t)tot_boost;
+   return (int32_t)maxDepth;
+}
+
+/* --- alloc_trim_analysis (celt_encoder.c:865) ----------------------------- */
+
+/* X is C*N0 celt_norm, bandLogE is C*nbEBands celt_glog, both read-only.
+   stereo_saving_io is the C's `opus_val16 *stereo_saving` in/out (:919, C==2
+   only) widened to int32_t: it is truncated back to opus_val16 (int16) before
+   the call and sign-extended on the way out, so a Go caller can thread it across
+   a multi-frame sequence. Returns trim_index (0..10). */
+static int oracle_celtenc_alloc_trim_analysis(const int32_t *X,
+      const int32_t *bandLogE, int end, int LM, int C, int N0,
+      int32_t *stereo_saving_io, int tf_estimate, int intensity,
+      int32_t surround_trim, int32_t equiv_rate)
+{
+   const CELTMode *m = oracle_celtenc_mode();
+   AnalysisInfo analysis;
+   opus_val16 stereo_saving = (opus_val16)*stereo_saving_io;
+   int trim_index;
+   memset(&analysis, 0, sizeof(analysis));
+   trim_index = alloc_trim_analysis(m, (const celt_norm *)X,
+         (const celt_glog *)bandLogE, end, LM, C, N0, &analysis, &stereo_saving,
+         (opus_val16)tf_estimate, intensity, (celt_glog)surround_trim,
+         (opus_int32)equiv_rate, 0);
+   *stereo_saving_io = (int32_t)stereo_saving;
+   return trim_index;
+}
+
+/* --- stereo_analysis (celt_encoder.c:957) --------------------------------- */
+
+/* X is 2*N0 celt_norm (stereo only; the loop is hard-coded to i<13 and reads
+   X[N0+j]). Returns the dual_stereo decision (0/1). */
+static int oracle_celtenc_stereo_analysis(const int32_t *X, int LM, int N0)
+{
+   return stereo_analysis(oracle_celtenc_mode(), (const celt_norm *)X, LM, N0);
+}
+
 #endif /* GOOPUS_CELTENC_SHIM_H */
