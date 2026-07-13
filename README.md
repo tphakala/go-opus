@@ -15,8 +15,15 @@ the strong sense: byte-identical to libopus.
   libopus exactly. This covers CELT, SILK, and hybrid modes, mode switching and
   redundancy (including the SILK/CELT crossovers), packet-loss concealment, and
   inband FEC/LBRR.
-- **Encoder: in development.** A CELT-only fixed-point encoder is being built to
-  the same bit-exact standard.
+- **Encoder: the codec is complete and bit-exact; the public API is landing.**
+  The CELT-only fixed-point encoder now produces whole Opus packets, TOC byte
+  included, that are byte-identical to the C reference: every analysis stage, the
+  band quantizer, the VBR rate controller, the `celt_encode_with_ec` pipeline, and
+  the `opus_encoder.c` wrapper around it (delay compensation, the CBR byte budget,
+  framing). Each layer is asserted packet-for-packet and state-field-for-state-field
+  against libopus. What remains is the public `opus.Encoder` surface, the Ogg Opus
+  writer, and the full encoder gate sweep; until those land, encoding is reachable
+  only through the internal packages.
 
 ## Approach
 
