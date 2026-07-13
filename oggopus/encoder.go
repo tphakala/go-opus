@@ -2,7 +2,6 @@ package oggopus
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -32,15 +31,13 @@ const sampleRate48k = 48000
 // go-flac non-seekable zero-duration bug and requires no io.WriteSeeker (see
 // docs/api-design.md "Non-seekable sinks are correct by construction").
 //
-// The container framing, header emission, and granule accounting are complete.
-// The PCM<->packet conversion is the codec seam (codec.go): until the phase-4
-// opus encoder is wired, Write, Close, and EncodeInterleaved return
-// errCodecNotWired. An Encoder is not safe for concurrent use.
+// The PCM<->packet conversion goes through the codec seam (codec.go), which
+// wraps the public opus.Encoder. An Encoder is not safe for concurrent use.
 type Encoder struct {
 	w   io.Writer
 	cfg Config
 
-	enc frameEncoder     // nil until the codec seam is wired
+	enc frameEncoder     // nil only on a zero value or after a failed reset
 	cw  *containerWriter // created once the codec pre-skip is known
 
 	frameLen   int     // input samples per channel per frame (SampleRate/50)
@@ -49,14 +46,16 @@ type Encoder struct {
 	carry      []byte  // buffered PCM bytes not yet a full frame (bounded to one frame)
 
 	srcSamples int64 // real source samples per channel consumed (input rate)
+	coded48k   int64 // 48 kHz samples per channel actually coded into packets
 	closed     bool
 }
 
-// NewEncoder validates cfg and returns an Encoder writing to w. It does not
-// require an io.WriteSeeker. Until the codec is wired, the header pages are
-// emitted by the codec-present path only; the PCM methods return
-// errCodecNotWired. A config error (bad sample rate or channel count) is
-// returned immediately.
+// NewEncoder validates cfg, builds the codec, and returns an Encoder writing to
+// w, having already emitted the OpusHead and OpusTags header pages. It does not
+// require an io.WriteSeeker. A config error (bad sample rate, channel count,
+// bitrate or complexity) returns ErrInvalidConfig; a config the codec does not
+// implement (DTX) returns opus.ErrUnsupported. Both come back immediately, before
+// a byte is written.
 func NewEncoder(w io.Writer, cfg Config) (*Encoder, error) { //nolint:gocritic // Config passed by value to match the go-flac-aligned public API (docs/api-design.md)
 	e := &Encoder{}
 	if err := e.reset(w, &cfg); err != nil {
@@ -68,8 +67,8 @@ func NewEncoder(w io.Writer, cfg Config) (*Encoder, error) { //nolint:gocritic /
 // Reset rebinds the Encoder to a new sink w and reconfigures it with cfg so one
 // Encoder can encode many independent streams without re-allocating, the pooling
 // path for the BirdNET-Go "many short clips" workload. It re-validates cfg,
-// discards buffered input, resets per-stream state, and (once the codec is
-// wired) re-emits the OpusHead and OpusTags header pages to w.
+// discards buffered input, resets per-stream state, and re-emits the OpusHead and
+// OpusTags header pages to w.
 func (e *Encoder) Reset(w io.Writer, cfg Config) error { //nolint:gocritic // Config passed by value to match the go-flac-aligned public API (docs/api-design.md)
 	return e.reset(w, &cfg)
 }
@@ -77,13 +76,23 @@ func (e *Encoder) Reset(w io.Writer, cfg Config) error { //nolint:gocritic // Co
 // reset takes cfg by pointer so the flat, slice-carrying Config is not copied
 // on every pooled Reset; the public entry points still take it by value to
 // match the go-flac-aligned API.
+//
+// The codec and container writer are cleared FIRST, so a reset that fails partway
+// leaves an Encoder that reports errUninitialized rather than one still holding
+// the previous stream's container: a pooled Encoder whose Reset was rejected must
+// not be able to append to the stream it was last used for.
 func (e *Encoder) reset(w io.Writer, cfg *Config) error {
+	e.enc = nil
+	e.cw = nil
+	e.carry = e.carry[:0]
+	e.srcSamples = 0
+	e.coded48k = 0
+	e.closed = false
 	if err := cfg.validate(); err != nil {
 		return err
 	}
 	e.w = w
 	e.cfg = *cfg
-	e.cw = nil
 	e.frameLen = cfg.SampleRate / (1000 / frameDurationMS)
 	e.frameBytes = e.frameLen * cfg.Channels * 2
 	if cap(e.frame) >= e.frameLen*cfg.Channels {
@@ -91,28 +100,18 @@ func (e *Encoder) reset(w io.Writer, cfg *Config) error {
 	} else {
 		e.frame = make([]int16, 0, e.frameLen*cfg.Channels)
 	}
-	e.carry = e.carry[:0]
-	e.srcSamples = 0
-	e.closed = false
 
 	enc, err := newFrameEncoder(e.cfg)
 	if err != nil {
-		// Container is complete; the PCM path is stubbed at the codec seam. Keep
-		// the Encoder usable so config validation, Reset, and the returned
-		// sentinel are all observable; the PCM methods surface errCodecNotWired.
-		if errors.Is(err, errCodecNotWired) {
-			e.enc = nil
-			return nil
-		}
 		return err
 	}
 	e.enc = enc
 	return e.initStream()
 }
 
-// initStream builds the container writer and emits the header pages. It runs
-// only when the codec is wired, because OpusHead's pre-skip is the encoder
-// lookahead.
+// initStream builds the container writer and emits the header pages. It runs only
+// after the codec exists, because OpusHead's pre-skip IS the encoder lookahead
+// (scaled to 48 kHz by the seam; see opusFrameEncoder.lookahead).
 func (e *Encoder) initStream() error {
 	head := opusHead{
 		version:         opusHeadVersion,
@@ -141,7 +140,7 @@ func (e *Encoder) Write(p []byte) (int, error) {
 		return 0, ErrClosed
 	}
 	if e.enc == nil {
-		return 0, errCodecNotWired
+		return 0, errUninitialized
 	}
 	return e.write(p)
 }
@@ -155,7 +154,7 @@ func (e *Encoder) write(p []byte) (int, error) {
 		e.carry = append(e.carry, p[:take]...)
 		p = p[take:]
 		if len(e.carry) == e.frameBytes {
-			if err := e.encodeFrameBytes(e.carry, e.frameLen); err != nil {
+			if err := e.encodeFrameBytes(e.carry); err != nil {
 				return total - len(p), err
 			}
 			e.carry = e.carry[:0]
@@ -163,7 +162,7 @@ func (e *Encoder) write(p []byte) (int, error) {
 	}
 	// Encode whole frames straight from p without copying into the carry.
 	for len(p) >= e.frameBytes {
-		if err := e.encodeFrameBytes(p[:e.frameBytes], e.frameLen); err != nil {
+		if err := e.encodeFrameBytes(p[:e.frameBytes]); err != nil {
 			return total - len(p), err
 		}
 		p = p[e.frameBytes:]
@@ -173,51 +172,106 @@ func (e *Encoder) write(p []byte) (int, error) {
 	return total, nil
 }
 
-// encodeFrameBytes deinterleaves one full frame of PCM bytes, encodes it through
-// the codec seam, and queues the packet. realSamples is the number of genuine
-// (non-padding) source samples per channel in the frame, used for end-trim.
-func (e *Encoder) encodeFrameBytes(chunk []byte, realSamples int) error {
+// encodeFrameBytes loads one full frame of interleaved PCM bytes into the scratch
+// frame and encodes it. chunk must hold exactly frameBytes.
+func (e *Encoder) encodeFrameBytes(chunk []byte) error {
 	n := e.frameLen * e.cfg.Channels
 	for i := range n {
 		e.frame[i] = int16(binary.LittleEndian.Uint16(chunk[2*i : 2*i+2]))
 	}
-	pkt, samples48k, err := e.enc.encodeFrame(e.frame[:n])
+	return e.encodeFrame(e.frameLen)
+}
+
+// encodeFrame encodes whatever is in the scratch frame through the codec seam and
+// queues the packet. realSamples is the number of genuine (non-padding) source
+// samples per channel the frame carries: it drives the granule end-trim, and it
+// is deliberately separate from the frame's CODED duration, which is always a
+// full frame and is what coded48k accumulates. Keeping the two apart is what lets
+// Close know how much real audio the stream carries and how much of it the coded
+// frames actually cover.
+func (e *Encoder) encodeFrame(realSamples int) error {
+	pkt, samples48k, err := e.enc.encodeFrame(e.frame[:e.frameLen*e.cfg.Channels])
 	if err != nil {
 		return err
 	}
 	e.srcSamples += int64(realSamples)
+	e.coded48k += int64(samples48k)
 	return e.cw.writePacket(pkt, samples48k)
 }
 
-// Close encodes the final partial frame (zero-padded), writes the last page with
-// an end-trimmed granule position, and flushes. The stream duration is then
-// exact. Close is idempotent. It errors if buffered trailing bytes are not a
-// whole number of samples.
+// encodeSilenceFrame codes one all-zero frame. It contributes coded samples but
+// no source samples, which is exactly what the RFC 7845 end padding is: audio the
+// decoder must have in order to reconstruct the real samples that precede it, and
+// which the granule then trims away.
+func (e *Encoder) encodeSilenceFrame() error {
+	clear(e.frame[:e.frameLen*e.cfg.Channels])
+	return e.encodeFrame(0)
+}
+
+// Close encodes the final partial frame (zero-padded), emits whatever additional
+// silent frames RFC 7845 requires behind it, writes the last page with an
+// end-trimmed granule position, and flushes. The stream duration is then exact.
+// Close is idempotent. It errors if buffered trailing bytes are not a whole
+// number of samples.
 func (e *Encoder) Close() error {
 	if e.closed {
 		return nil
 	}
 	if e.enc == nil {
-		return errCodecNotWired
+		return errUninitialized
 	}
 	if len(e.carry) > 0 {
 		bytesPerSample := e.cfg.Channels * 2
 		if len(e.carry)%bytesPerSample != 0 {
 			return fmt.Errorf("oggopus: %d trailing bytes are not a whole number of samples", len(e.carry))
 		}
+		// Load the partial frame into the scratch buffer and zero-fill the tail
+		// rather than allocating a padded copy.
 		realSamples := len(e.carry) / bytesPerSample
-		padded := make([]byte, e.frameBytes)
-		copy(padded, e.carry)
-		if err := e.encodeFrameBytes(padded, realSamples); err != nil {
+		have := len(e.carry) / 2
+		for i := range have {
+			e.frame[i] = int16(binary.LittleEndian.Uint16(e.carry[2*i : 2*i+2]))
+		}
+		clear(e.frame[have : e.frameLen*e.cfg.Channels])
+		if err := e.encodeFrame(realSamples); err != nil {
 			return err
 		}
 		e.carry = e.carry[:0]
 	}
-	e.closed = true
-	e.enc.close()
+
 	// Convert real source samples per channel from the input rate to 48 kHz for
 	// the granule end-trim. Every valid rate divides 48000 exactly.
 	src48k := e.srcSamples * sampleRate48k / int64(e.cfg.SampleRate)
+
+	// RFC 7845 section 7: "encode at least (length + delay_samples + extra_samples)
+	// samples, and set the granule position of the last page to (length +
+	// delay_samples + extra_samples)". The granule this stream is about to claim is
+	// preSkip + src48k, and section 4.5 makes an end-of-stream granule that exceeds
+	// the samples actually coded INVALID. Coding only ceil(src48k/960) frames leaves
+	// coded48k - src48k anywhere in [0, 959], so whenever that gap is smaller than
+	// the pre-skip the stream would claim samples it never coded: that is every
+	// length with src48k mod 960 == 0 or in [649, 959], about a third of them, and
+	// it is why a 960-sample input used to claim granule 1272 over 960 coded
+	// samples.
+	//
+	// Emit silent frames until the coded audio covers the granule. The gap is under
+	// 960 and one frame adds 960, so this runs at most once; the loop states the
+	// invariant instead of relying on that arithmetic. The samples are pure padding:
+	// the decoder needs them to reconstruct the tail of the real audio, and the
+	// end-trimmed granule then discards them.
+	//
+	// A stream with no audio at all is left alone: it has no last audio page to
+	// stamp, and padding it would invent a packet nobody asked for.
+	if e.cw.audioCount > 0 {
+		for e.coded48k < e.cw.preSkip+src48k {
+			if err := e.encodeSilenceFrame(); err != nil {
+				return err
+			}
+		}
+	}
+
+	e.closed = true
+	e.enc.close()
 	return e.cw.close(src48k)
 }
 

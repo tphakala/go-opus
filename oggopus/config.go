@@ -7,8 +7,18 @@ import "fmt"
 // opus.Version constant the raw package will export.
 const libVersion = "0.1.0-dev"
 
-// maxComplexity is the top of the Opus complexity range.
-const maxComplexity = 10
+// maxComplexity is the top of the Opus complexity range, and defaultComplexity is
+// what Config.Complexity's zero value selects. The zero value MUST mean the
+// default rather than an explicit complexity 0, so the useful range is 1..10 and
+// 0 is the "unset" marker; the mapping itself is opus.EncoderConfig's, which owns
+// it for both packages. defaultComplexity is duplicated here only to name the
+// number in Config's documentation and in the validation error, and
+// TestComplexityZeroMeansDefault pins the two against each other by comparing the
+// packets they produce, so they cannot drift apart silently.
+const (
+	maxComplexity     = 10
+	defaultComplexity = 10
+)
 
 // validSampleRates enumerates the sample rates Opus accepts. Anything else is
 // rejected rather than clamped (unlike go-flac, which accepts a wide range).
@@ -25,7 +35,11 @@ type Config struct {
 	CBR            bool // zero value (false) means VBR
 	ConstrainedVBR bool // meaningful only when CBR is false
 	Complexity     int  // 1..10; zero selects the library default (10)
-	DTX            bool // zero value (false) is off
+
+	// DTX requests discontinuous transmission. It is NOT IMPLEMENTED: setting it
+	// makes NewEncoder return opus.ErrUnsupported rather than quietly encoding
+	// without it. The zero value (false) is off.
+	DTX bool
 
 	// Vendor overrides the OpusTags vendor string; zero value uses
 	// "go-opus <version>".
@@ -50,7 +64,8 @@ func (c *Config) validate() error {
 		return fmt.Errorf("%w: negative bitrate %d", ErrInvalidConfig, c.Bitrate)
 	}
 	if c.Complexity < 0 || c.Complexity > maxComplexity {
-		return fmt.Errorf("%w: complexity %d (want 0..10)", ErrInvalidConfig, c.Complexity)
+		return fmt.Errorf("%w: complexity %d (want 1..%d, or 0 for the default %d)",
+			ErrInvalidConfig, c.Complexity, maxComplexity, defaultComplexity)
 	}
 	return nil
 }

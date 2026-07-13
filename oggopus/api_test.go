@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/tphakala/go-opus/opus"
 )
 
 func TestConfigValidate(t *testing.T) {
@@ -45,43 +47,82 @@ func TestConfigVendorDefault(t *testing.T) {
 	}
 }
 
-// TestEncoderSeam confirms the container-only build: NewEncoder validates config
-// and succeeds, but the PCM entry points surface errCodecNotWired until the
-// phase-4 encoder is wired.
-func TestEncoderSeam(t *testing.T) {
+// TestEncoderSeamWired confirms the codec seam is live: the PCM entry points do
+// real work and no longer report a stub. It is the successor to TestEncoderSeam,
+// which asserted the pre-codec errCodecNotWired behaviour.
+func TestEncoderSeamWired(t *testing.T) {
 	var buf bytes.Buffer
 	e, err := NewEncoder(&buf, Config{SampleRate: 48000, Channels: 2})
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)
 	}
-	if _, err := e.Write(make([]byte, 4)); !errors.Is(err, errCodecNotWired) {
-		t.Fatalf("Write: got %v, want errCodecNotWired", err)
+	// One full 20 ms stereo frame.
+	if _, err := e.Write(make([]byte, 960*2*2)); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
-	if err := e.Close(); !errors.Is(err, errCodecNotWired) {
-		t.Fatalf("Close: got %v, want errCodecNotWired", err)
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Fatalf("encoder produced no output")
+	}
+	// Close is idempotent.
+	if err := e.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	// Write after Close is rejected.
+	if _, err := e.Write(make([]byte, 4)); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Write after Close: got %v, want ErrClosed", err)
 	}
 
 	if _, err := NewEncoder(&buf, Config{SampleRate: 44100, Channels: 2}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("NewEncoder bad config: got %v, want ErrInvalidConfig", err)
 	}
+	// DTX passes Config.validate but the codec does not implement it, so it must
+	// surface as opus.ErrUnsupported rather than being silently dropped.
+	if _, err := NewEncoder(&buf, Config{SampleRate: 48000, Channels: 1, DTX: true}); !errors.Is(err, opus.ErrUnsupported) {
+		t.Fatalf("NewEncoder DTX: got %v, want opus.ErrUnsupported", err)
+	}
 }
 
-func TestEncodeInterleavedSeam(t *testing.T) {
+// TestZeroValueEncoderDoesNotPanic pins the errUninitialized guard: a zero-value
+// Encoder has no codec and no container, and must report that rather than panic
+// or (worse) spin in write's frame loop with frameBytes == 0.
+func TestZeroValueEncoderDoesNotPanic(t *testing.T) {
+	var e Encoder
+	if _, err := e.Write(make([]byte, 4)); !errors.Is(err, errUninitialized) {
+		t.Fatalf("zero-value Write: got %v, want errUninitialized", err)
+	}
+	if err := e.Close(); !errors.Is(err, errUninitialized) {
+		t.Fatalf("zero-value Close: got %v, want errUninitialized", err)
+	}
+	var d Decoder
+	if _, err := d.Read(make([]byte, 4)); !errors.Is(err, errUninitialized) {
+		t.Fatalf("zero-value Read: got %v, want errUninitialized", err)
+	}
+	if _, err := d.WriteTo(io.Discard); !errors.Is(err, errUninitialized) {
+		t.Fatalf("zero-value WriteTo: got %v, want errUninitialized", err)
+	}
+}
+
+func TestEncodeInterleavedWired(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := Config{SampleRate: 48000, Channels: 1}
-	// Valid config and whole-sample buffer: reaches the seam and reports it.
-	if err := EncodeInterleaved(&buf, cfg, make([]byte, 960*2)); !errors.Is(err, errCodecNotWired) {
-		t.Fatalf("EncodeInterleaved: got %v, want errCodecNotWired", err)
+	if err := EncodeInterleaved(&buf, cfg, make([]byte, 960*2)); err != nil {
+		t.Fatalf("EncodeInterleaved: %v", err)
 	}
-	// Odd byte count is rejected before the seam.
-	if err := EncodeInterleaved(&buf, cfg, make([]byte, 5)); !errors.Is(err, ErrInvalidConfig) {
+	if buf.Len() == 0 {
+		t.Fatalf("EncodeInterleaved produced no output")
+	}
+	// Odd byte count is rejected before the codec.
+	if err := EncodeInterleaved(io.Discard, cfg, make([]byte, 5)); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("EncodeInterleaved odd length: got %v, want ErrInvalidConfig", err)
 	}
 }
 
-// TestDecoderParsesHeaders confirms the container-only decoder does real work:
-// NewDecoder parses the headers and Info reports them, while the PCM output path
-// surfaces errCodecNotWired.
+// TestDecoderParsesHeaders confirms NewDecoder parses the headers and Info
+// reports them. The PCM path is exercised end to end in roundtrip_test.go; here
+// the packets are synthetic, so only the header surface is checked.
 func TestDecoderParsesHeaders(t *testing.T) {
 	var buf bytes.Buffer
 	head := testHead(2, 312)
@@ -98,11 +139,10 @@ func TestDecoderParsesHeaders(t *testing.T) {
 	if info.Channels != 2 || info.InputSampleRate != 24000 || info.PreSkip != 312 || info.OutputGain != -128 {
 		t.Fatalf("Info mismatch: %+v", info)
 	}
-	if _, err := d.Read(make([]byte, 64)); !errors.Is(err, errCodecNotWired) {
-		t.Fatalf("Read: got %v, want errCodecNotWired", err)
-	}
-	if _, err := d.WriteTo(io.Discard); !errors.Is(err, errCodecNotWired) {
-		t.Fatalf("WriteTo: got %v, want errCodecNotWired", err)
+	// The packets are random bytes, not real opus: the decoder must reject them
+	// cleanly rather than panic.
+	if _, err := d.Read(make([]byte, 64)); err == nil {
+		t.Fatalf("Read of synthetic garbage packets: got nil error, want a decode error")
 	}
 }
 

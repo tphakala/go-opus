@@ -24,11 +24,12 @@ type Info struct {
 // little-endian int16 PCM at 48 kHz, implementing io.Reader and io.WriterTo. It
 // is shaped like go-flac's pcm.Decoder.
 //
-// The container parsing (pages, headers, packet reassembly, granule accounting)
-// is complete: NewDecoder parses and validates the headers, and Info reports the
-// stream parameters. The packet->PCM conversion is the codec seam (codec.go):
-// until the phase-2/3 decoder is wired, Read and WriteTo return errCodecNotWired.
-// A Decoder is not safe for concurrent use.
+// NewDecoder parses and validates the headers, and Info reports the stream
+// parameters. The packet->PCM conversion goes through the codec seam (codec.go),
+// which wraps the public opus.Decoder. Output is always 48 kHz, the rate RFC 7845
+// defines the pre-skip and every granule position at, whatever OpusHead's
+// informational input-sample-rate field says. A Decoder is not safe for
+// concurrent use.
 type Decoder struct {
 	cr   *containerReader
 	dec  frameDecoder // nil until the codec seam is wired
@@ -61,13 +62,9 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 	}
 	dec, err := newFrameDecoder(cr.head)
 	if err != nil {
-		if !errors.Is(err, errCodecNotWired) {
-			return nil, err
-		}
-		d.dec = nil // PCM path stubbed at the seam
-	} else {
-		d.dec = dec
+		return nil, err
 	}
+	d.dec = dec
 	return d, nil
 }
 
@@ -79,7 +76,7 @@ func (d *Decoder) Info() Info { return d.info }
 // when the stream is exhausted.
 func (d *Decoder) Read(p []byte) (int, error) {
 	if d.dec == nil {
-		return 0, errCodecNotWired
+		return 0, errUninitialized
 	}
 	for len(d.pcm) == 0 {
 		done, err := d.fill()
@@ -99,7 +96,7 @@ func (d *Decoder) Read(p []byte) (int, error) {
 // caller can io.Copy a Decoder to a sink.
 func (d *Decoder) WriteTo(w io.Writer) (int64, error) {
 	if d.dec == nil {
-		return 0, errCodecNotWired
+		return 0, errUninitialized
 	}
 	var written int64
 	for {
