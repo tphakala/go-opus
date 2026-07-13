@@ -143,6 +143,31 @@ void oracle_decoder_destroy(OpusDecoder *dec)
     opus_decoder_destroy(dec);
 }
 
+/* ---------------- the "invisible to the packet gate" surface ---------------- */
+
+int oracle_decoder_last_packet_duration(OpusDecoder *dec)
+{
+    opus_int32 value = -1;
+    if (opus_decoder_ctl(dec, OPUS_GET_LAST_PACKET_DURATION(&value)) != OPUS_OK)
+        return -1;
+    return (int)value;
+}
+
+int oracle_decoder_reset(OpusDecoder *dec)
+{
+    return opus_decoder_ctl(dec, OPUS_RESET_STATE);
+}
+
+int oracle_packet_get_nb_frames(const unsigned char *data, int len)
+{
+    return opus_packet_get_nb_frames(data, (opus_int32)len);
+}
+
+int oracle_packet_get_nb_samples(const unsigned char *data, int len, opus_int32 fs)
+{
+    return opus_packet_get_nb_samples(data, (opus_int32)len, fs);
+}
+
 uint64_t oracle_encoder_state_hash(OpusEncoder *enc, int channels)
 {
     /* FNV-1a over the full OpusEncoder allocation. See the doc comment on this

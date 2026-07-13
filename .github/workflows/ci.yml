@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Tier B of the phase 4 gate is far too slow for the push path but it is the only
+  # thing that runs a full-length RFC vector through one encoder lifetime, so it runs
+  # nightly. See the gate-long job.
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
 
 env:
   GO_VERSION: '1.26'
@@ -31,17 +37,36 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          # No job here pushes, so the GITHUB_TOKEN has no business sitting in
+          # .git/config for the life of the job. The libopus submodule is a public
+          # https remote and needs no credential.
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+      # The RFC 6716 / RFC 8251 conformance vectors are ~75 MB and are never
+      # committed (.gitignore), so without this step opus/conformance_test.go SKIPS
+      # and the RFC gate is not running on any push at all: 12/12 vectors passing
+      # locally, nothing enforcing it in CI. Only the archive is cached (the
+      # extracted 121 MB of PCM re-expands from it in a couple of seconds), and the
+      # cache key is the checksum file itself, so a re-pinned vector set invalidates
+      # the cache by construction. fetch-vectors.sh sha256-verifies before extracting
+      # and refuses to extract a mismatching archive.
+      - name: Cache conformance vectors
+        uses: actions/cache@v4
+        with:
+          path: testdata/vectors/opus_testvectors-rfc8251.tar.gz
+          key: opus-vectors-rfc8251-${{ hashFiles('testdata/vectors.sha256') }}
+      - name: Fetch conformance vectors
+        run: scripts/fetch-vectors.sh
       - name: Download dependencies
         run: go mod download
       - name: Run tests
-        run: go test -race -timeout 20m ./...
+        run: go test -race -timeout 30m ./...
       - name: Run tests with coverage
         if: matrix.coverage
-        run: go test -timeout 20m -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -timeout 30m -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
       - name: Upload coverage
         if: matrix.coverage
         uses: codecov/codecov-action@v7
@@ -51,9 +76,8 @@ jobs:
 
   # Differential round-trip against the pinned libopus oracle (FIXED_POINT +
   # DISABLE_FLOAT_API). The cgo harness compiles the vendored libopus sources
-  # directly, so only a C compiler is needed (no autotools). This job is the
-  # phase 0 gate; it runs on amd64 and arm64. It stays green until the phase 0
-  # reftest harness lands (no `refc`-tagged tests yet).
+  # directly, so only a C compiler is needed (no autotools). This job carries the
+  # phase 4 encoder gate; it runs on amd64 and arm64.
   reftest:
     name: Reftest (libopus oracle)
     runs-on: ${{ matrix.os }}
@@ -66,14 +90,67 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          # No job here pushes, so the GITHUB_TOKEN has no business sitting in
+          # .git/config for the life of the job. The libopus submodule is a public
+          # https remote and needs no credential.
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+      # The vectors unlock the gate's REAL-AUDIO tier (corpus_test.go tier 2 reads
+      # testvectorNN.dec as 48 kHz PCM) and the packet-inspection differential's RFC
+      # corpus. Both t.Skip cleanly without them, which is precisely the failure mode
+      # this step removes: a gate that quietly grades itself on synthetic signal only.
+      - name: Cache conformance vectors
+        uses: actions/cache@v4
+        with:
+          path: testdata/vectors/opus_testvectors-rfc8251.tar.gz
+          key: opus-vectors-rfc8251-${{ hashFiles('testdata/vectors.sha256') }}
+      - name: Fetch conformance vectors
+        run: scripts/fetch-vectors.sh
       - name: Run differential harness
         env:
           CGO_ENABLED: '1'
-        run: go test -tags refc -timeout 20m ./internal/reftest/...
+        run: go test -tags refc -timeout 30m ./internal/reftest/...
+
+  gate-long:
+    name: Phase 4 gate, tier B (full-length corpus)
+    # Tier A of the gate runs on every push, inside the reftest job, over 2 s excerpts.
+    # Tier B is the only thing that pushes a full-length RFC vector (21 to 32 s) through
+    # a single encoder lifetime, which is where a one-LSB error in the delay ring, the
+    # dc_reject memory, the CELT energy history or the VBR reservoir would finally
+    # accumulate into a divergence. Without this job that tier is dead code: it skips
+    # unless -gate.long is passed, and nothing passed it.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          # No job here pushes, so the GITHUB_TOKEN has no business sitting in
+          # .git/config for the life of the job. The libopus submodule is a public
+          # https remote and needs no credential.
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Cache conformance vectors
+        uses: actions/cache@v4
+        with:
+          path: testdata/vectors/opus_testvectors-rfc8251.tar.gz
+          key: opus-vectors-rfc8251-${{ hashFiles('testdata/vectors.sha256') }}
+      # Tier B IS the real audio, so a missing corpus is a failure here, not a skip.
+      - name: Fetch conformance vectors
+        run: scripts/fetch-vectors.sh
+      - name: Run tier B
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go test -tags refc -count=1 -timeout 150m -v \
+            ./internal/reftest/oracle/ -run 'TestOpusencPhase4GateLong' -gate.long
 
   lint:
     name: Lint
@@ -83,6 +160,10 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          # No job here pushes, so the GITHUB_TOKEN has no business sitting in
+          # .git/config for the life of the job. The libopus submodule is a public
+          # https remote and needs no credential.
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -104,6 +185,10 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          # No job here pushes, so the GITHUB_TOKEN has no business sitting in
+          # .git/config for the life of the job. The libopus submodule is a public
+          # https remote and needs no credential.
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -125,6 +210,10 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          # No job here pushes, so the GITHUB_TOKEN has no business sitting in
+          # .git/config for the life of the job. The libopus submodule is a public
+          # https remote and needs no credential.
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v6
         with:

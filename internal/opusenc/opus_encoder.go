@@ -189,7 +189,12 @@ func NewEncoder(fs int32, channels, application int) *Encoder {
 	st.channels = channels
 	st.Fs = fs
 
-	st.celt = celt.NewEncoder(channels)
+	// opus_encoder.c:281. Fs is THREADED INTO CELT, where it becomes
+	// st->upsample = resampling_factor(Fs) (celt_encoder.c:255) and nothing else:
+	// the CELT mode stays the 48 kHz / 960 one at every rate. A rate CELT cannot
+	// resample makes this nil, which is the second line of defence behind the Fs
+	// check above.
+	st.celt = celt.NewEncoder(fs, channels)
 	if st.celt == nil {
 		return nil
 	}
@@ -490,6 +495,13 @@ func (st *Encoder) SetEnergyMask(mask []int32) error {
 // last frame. Bit-exact agreement of this value with libopus is the primary
 // encoder differential check.
 func (st *Encoder) FinalRange() uint32 { return st.rangeFinal }
+
+// ClearFinalRange zeroes rangeFinal. opus_encode_native does this before its
+// rejection rules (opus_encoder.c:1223), so a rejected encode leaves
+// OPUS_GET_FINAL_RANGE reading 0 rather than the previous packet's range. Encode
+// already mirrors that internally; this exists for the public wrapper, whose own
+// argument checks reject before reaching Encode at all.
+func (st *Encoder) ClearFinalRange() { st.rangeFinal = 0 }
 
 // Lookahead is OPUS_GET_LOOKAHEAD (opus_encoder.c:3082): the encoder's algorithmic
 // delay in samples.

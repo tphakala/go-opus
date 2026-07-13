@@ -597,6 +597,16 @@ static void oracle_celtenc_h_destroy(void *h)
    free(H);
 }
 
+/* --- resampling_factor (celt/celt.c:62) ------------------------------------
+   The ONE place a sample rate enters the CELT layer: celt_encoder_init sets
+   st->upsample = resampling_factor(Fs) (celt_encoder.c:255) and the mode stays the
+   48 kHz / 960 one. resampling_factor is a non-static symbol in celt.c (compiled by
+   w_celt_celt.c) and is declared in celt.h, which celt_encoder.c pulls in above. */
+static int32_t oracle_celt_resampling_factor(int32_t rate)
+{
+   return (int32_t)resampling_factor((opus_int32)rate);
+}
+
 /* Compile-time QCONST/GCONST constants, evaluated by the C compiler with EXACTLY the
    literal each call site in celt_encoder.c / bands.c writes. A literal with an "f"
    suffix is a float and is rounded in float32 before the shift; an unsuffixed literal

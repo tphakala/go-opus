@@ -96,11 +96,24 @@ type Encoder struct {
 	energyError  []int32 // channels*nbEBands                 (celt_glog)
 }
 
-// NewEncoder allocates and initializes a CELT encoder for the 48 kHz / 960 mode
-// with the given channel count (1 or 2), mirroring celt_encoder_init(st, 48000,
-// channels, 0) followed by OPUS_RESET_STATE. Returns nil if channels is invalid.
-func NewEncoder(channels int) *Encoder {
+// NewEncoder allocates and initializes a CELT encoder, mirroring
+// celt_encoder_init(st, sampleRate, channels, 0) (celt_encoder.c:239) followed by
+// OPUS_RESET_STATE. It returns nil if channels is not 1 or 2, or if sampleRate is
+// not one of 8000/12000/16000/24000/48000.
+//
+// THE MODE IS ALWAYS THE 48 kHz / 960 ONE, at every sampleRate: that is what
+// celt_encoder_init does (:250, opus_custom_mode_create(48000, 960)). The rate
+// enters through ONE field, st.upsample = resampling_factor(sampleRate) (:255),
+// which celt_preemphasis zero-stuffs the input with and compute_mdcts scales and
+// band-limits by. Everything downstream of the MDCT - the LM search, vbr_rate,
+// the allocation - is expressed in 48 kHz samples, which is why celt_encode_with_ec
+// starts by doing frame_size *= st->upsample (:1837).
+func NewEncoder(sampleRate int32, channels int) *Encoder {
 	if channels < 1 || channels > 2 {
+		return nil
+	}
+	upsample := ResamplingFactor(sampleRate)
+	if upsample == 0 {
 		return nil
 	}
 	st := &Encoder{}
@@ -110,8 +123,10 @@ func NewEncoder(channels int) *Encoder {
 	st.streamChannels = channels
 	st.channels = channels
 
-	// opus_custom_encoder_init_arch defaults (celt_encoder.c:194).
-	st.upsample = 1 // resampling_factor(48000)
+	// opus_custom_encoder_init_arch defaults (celt_encoder.c:194). The C seeds
+	// st->upsample = 1 there (:208) and celt_encoder_init OVERWRITES it at :255;
+	// the two are collapsed here because opus_custom_encoder_init is not exposed.
+	st.upsample = upsample
 	st.start = 0
 	st.end = m.effEBands
 	st.signalling = 1

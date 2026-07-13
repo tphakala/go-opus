@@ -49,6 +49,39 @@ opus_uint32 oracle_decoder_final_range(OpusDecoder *dec);
 void oracle_decoder_destroy(OpusDecoder *dec);
 
 /*
+ * ----------------------------------------------------------------------------
+ * The "invisible to the packet gate" surface (CP10 audit).
+ * ----------------------------------------------------------------------------
+ *
+ * Everything below returns a value that NEVER REACHES A PACKET BYTE, so the
+ * bit-exact encoder/decoder gates are structurally blind to an error in it. That
+ * blind spot has already shipped one real bug in this repo (the encoder lookahead
+ * was 192 instead of 312, which would have misaligned every Ogg stream by 120
+ * samples), so each of these quantities gets its own differential assertion
+ * against the C.
+ */
+
+/* OPUS_GET_LAST_PACKET_DURATION (src/opus_decoder.c:1167): st->last_packet_duration,
+ * the per-channel sample count the last opus_decode produced. It is written on five
+ * distinct paths in opus_decode_native (:776 the multi-frame loop, :806/:812 the
+ * FEC save/restore, :829 the PLC/DTX path, :869 the normal path), none of which the
+ * PCM comparison can distinguish from the others. */
+int oracle_decoder_last_packet_duration(OpusDecoder *dec);
+
+/* OPUS_RESET_STATE on a decoder (src/opus_decoder.c). Returns an OPUS_* code. The
+ * encoder's reset lives on the CP9 handle (oracle_topenc_reset). */
+int oracle_decoder_reset(OpusDecoder *dec);
+
+/* opus_packet_get_nb_frames (src/opus_decoder.c:1273) and
+ * opus_packet_get_nb_samples (:1289), the two pure packet-inspection functions the
+ * public opus.PacketFrames / opus.PacketDuration mirror. Both return a NEGATIVE
+ * OPUS_* error code (OPUS_BAD_ARG for len < 1, OPUS_INVALID_PACKET for a truncated
+ * code-3 packet or a duration over 120 ms) rather than a count, so the Go side's
+ * error mapping is part of what is being compared. data may be NULL when len is 0. */
+int oracle_packet_get_nb_frames(const unsigned char *data, int len);
+int oracle_packet_get_nb_samples(const unsigned char *data, int len, opus_int32 fs);
+
+/*
  * Per-frame persistent-state hash tap (hard-parts.md section 5 and 7).
  *
  * STATUS: phase-0 stub. Hashes the whole OpusEncoder allocation (which embeds

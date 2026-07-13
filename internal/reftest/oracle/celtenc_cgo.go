@@ -469,6 +469,13 @@ func (e *cCeltencHandle) Close() {
 	}
 }
 
+// cCeltResamplingFactor is resampling_factor (celt/celt.c:62). It returns 0 for an
+// unsupported rate, which is the value the frozen build (no ENABLE_ASSERTIONS, so
+// celt_assert is compiled out) actually hands back to celt_encoder_init.
+func cCeltResamplingFactor(rate int32) int32 {
+	return int32(C.oracle_celt_resampling_factor(C.int32_t(rate)))
+}
+
 // Compile-time constant accessors: see the comment block in celtenc_shim.h. These let
 // the Go port assert it picked the float32-rounded or float64 helper that matches the
 // literal the C source actually writes at each call site.

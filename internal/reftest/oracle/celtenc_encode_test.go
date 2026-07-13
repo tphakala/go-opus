@@ -318,7 +318,7 @@ func (cfg encCfg) toHandleConfig() celtencConfig {
 // leaves the libopus encoder in.
 func newGoEncoder(t *testing.T, cfg encCfg) *celt.Encoder {
 	t.Helper()
-	e := celt.NewEncoder(cfg.CC)
+	e := celt.NewEncoder(48000, cfg.CC)
 	if e == nil {
 		t.Fatalf("%s: celt.NewEncoder(%d) = nil", cfg.name, cfg.CC)
 	}

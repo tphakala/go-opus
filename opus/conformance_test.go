@@ -115,6 +115,13 @@ func TestConformance(t *testing.T) {
 
 	for _, name := range allVectors {
 		t.Run("vector"+name, func(t *testing.T) {
+			// The 12 vectors are wholly independent: each subtest reads its own files
+			// and builds its own Decoder, and nothing is shared but the read-only
+			// vector list. Running them in parallel is what makes this gate AFFORDABLE
+			// IN CI now that CI actually fetches the vectors and runs it: serially under
+			// -race the 12 vectors take ~14 minutes, which would not fit the job.
+			t.Parallel()
+
 			bitPath := filepath.Join(vectorsDir, "testvector"+name+".bit")
 			bitData, err := os.ReadFile(bitPath)
 			if err != nil {

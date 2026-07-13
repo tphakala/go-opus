@@ -120,8 +120,13 @@ summary() {
     n="$(count_bits "$d")"
     log "  ${rel}/: ${n} bitstreams"
     if [[ "$n" -gt 0 ]]; then
-      # List the vector numbers on one wrapped line for a quick eyeball.
-      find "$d" -maxdepth 1 -name '*.bit' -printf '%f\n' \
+      # List the vector numbers on one wrapped line for a quick eyeball. A shell
+      # glob, not `find -printf`: -printf is a GNU extension, so the BSD find on a
+      # macOS dev box made this pipeline fail, and under `set -eo pipefail` that took
+      # the whole script down with it (exit 1) AFTER the vectors had been fetched and
+      # extracted perfectly. CI now runs this script and gates on its exit code, so a
+      # cosmetic listing must not be able to fail the build.
+      for f in "$d"/*.bit; do printf '%s\n' "${f##*/}"; done \
         | sort | sed 's/^testvector//; s/\.bit$//' | paste -sd' ' - \
         | sed 's/^/    testvector: /'
     fi
