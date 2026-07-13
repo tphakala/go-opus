@@ -282,6 +282,21 @@ func (st *Encoder) SetStreamChannels(v int) bool {
 	return true
 }
 
+// SetSignalling mirrors CELT_SET_SIGNALLING (celt_encoder.c:3024). celt_encoder_init
+// leaves it at 1 (celt_encoder.c:211), but opus_encoder_init immediately clears it
+// with CELT_SET_SIGNALLING(0) (opus_encoder.c:283) because the Opus layer writes
+// its own TOC byte instead of CELT's self-delimiting signalling byte.
+//
+// It is OUTPUT-NEUTRAL when driven from opus_encoder: signalling is read only in
+// the CUSTOM_MODES signalling-byte block (gated out of this build) and at
+// celt_encoder.c:1918 (`-!!st->signalling` in the CBR nbCompressedBytes clamp),
+// and that clamp needs `!vbr && bitrate != OPUS_BITRATE_MAX`, which never holds
+// here: opus_encode_frame_native pins CELT's bitrate to OPUS_BITRATE_MAX
+// (opus_encoder.c:2286) and only raises it off OPUS_BITRATE_MAX inside
+// `if (st->use_vbr)` (:2462). The setter exists so the Go CELT encoder's state
+// still matches the C encoder's field for field.
+func (st *Encoder) SetSignalling(v int) { st.signalling = v }
+
 // SetEnergyMask mirrors OPUS_SET_ENERGY_MASK (celt_encoder.c:3144): the surround
 // masking curve (C*nbEBands celt_glog), or nil for none. Only the multistream
 // (surround) encoder ever sets it, so on the frozen single-stream CELT path it
@@ -293,13 +308,26 @@ func (st *Encoder) SetEnergyMask(mask []int32) { st.energyMask = mask }
 // (OPUS_GET_FINAL_RANGE).
 func (st *Encoder) Rng() uint32 { return st.rng }
 
-// bitrateToBits is bitrate_to_bits (celt.h:151), the static inline the VBR path
+// BitrateToBits is bitrate_to_bits (celt.h:151), the static inline the VBR path
 // of celt_encode_with_ec (:1903) uses to turn st->bitrate into a per-frame bit
 // budget: bitrate*6/(6*Fs/frame_size). All three operands are opus_int32 and the
 // inner 6*Fs/frame_size division truncates BEFORE the outer one, so the two
 // divisions must not be folded.
-func bitrateToBits(bitrate, Fs, frameSize int32) int32 {
+//
+// Exported because the Opus layer's CBR byte-budget derivation
+// (opus_encoder.c:1330-1333) is built out of this pair, and both must be the SAME
+// integer math as CELT's, not a re-derivation.
+func BitrateToBits(bitrate, Fs, frameSize int32) int32 {
 	return bitrate * 6 / (6 * Fs / frameSize)
+}
+
+// BitsToBitrate is bits_to_bitrate (celt.h:147), the inverse of BitrateToBits:
+// bits*(6*Fs/frame_size)/6. Same truncation rule: the inner 6*Fs/frame_size
+// division happens first. opus_encode_native uses it at :1325 (the max_bitrate
+// ceiling inside user_bitrate_to_bitrate) and at :1331 to requantize
+// st->bitrate_bps to the CBR byte budget it just rounded to.
+func BitsToBitrate(bits, Fs, frameSize int32) int32 {
+	return bits * (6 * Fs / frameSize) / 6
 }
 
 // celt_preemphasis (celt_encoder.c:557) for the frozen config: apply the mode's

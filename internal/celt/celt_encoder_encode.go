@@ -16,9 +16,11 @@ import (
 // the top-level assembly, the inline surround-masking and temporal-VBR blocks,
 // and the inline VBR rate-control loop are new here.
 //
-// FROZEN CONFIG: the Go caller always passes enc == NULL, so the enc==NULL
-// branches at :1862 and :1931 are the live ones (tell0_frac = tell = 1,
-// nbFilledBytes = 0, and the encoder runs its own ec_enc over `compressed`).
+// THE ec_enc PARAMETER: both C call shapes are ported. Encode passes enc == NULL
+// (own ec_enc over `compressed`; tell0_frac = tell = 1, nbFilledBytes = 0 at
+// :1862), which is how opus_custom_encode drives CELT. EncodeWithEC passes an
+// external coder with compressed == NULL, which is how opus_encode_frame_native
+// drives it (opus_encoder.c:2493), taking the :1865-1867 and :1919-1920 branches.
 //
 // Gated out of this build (do NOT look for them here):
 //
@@ -186,17 +188,49 @@ type EncodeWitness struct {
 // storage window, so the caller does not have to pre-zero the buffer; bytes past
 // the returned length are not part of the packet.
 func (st *Encoder) Encode(pcm []int16, frameSize int, compressed []byte, nbCompressedBytes int) int {
-	return st.encodeObserved(pcm, frameSize, compressed, nbCompressedBytes, nil)
+	return st.encodeObserved(pcm, frameSize, compressed, nbCompressedBytes, nil, nil)
 }
 
-// encodeObserved is the implementation of Encode with an optional (nil-able)
-// witness hook for the differential test.
+// EncodeWithEC is celt_encode_with_ec (celt_encoder.c:1725) with an EXTERNAL
+// range coder, i.e. the `enc != NULL` / `compressed == NULL` call shape that
+// opus_encode_frame_native uses at opus_encoder.c:2493. ec must already be
+// Init'ed over the packet buffer (the Opus layer does ec_enc_init at :1964 and
+// ec_enc_shrink at :2413 before calling), and this function writes the CELT
+// payload into it, continuing from wherever it is.
+//
+// vs. Encode (enc == NULL), only three things change, all of them in C:
+//
+//   - :1860-1868 tell0_frac / tell / nbFilledBytes come from the coder instead of
+//     the 1 / 1 / 0 constants.
+//   - :1919-1920 the CBR nbCompressedBytes clamp additionally ec_enc_shrink()s.
+//   - :1929-1933 no ec_enc_init: the caller's coder is used as-is.
+//
+// On the frozen CELT-only Opus path the two shapes are NUMERICALLY EQUIVALENT
+// (a fresh coder has ec_tell()==1, ec_tell_frac()==8 -> nbFilledBytes==0; tell0_frac
+// is read only in the hybrid branch at :2433; and the CBR clamp needs
+// bitrate != OPUS_BITRATE_MAX, which opus_encode_frame_native never leaves).
+// EncodeWithEC exists so the port does not DEPEND on that equivalence.
+func (st *Encoder) EncodeWithEC(pcm []int16, frameSize int, ec *rangecoding.Encoder, nbCompressedBytes int) int {
+	return st.encodeObserved(pcm, frameSize, nil, nbCompressedBytes, ec, nil)
+}
+
+// encodeObserved is the implementation of Encode / EncodeWithEC with an optional
+// (nil-able) witness hook for the differential test. extEnc is the C `ec_enc *enc`
+// argument: nil reproduces `enc == NULL` (own coder over `compressed`), non-nil
+// reproduces an external coder (and then `compressed` is unused, as it is NULL in C).
 //
 //nolint:gocyclo,gocognit,maintidx // Verbatim transliteration of a 1100-line C function; splitting it would break the 1:1 mapping the differential oracle depends on.
-func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte, nbCompressedBytes int, w *EncodeWitness) int {
+func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte, nbCompressedBytes int, extEnc *rangecoding.Encoder, w *EncodeWitness) int {
 	var i, c, N int
 	var bits int32
-	var enc rangecoding.Encoder
+	// C declares `ec_enc _enc;` (:1730) and only uses it when enc == NULL (:1931).
+	// `enc` below is the C parameter of the same name: it aliases either the
+	// caller's coder or our own storage, so every enc.* call site stays verbatim.
+	var ownEnc rangecoding.Encoder
+	enc := &ownEnc
+	if extEnc != nil {
+		enc = extEnc
+	}
 	// C spells these `int shortBlocks=0; int isTransient=0;` (:1747-1748), but
 	// those initialisers are dead: both are unconditionally re-zeroed at :2022-2023
 	// before anything reads them.
@@ -287,10 +321,17 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	oldLogE2 := st.oldLogE2
 	energyError := st.energyError
 
-	// enc == NULL (:1862).
-	tell0Frac = 1
-	tell = 1
-	nbFilledBytes = 0
+	if extEnc == nil {
+		// enc == NULL (:1862).
+		tell0Frac = 1
+		tell = 1
+		nbFilledBytes = 0
+	} else {
+		// enc != NULL (:1865-1867).
+		tell0Frac = int32(enc.TellFrac())
+		tell = int32(enc.Tell())
+		nbFilledBytes = (int(tell) + 4) >> 3
+	}
 
 	// The CUSTOM_MODES signalling-byte block (:1870-1896) is gated out; st->end,
 	// compressed and nbCompressedBytes are left alone.
@@ -299,7 +340,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	nbCompressedBytes = fixedmath.IMIN(nbCompressedBytes, packetSizeCap)
 
 	if st.vbr != 0 && st.bitrate != opusBitrateMax {
-		vbrRate = bitrateToBits(st.bitrate, m.Fs, int32(frameSize)) << bitRes
+		vbrRate = BitrateToBits(st.bitrate, m.Fs, int32(frameSize)) << bitRes
 		// The `if (st->signalling) vbr_rate -= 8<<BITRES;` at :1905 is CUSTOM_MODES.
 		effectiveBytes = int(vbrRate >> (3 + bitRes))
 	} else {
@@ -323,7 +364,10 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 			if w != nil && nbCompressedBytes != before {
 				w.CbrClamped = true
 			}
-			// The ec_enc_shrink at :1920 is inside `if (enc != NULL)`: dead here.
+			// :1919-1920, inside `if (enc != NULL)`.
+			if extEnc != nil {
+				enc.EncShrink(uint32(nbCompressedBytes))
+			}
 		}
 		effectiveBytes = nbCompressedBytes - nbFilledBytes
 	}
@@ -333,8 +377,12 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		equivRate = fixedmath.MIN32(equivRate, st.bitrate-int32((40*C+20)*((400>>LM)-50)))
 	}
 
-	// enc == NULL (:1931): run our own coder over the caller's buffer.
-	enc.Init(compressed[:nbCompressedBytes])
+	// :1929-1933. enc == NULL: run our own coder over the caller's buffer. With an
+	// external coder the caller already Init'ed it (and possibly shrank it), so it
+	// is used as-is.
+	if extEnc == nil {
+		enc.Init(compressed[:nbCompressedBytes])
+	}
 
 	if vbrRate > 0 {
 		// Compute the max bit-rate allowed in VBR mode to avoid violating the target
@@ -727,13 +775,13 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		twoPass = 1
 	}
 	coarseIntra := quantCoarseEnergy(m, start, end, effEnd, bandLogE, oldBandE, uint32(totalBits),
-		energyErr, &enc, C, LM, nbAvailableBytes, st.forceIntra, &st.delayedIntra,
+		energyErr, enc, C, LM, nbAvailableBytes, st.forceIntra, &st.delayedIntra,
 		twoPass, st.lossRate, st.lfe)
 
 	// tf_encode MUTATES tf_res in place (unaffordable bands forced to curr, then
 	// every entry remapped through tf_select_table); the remapped array is what
 	// quant_all_bands consumes below.
-	tfEncode(start, end, isTransient, tfRes, LM, tfSelect, &enc)
+	tfEncode(start, end, isTransient, tfRes, LM, tfSelect, enc)
 
 	if int32(enc.Tell())+4 <= totalBits {
 		switch {
@@ -1003,7 +1051,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		signalBandwidth = 1
 	}
 	codedBands = cltComputeAllocation(m, start, end, offsets, caps, allocTrim, &st.intensity,
-		&dualStereo, bits, &balance, pulses, fineQuant, finePriority, C, LM, &enc, nil, 1,
+		&dualStereo, bits, &balance, pulses, fineQuant, finePriority, C, LM, enc, nil, 1,
 		st.lastCodedBands, signalBandwidth)
 	if st.lastCodedBands != 0 {
 		st.lastCodedBands = fixedmath.IMIN(st.lastCodedBands+1,
@@ -1012,7 +1060,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		st.lastCodedBands = codedBands
 	}
 
-	quantFineEnergy(m, start, end, oldBandE, energyErr, nil, fineQuant, &enc, C)
+	quantFineEnergy(m, start, end, oldBandE, energyErr, nil, fineQuant, enc, C)
 	for i = 0; i < nbEBands*CC; i++ {
 		energyError[i] = 0
 	}
@@ -1025,7 +1073,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	}
 	quantAllBands(1, m, start, end, X, Y, collapseMasks, bandE, pulses, shortBlocks,
 		st.spreadDecision, dualStereo, st.intensity, tfRes,
-		int32(nbCompressedBytes*(8<<bitRes)-antiCollapseRsv), balance, &enc, nil, LM,
+		int32(nbCompressedBytes*(8<<bitRes)-antiCollapseRsv), balance, enc, nil, LM,
 		codedBands, &st.rng, st.complexity, st.disableInv)
 
 	if antiCollapseRsv > 0 {
@@ -1038,7 +1086,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	}
 	// qext_bytes is always 0 without ENABLE_QEXT, so this always runs.
 	quantEnergyFinalise(m, start, end, oldBandE, energyErr, fineQuant, finePriority,
-		nbCompressedBytes*8-enc.Tell(), &enc, C)
+		nbCompressedBytes*8-enc.Tell(), enc, C)
 	c = 0
 	for {
 		for i = start; i < end; i++ {
@@ -1156,7 +1204,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 func (st *Encoder) EncodeFrame(pcm []int16, frameSize, nbCompressedBytes int) (int, []byte, EncodeWitness) {
 	var w EncodeWitness
 	buf := make([]byte, nbCompressedBytes)
-	ret := st.encodeObserved(pcm, frameSize, buf, nbCompressedBytes, &w)
+	ret := st.encodeObserved(pcm, frameSize, buf, nbCompressedBytes, nil, &w)
 	if ret < 0 {
 		return ret, nil, w
 	}

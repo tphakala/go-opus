@@ -86,6 +86,52 @@ func (rp *Repacketizer) OutRange(begin, end int, data []byte) (int, error) {
 	return rp.outRangeImpl(begin, end, data, false, false)
 }
 
+// Pad grows the packet in data[:length] in place to exactly newLen bytes, adding
+// code-3 padding, and reports whether it succeeded. It transliterates
+// opus_packet_pad() / opus_packet_pad_impl() (src/repacketizer.c:335-369) with no
+// extensions, and data must have room for newLen bytes.
+//
+// The short-circuit at repacketizer.c:343 is load-bearing, not an optimization:
+// when length == newLen it returns OPUS_OK having written NOTHING, so a CBR
+// packet that already fills its budget is left byte-for-byte alone rather than
+// being re-framed. The Opus encoder calls this on every CBR frame
+// (opus_encoder.c:2646, apply_padding = !use_vbr), and it only does real work
+// when cbr_bytes > 1276 forced max_data_bytes to be clamped below the requested
+// size.
+//
+// Like the C, the payload is copied out before the repacketizer writes back into
+// data, so the in-place move to the end of the buffer is safe.
+func Pad(data []byte, length, newLen int) error {
+	if length < 1 {
+		return ErrBadArg
+	}
+	if length == newLen {
+		return nil // repacketizer.c:343-344
+	}
+	if length > newLen {
+		return ErrBadArg // repacketizer.c:345-346
+	}
+	if newLen > len(data) || length > len(data) {
+		return ErrBufferTooSmall
+	}
+	cp := make([]byte, length)
+	copy(cp, data[:length])
+
+	var rp Repacketizer
+	rp.Init()
+	if err := rp.Cat(cp); err != nil {
+		return err
+	}
+	n, err := rp.outRangeImpl(0, rp.nbFrames, data[:newLen], false, true)
+	if err != nil {
+		return err
+	}
+	if n <= 0 { // C: `if (ret > 0) return OPUS_OK; else return ret;`
+		return ErrInternal
+	}
+	return nil
+}
+
 // outRangeImpl transliterates opus_repacketizer_out_range_impl() from libopus,
 // without the extension handling. It selects frame-count code 0/1/2/3, writes
 // the header and frame lengths, copies the frame payloads, and optionally pads

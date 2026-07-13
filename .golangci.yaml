@@ -4,7 +4,8 @@
 #   - A lint boundary (issues.exclusions below) relaxes the style/complexity
 #     linters inside the transliteration packages (internal/celt, internal/silk,
 #     internal/rangecoding, internal/fixedmath, internal/silkmath,
-#     internal/opuscompare). Those packages are deliberately C-shaped: C names,
+#     internal/opuscompare, internal/opusdec, internal/opusenc). Those packages
+#     are deliberately C-shaped: C names,
 #     C control flow, and original comments are preserved so the port stays
 #     diffable against libopus v1.6.1. The quality metric there is fidelity to
 #     the C, not idiomatic Go. Correctness linters (staticcheck SA*, govet,
@@ -86,7 +87,7 @@ linters:
     generated: lax
     rules:
       # Transliteration packages: relax style/complexity, keep correctness.
-      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare|opusdec)/
+      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare|opusdec|opusenc)/
         linters:
           - dupl
           - gocognit
@@ -105,7 +106,7 @@ linters:
       # fight diffability: tagged switches over the C's if/else, De Morgan on
       # conditionals, embedded-field selectors, and so on), and S1021 (the C
       # keeps a separate `var x T; x = e` declaration and assignment).
-      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare|opusdec)/
+      - path: internal/(celt|silk|rangecoding|fixedmath|silkmath|opuscompare|opusdec|opusenc)/
         linters:
           - staticcheck
         text: "(ST1003|ST1016|QF1|S1021)"
