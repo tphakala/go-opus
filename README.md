@@ -14,24 +14,24 @@ No cgo and no external libraries in the published module.
 
 ## Status
 
-Work in progress. Every codec layer is validated bit-for-bit against the C
-reference before it lands (see Approach), so the pieces marked done are done in
-the strong sense: byte-identical to libopus.
+Every codec layer is validated bit-for-bit against the C reference before it
+lands (see Approach), so the pieces marked done are done in the strong sense:
+byte-identical to libopus.
 
 - **Decoder: complete.** The full Opus decoder passes RFC 6716 conformance,
   decoding all 12 official test vectors with the per-packet range state matching
   libopus exactly. This covers CELT, SILK, and hybrid modes, mode switching and
   redundancy (including the SILK/CELT crossovers), packet-loss concealment, and
   inband FEC/LBRR.
-- **Encoder: the codec is complete and bit-exact; the public API is landing.**
-  The CELT-only fixed-point encoder now produces whole Opus packets, TOC byte
-  included, that are byte-identical to the C reference: every analysis stage, the
-  band quantizer, the VBR rate controller, the `celt_encode_with_ec` pipeline, and
-  the `opus_encoder.c` wrapper around it (delay compensation, the CBR byte budget,
-  framing). Each layer is asserted packet-for-packet and state-field-for-state-field
-  against libopus. What remains is the public `opus.Encoder` surface, the Ogg Opus
-  writer, and the full encoder gate sweep; until those land, encoding is reachable
-  only through the internal packages.
+- **Encoder: complete (CELT-only).** The fixed-point encoder produces whole Opus
+  packets that are byte-identical to the C reference. Its gate ran 10.3 million
+  frame pairs, every frame of a 52-clip corpus across 16 to 128 kbps, CBR/VBR and
+  constrained VBR, complexity 0 to 10, and 2.5/5/10/20 ms frames: 417 MB of packet
+  bytes, all byte-identical, with the range state matching on every frame. Encoded
+  packets also decode identically through the Go and the C decoder. Sample rates 8,
+  12, 16, 24 and 48 kHz are all bit-exact, mono and stereo. SILK and hybrid
+  encoding are not implemented, so the encoder is CELT-only; the decoder handles
+  all three modes.
 
 ## Approach
 
@@ -65,11 +65,13 @@ phase, behind the scalar function signatures).
 
 ## Packages
 
-- `opus` - the raw packet codec: a `Decoder` (and, later, an `Encoder`)
-  operating on Opus packets and interleaved 16-bit PCM.
+- `opus` - the raw packet codec: an `Encoder` and a `Decoder`, operating on Opus
+  packets and interleaved 16-bit PCM.
 - `oggopus` - the RFC 7845 Ogg Opus container, an io-based streaming reader and
   writer whose page granules are written inline, so the output duration is
-  correct even on a non-seekable sink.
+  correct even on a non-seekable sink. The writer's pre-skip and end trim are
+  checked by decoding an impulse back to the exact sample it went in at, and the
+  output is validated against ffmpeg rather than only against our own reader.
 
 The public API follows the conventions of its sibling project
 [go-flac](https://github.com/tphakala/go-flac).
