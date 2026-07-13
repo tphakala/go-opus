@@ -182,7 +182,7 @@ func TestOpusencInitMatchesC(t *testing.T) {
 			t.Errorf("channels=%d: delay_buffer len = %d, want encoder_buffer*channels = %d",
 				channels, len(gs.State().DelayBuffer), want)
 		}
-		if got := gs.Lookahead(); got != 192 {
+		if got := gs.DelayCompensation(); got != 192 {
 			t.Errorf("channels=%d: delay_compensation = %d, want Fs/250 = 192", channels, got)
 		}
 	}

@@ -491,9 +491,37 @@ func (st *Encoder) SetEnergyMask(mask []int32) error {
 // encoder differential check.
 func (st *Encoder) FinalRange() uint32 { return st.rangeFinal }
 
-// Lookahead is OPUS_GET_LOOKAHEAD (:3082) for the frozen config: the encoder's
-// algorithmic delay in samples.
-func (st *Encoder) Lookahead() int { return st.delayCompensation }
+// Lookahead is OPUS_GET_LOOKAHEAD (opus_encoder.c:3082): the encoder's algorithmic
+// delay in samples.
+//
+//	*value = st->Fs/400;
+//	if (application != RESTRICTED_LOWDELAY && application != RESTRICTED_CELT)
+//	    *value += st->delay_compensation;
+//
+// Both terms are required. Fs/400 is the CELT MDCT overlap lookahead and
+// delay_compensation is the ring-buffer delay, so at 48 kHz with the AUDIO
+// application this is 120 + 192 = 312, not 192. The value does not affect any
+// packet byte, which is why the differential gate cannot see an error here, but it
+// is what the Ogg Opus pre-skip field is derived from: returning 192 would misalign
+// every decoded stream by 120 samples. TestOpusencLookaheadMatchesC pins it against
+// the C ctl.
+// C also excludes OPUS_APPLICATION_RESTRICTED_CELT (2053) from the
+// delay_compensation term, but NewEncoder does not accept that application, so that
+// arm is unreachable here.
+func (st *Encoder) Lookahead() int {
+	v := int(st.Fs / 400)
+	if st.application != ApplicationRestrictedLowdelay {
+		v += st.delayCompensation
+	}
+	return v
+}
+
+// DelayCompensation is st->delay_compensation (Fs/250, so 192 at 48 kHz for the AUDIO
+// application). It is the depth of the delay-compensation ring buffer, and it is NOT
+// the same as Lookahead, which additionally includes the Fs/400 CELT overlap term.
+// Conflating the two is how the missing overlap term in Lookahead went unnoticed, so
+// callers that want the ring depth must use this and not Lookahead.
+func (st *Encoder) DelayCompensation() int { return st.delayCompensation }
 
 // CELT exposes the CELT sub-encoder. The Opus layer drives it through the ctl
 // setters above and celt.EncodeWithEC; this accessor exists for the differential

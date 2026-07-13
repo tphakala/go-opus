@@ -356,7 +356,9 @@ func TestOpusencPCMFrontEndMatchesC(t *testing.T) {
 			defer ch.Close()
 
 			gst := goEncoderMatchingCfg(t, cfg)
-			totalBuffer := gst.Lookahead() // delay_compensation; AUDIO -> Fs/250 = 192
+			// The ring depth is delay_compensation (Fs/250 = 192), NOT Lookahead, which
+			// also carries the Fs/400 CELT overlap term (312 at 48 kHz).
+			totalBuffer := gst.DelayCompensation()
 			if totalBuffer != 192 {
 				t.Fatalf("total_buffer = %d, want 192 (the whole ring depends on it)", totalBuffer)
 			}

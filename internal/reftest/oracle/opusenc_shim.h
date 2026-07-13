@@ -342,4 +342,19 @@ static int32_t oracle_const_silk_variable_hp_smth_coef2_q16(void)
    return (int32_t)SILK_FIX_CONST(VARIABLE_HP_SMTH_COEF2, 16);
 }
 
+/* OPUS_GET_LOOKAHEAD (opus_encoder.c:3082). Returns Fs/400 plus, for every application
+   except the RESTRICTED ones, delay_compensation. This value never reaches a packet
+   byte, so the bit-exact packet gate cannot see an error in it, but the Ogg Opus
+   pre-skip field is derived from it: getting it wrong misaligns every decoded stream. */
+static int32_t oracle_topenc_lookahead(int32_t fs, int channels, int application)
+{
+   int err = 0;
+   int32_t v = -1;
+   OpusEncoder *e = opus_encoder_create(fs, channels, application, &err);
+   if (e == NULL || err != OPUS_OK) return -1;
+   if (opus_encoder_ctl(e, OPUS_GET_LOOKAHEAD(&v)) != OPUS_OK) v = -1;
+   opus_encoder_destroy(e);
+   return v;
+}
+
 #endif /* GOOPUS_OPUSENC_SHIM_H */

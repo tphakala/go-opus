@@ -332,3 +332,8 @@ func (e *cOpusencHandle) Close() {
 func cConstSilkVariableHPSmthCoef2Q16() int32 {
 	return int32(C.oracle_const_silk_variable_hp_smth_coef2_q16())
 }
+
+// cTopencLookahead returns the C encoder's OPUS_GET_LOOKAHEAD for the given config.
+func cTopencLookahead(fs int32, channels, application int) int32 {
+	return int32(C.oracle_topenc_lookahead(C.int32_t(fs), C.int(channels), C.int(application)))
+}
