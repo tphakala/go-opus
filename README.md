@@ -70,14 +70,13 @@ headline: fast enough to be unremarkable in a pipeline, slow enough to be worth
 tuning. No optimization work has been done yet, so this is the baseline, not the
 ceiling.
 
-The comparison below is the only one that isolates the language. libopus here is
-the pinned v1.6.1 oracle compiled the way go-opus is written, `FIXED_POINT +
-DISABLE_FLOAT_API` and **no SIMD**: the same algorithm, the same fixed-point
-arithmetic, the same scalar kernels. Both benchmarks live in one file and one
-package, driven from one PCM generator and one config, so they cannot drift
-apart; and because the port is bit-exact, the harness *asserts* that the two
-sides encode to byte-identical packets before it times either of them. If they
-were doing different work, the bytes would say so.
+The C it is measured against is the pinned v1.6.1 oracle built `FIXED_POINT +
+DISABLE_FLOAT_API`, with libopus's hand-written NEON and SSE kernels switched
+off. Both benchmarks live in one file and one package, driven from one PCM
+generator and one config, so they cannot drift apart; and because the port is
+bit-exact, the harness *asserts* that the two sides encode to byte-identical
+packets before it times either of them. If they were doing different work, the
+bytes would say so.
 
 darwin/arm64 (Apple M4 Pro), Go 1.26, 48 kHz, 64 kbps per channel, median of 5:
 
@@ -89,16 +88,35 @@ darwin/arm64 (Apple M4 Pro), Go 1.26, 48 kHz, 64 kbps per channel, median of 5:
 Across all sixteen configurations (mono and stereo, 2.5 to 20 ms): encode is
 **1.8x to 3.0x** slower than C, decode **1.5x to 1.7x**.
 
-The allocation column is the most visible difference, though not necessarily the
-most expensive one. C allocates nothing per frame; its scratch arrays are stack
-`VARDECL`s, reclaimed when the frame pops. go-opus transliterates each of them
-as a Go `make()` — deliberately, because keeping the C's shape is what keeps the
-port diffable against upstream and therefore verifiable. That costs 501 heap
-allocations per stereo 20 ms frame. Whether it costs much *time* is a separate
-question: 501 small allocations is on the order of 10 us against a 105 us gap,
-so the rest is likely plain codegen, bounds checks in the DSP inner loops and
-the absence of any vectorization. Profiling will settle it before any
-optimization work starts.
+### Where the gap actually comes from
+
+Switching libopus's hand-written SIMD off does **not** produce scalar C, which
+is the trap this benchmark first fell into. `clang -O2` auto-vectorizes the
+fixed-point kernels by itself: disassembling the oracle with its exact build
+flags finds NEON integer multiply-accumulate (`smlal.4s`, `addv.4s`) in 15 of
+the 19 hot kernels. Go's compiler emits none, anywhere. So this is not a
+language-overhead measurement; it is **scalar Go against auto-vectorized C**.
+
+Attributing the 117 us encode gap (stereo 20 ms) by measurement rather than
+assumption:
+
+| Cause | Cost | Share |
+| ----- | ---: | ----: |
+| Missing vectorization | 85.1 us | **72%** |
+| Allocation (501/frame, `mallocgc`) | 17.4 us | 15% |
+| Bounds checks (`-gcflags=all=-B`) | 12.9 us | 11% |
+| GC (`GOGC=off`) | 2.0 us | 2% |
+
+The control that settles it: `quant_partition` is the one hot kernel clang did
+*not* vectorize, and it is the one kernel where **Go is faster than C**. Go's
+code generation is not the problem. Its lack of vectorization is. On the two
+kernels that vectorize best, `celt_inner_prod` and `celt_pitch_xcorr`, C is
+13x faster.
+
+That also means the per-frame allocations, though the most visible difference,
+are not the main cost. They are still worth removing — 145 KB of garbage per
+stereo frame is real pressure on a long-running process, which a benchmark loop
+understates — but they are 15% of the gap, not the bulk of it.
 
 In absolute terms the encoder still runs at roughly 90x realtime for stereo
 20 ms frames and the decoder at 400x, so an hour of audio encodes in about 40
