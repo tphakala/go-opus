@@ -89,13 +89,16 @@ darwin/arm64 (Apple M4 Pro), Go 1.26, 48 kHz, 64 kbps per channel, median of 5:
 Across all sixteen configurations (mono and stereo, 2.5 to 20 ms): encode is
 **1.8x to 3.0x** slower than C, decode **1.5x to 1.7x**.
 
-The allocation column is the interesting part, and it points at the first thing
-to fix. C allocates nothing per frame; its scratch arrays are stack `VARDECL`s,
-reclaimed when the frame pops. go-opus transliterates each of them as a Go
-`make()` — deliberately, because keeping the C's shape is what keeps the port
-diffable against upstream and therefore verifiable. That choice costs 501 heap
-allocations per stereo 20 ms frame, and pooling them is very likely a large
-share of the 2x.
+The allocation column is the most visible difference, though not necessarily the
+most expensive one. C allocates nothing per frame; its scratch arrays are stack
+`VARDECL`s, reclaimed when the frame pops. go-opus transliterates each of them
+as a Go `make()` — deliberately, because keeping the C's shape is what keeps the
+port diffable against upstream and therefore verifiable. That costs 501 heap
+allocations per stereo 20 ms frame. Whether it costs much *time* is a separate
+question: 501 small allocations is on the order of 10 us against a 105 us gap,
+so the rest is likely plain codegen, bounds checks in the DSP inner loops and
+the absence of any vectorization. Profiling will settle it before any
+optimization work starts.
 
 In absolute terms the encoder still runs at roughly 90x realtime for stereo
 20 ms frames and the decoder at 400x, so an hour of audio encodes in about 40
@@ -109,6 +112,41 @@ go test -tags refc ./internal/reftest/oracle/ -run '^$' -bench 'Encode|Decode' -
 
 (That needs the pinned libopus submodule and a C toolchain; the published module
 itself has no cgo.)
+
+### Against libopus as it ships
+
+The comparison above is deliberately artificial: it holds the build constant to
+isolate the language. This one is the opposite, and answers the question a user
+actually has, which is what happens if they swap `opusenc` for go-opus. Encoding
+a 5-minute 48 kHz stereo WAV to Ogg Opus at 96 kbps, single-threaded:
+
+| Encoder | Wall | Peak RSS | Throughput | Achieved |
+| ------- | ---: | -------: | ---------: | -------: |
+| go-opus (`cmd/wav2opus`) | 2.26 s | 12.2 MB | 25.5 MB/s | 95.6 kbps |
+| opusenc (opus-tools 0.2, libopus 1.6.1) | 1.18 s | 3.0 MB | 48.8 MB/s | 93.0 kbps |
+| ffmpeg 8.1.2 (libopus) | 1.26 s | 17.7 MB | 45.7 MB/s | 93.0 kbps |
+
+**go-opus is about 1.9x slower than opusenc**, and the comparison is genuinely
+mode-matched: every packet from all three encoders was parsed back and all
+15,001 of them carry TOC config 31 (CELT-only, 20 ms, fullband), so this is
+CELT against CELT rather than CELT against whatever libopus felt like choosing.
+
+Two things make this number *kinder* to go-opus than it looks, and both are
+worth stating plainly:
+
+- **libopus is doing work go-opus simply does not do.** The shipped libopus is a
+  float build, and at complexity >= 7 it runs a tonality analysis pass
+  (`analysis.c`) that our `DISABLE_FLOAT_API` port compiles out entirely. So the
+  C is paying for a stage we skip. That, not superior Go codegen, is why 1.9x
+  here looks better than the 2.25x measured against the identical fixed-point C
+  above. **The 2.25x is the honest codec-core ratio; the 1.9x is the honest
+  end-to-end one.** Neither supersedes the other.
+- ffmpeg spends more CPU than wall time even at `-threads 1` (its demux/mux
+  helpers), so it gets parallelism go-opus does not. `opusenc`, whose CPU time
+  matches its wall time, is the fair reference.
+
+Reproduce with `scripts/bench-encoders.sh`, which generates a deterministic
+input, prints both caveats, and skips any comparator that is not installed.
 
 ## Packages
 
