@@ -217,9 +217,9 @@ func RenormaliseVector(X []int32, n int, gain int32) {
 // that these int16 lanes do not overflow. EXTEND32 of a celt_norm is a plain
 // widening (no int16 truncation), so those sites use the int32 value directly.
 // The ENABLE_QEXT op_pvq_search_N2 / _extra refine variants are excluded.
-func opPvqSearch(X []int32, iy []int32, K, N int) int16 {
-	y := make([]int32, N)   // VARDECL(celt_norm, y)
-	signx := make([]int, N) // VARDECL(int, signx)
+func opPvqSearch(X []int32, iy []int32, K, N int, sc *scratch) int16 {
+	y := alloc(&sc.pvqY, N)         // VARDECL(celt_norm, y)
+	signx := alloc(&sc.pvqSignx, N) // VARDECL(int, signx)
 	var i, j int
 	var pulsesLeft int
 	var sum int32 // opus_val32
@@ -325,14 +325,21 @@ func opPvqSearch(X []int32, iy []int32, K, N int) int16 {
 	return yy
 }
 
-// AlgQuant is the FIXED_POINT base alg_quant (vq.c:550): rotate X into the search
+// AlgQuant is the differential-test entry point over algQuant, standing in for the
+// encoder-held scratch the production path threads through.
+func AlgQuant(X []int32, N, K, spread, B int, enc *rangecoding.Encoder, gain int32, resynth int) uint32 {
+	var sc scratch
+	return algQuant(X, N, K, spread, B, enc, gain, resynth, &sc)
+}
+
+// algQuant is the FIXED_POINT base alg_quant (vq.c:550): rotate X into the search
 // domain, run the PVQ pulse search, code the pulses, and (when resynth != 0)
 // reconstruct the unit-norm band into X. Returns the anti-collapse mask. The
 // ENABLE_QEXT extra-bits refine branches are excluded; the arch parameter is
 // dropped. Requires K>0, N>1.
-func AlgQuant(X []int32, N, K, spread, B int, enc *rangecoding.Encoder, gain int32, resynth int) uint32 {
+func algQuant(X []int32, N, K, spread, B int, enc *rangecoding.Encoder, gain int32, resynth int, sc *scratch) uint32 {
 	// celt_assert2(K>0); celt_assert2(N>1)
-	iy := make([]int32, N)
+	iy := alloc(&sc.pvqIy, N) // VARDECL(int, iy)
 
 	// expRotation1 (below) applies a fixed norm_scaledown by NORM_SHIFT-14 (=10)
 	// whose int16 lane stays bit-exact with the C MULT16_16 truncation only while
@@ -344,7 +351,7 @@ func AlgQuant(X []int32, N, K, spread, B int, enc *rangecoding.Encoder, gain int
 	// rotation preserves norm, so no component ever crosses the threshold.
 	expRotation(X, N, 1, B, K, spread)
 
-	yy := int32(opPvqSearch(X, iy, K, N))
+	yy := int32(opPvqSearch(X, iy, K, N, sc))
 	collapseMask := extractCollapseMask(iy, N, B)
 	EncodePulses(iy, N, K, enc)
 	if resynth != 0 {

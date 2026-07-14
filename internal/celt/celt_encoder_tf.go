@@ -54,7 +54,7 @@ func l1Metric(tmp []int32, N, LM int, bias int16) int32 {
 //
 // The `#ifdef FUZZING` block at :815-820 is dead in the frozen config.
 func tfAnalysis(m *celtMode, length, isTransient int, tfRes []int, lambda int,
-	X []int32, N0, LM int, tfEstimate int16, tfChan int, importance []int) int {
+	X []int32, N0, LM int, tfEstimate int16, tfChan int, importance []int, sc *scratch) int {
 	var cost0 int
 	var cost1 int
 	var selcost [2]int
@@ -72,11 +72,11 @@ func tfAnalysis(m *celtMode, length, isTransient int, tfRes []int, lambda int,
 			-int32(fixedmath.QCONST16(.25, 14)),
 			int32(fixedmath.QCONST16(.5, 14))-int32(tfEstimate)))))
 
-	metric := make([]int, length)
-	tmp := make([]int32, (int(m.eBands[length])-int(m.eBands[length-1]))<<LM)
-	tmp1 := make([]int32, (int(m.eBands[length])-int(m.eBands[length-1]))<<LM)
-	path0 := make([]int, length)
-	path1 := make([]int, length)
+	metric := alloc(&sc.tfMetric, length)                                          // VARDECL(int, metric)
+	tmp := alloc(&sc.tfTmp, (int(m.eBands[length])-int(m.eBands[length-1]))<<LM)   // VARDECL(celt_norm, tmp)
+	tmp1 := alloc(&sc.tfTmp1, (int(m.eBands[length])-int(m.eBands[length-1]))<<LM) // VARDECL(celt_norm, tmp_1)
+	path0 := alloc(&sc.tfPath0, length)                                            // VARDECL(int, path0)
+	path1 := alloc(&sc.tfPath1, length)                                            // VARDECL(int, path1)
 
 	for i := 0; i < length; i++ {
 		var k, N int
@@ -288,7 +288,8 @@ func TfAnalysis(length, isTransient, lambda int, X []int32, N0, LM int,
 	tfEstimate int16, tfChan int, importance []int) (tfSelect int, tfRes []int) {
 	m := &mode48000_960
 	tfRes = make([]int, length)
-	tfSelect = tfAnalysis(m, length, isTransient, tfRes, lambda, X, N0, LM, tfEstimate, tfChan, importance)
+	var sc scratch
+	tfSelect = tfAnalysis(m, length, isTransient, tfRes, lambda, X, N0, LM, tfEstimate, tfChan, importance, &sc)
 	return tfSelect, tfRes
 }
 

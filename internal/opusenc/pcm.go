@@ -233,7 +233,15 @@ func (st *Encoder) UpdateVariableHPSmth2() int32 {
 // totalBuffer is delay_compensation for VOIP/AUDIO and 0 for the RESTRICTED_*
 // applications (:1948-1951); the frozen config is AUDIO, so it is Fs/250 = 192.
 func (st *Encoder) PCMFront(pcm []int16, frameSize, totalBuffer int) []int16 {
-	pcmBuf := make([]int16, (totalBuffer+frameSize)*st.channels)
+	// ALLOC(pcm_buf, (total_buffer+frame_size)*st->channels, opus_res) (:1966),
+	// pooled on the encoder. The two writes below define the whole buffer — the
+	// history copy fills [0,total_buffer*C) and DCReject fills the rest — so the
+	// carried-over contents are never observed. See internal/celt/scratch.go.
+	n := (totalBuffer + frameSize) * st.channels
+	if cap(st.pcmBuf) < n {
+		st.pcmBuf = make([]int16, n)
+	}
+	pcmBuf := st.pcmBuf[:n]
 	copy(pcmBuf[:totalBuffer*st.channels],
 		st.delayBuffer[(st.encoderBuffer-totalBuffer)*st.channels:])
 

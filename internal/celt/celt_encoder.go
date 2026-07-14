@@ -87,6 +87,13 @@ type Encoder struct {
 	energyMask   []int32 // celt_glog*, nil on the non-surround path
 	specAvg      int32   // celt_glog
 
+	// Per-frame working buffers. In C these are stack VARDECL/ALLOCs, reclaimed on
+	// frame pop; here they are pooled on the encoder so a steady-state Encode
+	// allocates nothing (see scratch.go, and its zeroing contract). This is state
+	// only in the sense that a C thread's stack is: it carries nothing across
+	// frames that any frame reads, and Reset does not need to touch it.
+	sc scratch
+
 	// Cross-frame VLA arrays (sizes use CC per opus_custom_encoder_get_size).
 	inMem        []int32 // channels*overlap                 (celt_sig)
 	prefilterMem []int32 // channels*COMBFILTER_MAXPERIOD     (celt_sig)
@@ -415,13 +422,13 @@ var invTable = [128]byte{
 // dominant channel (tfChan), a VBR-boost metric (tfEstimate) and a weak-transient
 // flag. in is C*length celt_sig, channel c at in[i+c*length].
 func transientAnalysis(in []int32, length, C int, tfEstimate *int16, tfChan *int,
-	allowWeakTransients int, weakTransient *int, toneFreq int16, toneishness int32) int {
+	allowWeakTransients int, weakTransient *int, toneFreq int16, toneishness int32, sc *scratch) int {
 	forwardShift := 4
 	isTransient := 0
 	maskMetric := int32(0)
 	inShift := fixedmath.IMAX(0, fixedmath.Celt_ilog2(1+celtMaxabs32(in, 0, C*length))-14)
 
-	tmp := make([]int16, length)
+	tmp := alloc(&sc.transientTmp, length) // VARDECL(opus_val16, tmp)
 
 	*weakTransient = 0
 	// For lower bitrates, use a more conservative forward masking decay to avoid
@@ -582,7 +589,7 @@ var gconst1 = fixedmath.QCONST32(1, dbShift)
 // celt_sig, out is CC*N celt_sig. Keep |in| within ~2^28: the CP3 forward MDCT
 // windows/folds at full int32, so a larger magnitude overflows the C oracle
 // (signed-overflow UB) as well.
-func computeMdcts(m *celtMode, shortBlocks int, in, out []int32, C, CC, LM, upsample int) {
+func computeMdcts(m *celtMode, shortBlocks int, in, out []int32, C, CC, LM, upsample int, sc *scratch) {
 	overlap := m.overlap
 	var N, B, shift int
 	if shortBlocks != 0 {
@@ -599,7 +606,7 @@ func computeMdcts(m *celtMode, shortBlocks int, in, out []int32, C, CC, LM, upsa
 		for b := 0; b < B; b++ {
 			// Interleave the sub-frames while doing the MDCTs.
 			cltMDCTForward(&m.mdct, in[c*(B*N+overlap)+b*N:], out[b+c*N*B:],
-				m.window, overlap, shift, B)
+				m.window, overlap, shift, B, sc)
 		}
 		c++
 		if c >= CC {
@@ -732,11 +739,11 @@ func toneLpc(x []int16, length, delay int, lpc []int32) int {
 // tones (so the caller can keep them from destabilizing the encoder). Returns the
 // tone frequency (Q13-ish, or -1 if not tonal) and writes the toneishness (Q29
 // squared pole radius). in is CC*N celt_sig.
-func toneDetect(in []int32, CC, N int, toneishness *int32, Fs int32) int16 {
+func toneDetect(in []int32, CC, N int, toneishness *int32, Fs int32, sc *scratch) int16 {
 	delay := 1
 	var lpc [2]int32
 	var freq int16
-	x := make([]int16, N)
+	x := alloc(&sc.toneX, N) // VARDECL(opus_val16, x)
 	// Shift by SIG_SHIFT+2 (+3 for stereo) to account for the HF gain of the
 	// preemphasis filter.
 	if CC == 2 {
@@ -787,7 +794,7 @@ func (st *Encoder) runPrefilter(in, prefilterMem []int32, CC, N, prefilterTapset
 	var before, after [2]int32
 	cancelPitch := 0
 
-	pre := make([]int32, CC*(N+maxPeriod))
+	pre := alloc(&st.sc.pre, CC*(N+maxPeriod)) // VARDECL(celt_sig, pre)
 	preBase := [2]int{0, N + maxPeriod}
 
 	c := 0
@@ -825,20 +832,22 @@ func (st *Encoder) runPrefilter(in, prefilterMem []int32, CC, N, prefilterTapset
 		}
 		gain1 = fixedmath.QCONST16(0.75, 15)
 	} else if enabled != 0 && complexity >= 5 {
-		pitchBuf := make([]int16, (maxPeriod+N)>>1)
-		preCh := make([][]int32, 2)
+		pitchBuf := alloc(&st.sc.pitchBuf, (maxPeriod+N)>>1) // VARDECL(opus_val16, pitch_buf)
+		// C's `const celt_sig *pre[2]` (:1441) is a stack pointer array; a fixed
+		// 2-element field is its exact analogue and allocates nothing.
+		preCh := st.sc.preCh[:]
 		preCh[0] = pre[preBase[0]:]
 		if CC == 2 {
 			preCh[1] = pre[preBase[1]:]
 		}
-		pitchDownsample(preCh, pitchBuf, (maxPeriod+N)>>1, CC, 2)
+		pitchDownsample(preCh, pitchBuf, (maxPeriod+N)>>1, CC, 2, &st.sc)
 		// Don't search the last 1.5 octave of the range (too many false-positives
 		// from short-term correlation).
-		pitchSearch(pitchBuf[maxPeriod>>1:], pitchBuf, N, maxPeriod-3*minPeriod, &pitchIndex)
+		pitchSearch(pitchBuf[maxPeriod>>1:], pitchBuf, N, maxPeriod-3*minPeriod, &pitchIndex, &st.sc)
 		pitchIndex = maxPeriod - pitchIndex
 
 		gain1 = removeDoubling(pitchBuf, maxPeriod, minPeriod, N, &pitchIndex,
-			st.prefilterPeriod, st.prefilterGain)
+			st.prefilterPeriod, st.prefilterGain, &st.sc)
 		if pitchIndex > maxPeriod-2 {
 			pitchIndex = maxPeriod - 2
 		}
@@ -1019,7 +1028,8 @@ func CeltPreemphasis(pcm []int16, N, CC, upsample int, mem int32) ([]int32, int3
 // TransientAnalysis runs transient_analysis over in (C*length celt_sig) and
 // returns is_transient, tf_estimate, tf_chan and the weak_transient flag.
 func TransientAnalysis(in []int32, length, C, allowWeakTransients int, toneFreq int16, toneishness int32) (isTransient int, tfEstimate int16, tfChan, weakTransient int) {
-	isTransient = transientAnalysis(in, length, C, &tfEstimate, &tfChan, allowWeakTransients, &weakTransient, toneFreq, toneishness)
+	var sc scratch
+	isTransient = transientAnalysis(in, length, C, &tfEstimate, &tfChan, allowWeakTransients, &weakTransient, toneFreq, toneishness, &sc)
 	return
 }
 
@@ -1035,7 +1045,8 @@ func ComputeMdcts(shortBlocks int, in []int32, C, CC, LM, upsample int) []int32 
 	m := &mode48000_960
 	N := m.shortMdctSize << LM
 	out := make([]int32, CC*N)
-	computeMdcts(m, shortBlocks, in, out, C, CC, LM, upsample)
+	var sc scratch
+	computeMdcts(m, shortBlocks, in, out, C, CC, LM, upsample, &sc)
 	return out
 }
 
@@ -1044,7 +1055,8 @@ func ComputeMdcts(shortBlocks int, in []int32, C, CC, LM, upsample int) []int32 
 func ToneDetect(in []int32, CC, N int) (int16, int32) {
 	m := &mode48000_960
 	var toneishness int32
-	freq := toneDetect(in, CC, N, &toneishness, m.Fs)
+	var sc scratch
+	freq := toneDetect(in, CC, N, &toneishness, m.Fs, &sc)
 	return freq, toneishness
 }
 

@@ -394,7 +394,8 @@ func interpBits2pulses(m *celtMode, start, end, skip_start int,
 // returns codedBands.
 func cltComputeAllocation(m *celtMode, start, end int, offsets, cap []int, alloc_trim int,
 	intensity, dual_stereo *int, total int32, balance *int32, pulses, ebits, fine_priority []int,
-	C, LM int, enc *rangecoding.Encoder, dec *rangecoding.Decoder, encode, prev, signalBandwidth int) int {
+	C, LM int, enc *rangecoding.Encoder, dec *rangecoding.Decoder, encode, prev, signalBandwidth int,
+	sc *scratch) int {
 	var lo, hi, length, j int
 	var codedBands int
 	var skip_start int
@@ -429,10 +430,10 @@ func cltComputeAllocation(m *celtMode, start, end int, offsets, cap []int, alloc
 			total -= int32(dual_stereo_rsv)
 		}
 	}
-	bits1 := make([]int, length)
-	bits2 := make([]int, length)
-	thresh := make([]int, length)
-	trim_offset := make([]int, length)
+	bits1 := alloc(&sc.bits1, length)            // VARDECL(int, bits1)
+	bits2 := alloc(&sc.bits2, length)            // VARDECL(int, bits2)
+	thresh := alloc(&sc.thresh, length)          // VARDECL(int, thresh)
+	trim_offset := alloc(&sc.trimOffset, length) // VARDECL(int, trim_offset)
 
 	for j = start; j < end; j++ {
 		/* Below this threshold, we're sure not to allocate any PVQ bits */
@@ -521,9 +522,10 @@ func ComputeAllocation(start, end int, offsets, cap []int, allocTrim int,
 	intensity, dualStereo *int, total int, pulses, ebits, finePriority []int,
 	C, LM int, enc *rangecoding.Encoder, dec *rangecoding.Decoder, encode, prev, signalBandwidth int) (codedBands, balance int) {
 	var bal int32
+	var sc scratch
 	codedBands = cltComputeAllocation(&mode48000_960, start, end, offsets, cap, allocTrim,
 		intensity, dualStereo, int32(total), &bal, pulses, ebits, finePriority,
-		C, LM, enc, dec, encode, prev, signalBandwidth)
+		C, LM, enc, dec, encode, prev, signalBandwidth, &sc)
 	return codedBands, int(bal)
 }
 

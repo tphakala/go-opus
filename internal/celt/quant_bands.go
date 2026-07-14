@@ -372,7 +372,7 @@ func quantCoarseEnergyImpl(m *celtMode, start, end int, eBands, oldEBands []int3
 // the bitstream), and no caller acts on it.
 func quantCoarseEnergy(m *celtMode, start, end, effEnd int, eBands, oldEBands []int32,
 	budget uint32, error []int32, enc *rangecoding.Encoder, C, LM, nbAvailableBytes,
-	forceIntra int, delayedIntra *int32, twoPass, lossRate, lfe int) int {
+	forceIntra int, delayedIntra *int32, twoPass, lossRate, lfe int, sc *scratch) int {
 	var intra int
 	var maxDecay int32
 
@@ -397,8 +397,8 @@ func quantCoarseEnergy(m *celtMode, start, end, effEnd int, eBands, oldEBands []
 	}
 	encStartState := *enc
 
-	oldEBandsIntra := make([]int32, C*m.nbEBands)
-	errorIntra := make([]int32, C*m.nbEBands)
+	oldEBandsIntra := alloc(&sc.oldEBandsIntra, C*m.nbEBands) // VARDECL(celt_glog, oldEBands_intra)
+	errorIntra := alloc(&sc.errorIntra, C*m.nbEBands)         // VARDECL(celt_glog, error_intra)
 	copy(oldEBandsIntra, oldEBands[:C*m.nbEBands])
 
 	badness1 := 0
@@ -418,7 +418,7 @@ func quantCoarseEnergy(m *celtMode, start, end, effEnd int, eBands, oldEBands []
 		// window that the intra pass wrote. A nil slice is C's ALLOC_NONE.
 		var intraBits []byte
 		if nintraBytes > nstartBytes {
-			intraBits = make([]byte, nintraBytes-nstartBytes)
+			intraBits = alloc(&sc.intraBits, int(nintraBytes-nstartBytes)) // VARDECL(unsigned char, intra_bits)
 			// Copy bits from intra bit-stream.
 			copy(intraBits, enc.Buffer()[nstartBytes:nintraBytes])
 		}
@@ -590,8 +590,9 @@ func EcLaplaceEncode(enc *rangecoding.Encoder, value *int, fs uint32, decay int)
 func QuantCoarseEnergy(start, end, effEnd int, eBands, oldEBands []int32, budget uint32,
 	error []int32, enc *rangecoding.Encoder, C, LM, nbAvailableBytes, forceIntra int,
 	delayedIntra *int32, twoPass, lossRate, lfe int) {
+	var sc scratch
 	_ = quantCoarseEnergy(&mode48000_960, start, end, effEnd, eBands, oldEBands, budget, error,
-		enc, C, LM, nbAvailableBytes, forceIntra, delayedIntra, twoPass, lossRate, lfe)
+		enc, C, LM, nbAvailableBytes, forceIntra, delayedIntra, twoPass, lossRate, lfe, &sc)
 }
 
 // QuantFineEnergy is the exported test seam over quantFineEnergy bound to

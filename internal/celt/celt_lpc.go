@@ -228,11 +228,11 @@ func celtIir(x []int32, den []int16, y []int32, N, ord int, mem []int16) {
 // into ac via celt_pitch_xcorr plus the ragged tail, applying the fixed-point
 // pre-scale and post-scale, and return the total scaling shift. window may be nil
 // when overlap == 0.
-func celtAutocorr(x []int16, ac []int32, window []int16, overlap, lag, n int) int {
+func celtAutocorr(x []int16, ac []int32, window []int16, overlap, lag, n int, sc *scratch) int {
 	fastN := n - lag
 	var shift int
 	var xptr []int16
-	xx := make([]int16, n)
+	xx := alloc(&sc.autocorrXX, n) // VARDECL(opus_val16, xx)
 	if overlap == 0 {
 		xptr = x
 	} else {
@@ -334,6 +334,7 @@ func CeltIir(x []int32, den []int16, N, ord int, mem []int16) ([]int32, []int16)
 // and the scaling shift. window may be nil when overlap is 0.
 func CeltAutocorr(x []int16, window []int16, overlap, lag, n int) ([]int32, int) {
 	ac := make([]int32, lag+1)
-	shift := celtAutocorr(x, ac, window, overlap, lag, n)
+	var sc scratch
+	shift := celtAutocorr(x, ac, window, overlap, lag, n, &sc)
 	return ac, shift
 }

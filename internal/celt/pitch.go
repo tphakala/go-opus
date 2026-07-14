@@ -248,7 +248,7 @@ func celtFir5(x []int16, num []int16, N int) {
 // .25] kernel, then whiten with an order-4 LPC (lag-windowed autocorrelation ->
 // _celt_lpc -> celt_fir5). x[c] are the per-channel signal buffers; len_ is the
 // output length; factor is the decimation factor (2 for the PLC).
-func pitchDownsample(x [][]int32, xLp []int16, len_, C, factor int) {
+func pitchDownsample(x [][]int32, xLp []int16, len_, C, factor int, sc *scratch) {
 	var ac [5]int32
 	tmp := int16(q15one)
 	var lpc [4]int16
@@ -288,7 +288,7 @@ func pitchDownsample(x [][]int32, xLp []int16, len_, C, factor int) {
 			fixedmath.SHR32(x[1][offset], shift+2) + fixedmath.SHR32(x[1][0], shift+1))
 	}
 
-	celtAutocorr(xLp, ac[:], nil, 0, 4, len_)
+	celtAutocorr(xLp, ac[:], nil, 0, 4, len_, sc)
 
 	// Noise floor -40 dB.
 	ac[0] += fixedmath.SHR32(ac[0], 13)
@@ -317,15 +317,15 @@ func pitchDownsample(x [][]int32, xLp []int16, len_, C, factor int) {
 // pitch lag to *pitch. xLp is the whitened analysis signal (length >= len_>>1);
 // y is the history it is correlated against (length >= lag>>1). len_ and maxPitch
 // are the full-rate search parameters.
-func pitchSearch(xLp []int16, y []int16, len_, maxPitch int, pitch *int) {
+func pitchSearch(xLp []int16, y []int16, len_, maxPitch int, pitch *int, sc *scratch) {
 	bestPitch := [2]int{0, 0}
 	var offset int
 
 	lag := len_ + maxPitch
 
-	xLp4 := make([]int16, len_>>2)
-	yLp4 := make([]int16, lag>>2)
-	xcorr := make([]int32, maxPitch>>1)
+	xLp4 := alloc(&sc.xLp4, len_>>2)            // VARDECL(opus_val16, x_lp4)
+	yLp4 := alloc(&sc.yLp4, lag>>2)             // VARDECL(opus_val16, y_lp4)
+	xcorr := alloc(&sc.pitchXcorr, maxPitch>>1) // VARDECL(opus_val32, xcorr)
 
 	// Downsample by 2 again.
 	for j := 0; j < len_>>2; j++ {
@@ -441,7 +441,7 @@ var secondCheck = [16]int{0, 0, 3, 2, 3, 2, 5, 2, 3, 2, 3, 2, 5, 2, 3, 2}
 // refines *T0 by pseudo-interpolation and returns the pitch gain in Q15. x is the
 // half-rate whitened analysis buffer produced by pitch_downsample; it is advanced
 // by maxperiod internally so negative indices reach the pitch history.
-func removeDoubling(x []int16, maxperiod, minperiod, N int, T0 *int, prevPeriod int, prevGain int16) int16 {
+func removeDoubling(x []int16, maxperiod, minperiod, N int, T0 *int, prevPeriod int, prevGain int16, sc *scratch) int16 {
 	var xy, xx, yy, xy2 int32
 	var xcorr [3]int32
 	var offset int
@@ -459,7 +459,7 @@ func removeDoubling(x []int16, maxperiod, minperiod, N int, T0 *int, prevPeriod 
 
 	T := *T0
 	T0v := *T0
-	yyLookup := make([]int32, maxperiod+1)
+	yyLookup := alloc(&sc.yyLookup, maxperiod+1) // VARDECL(opus_val32, yy_lookup)
 	xx, xy = dualInnerProd(x, xb, xb, xb-T0v, N)
 	yyLookup[0] = xx
 	yy = xx
@@ -563,14 +563,16 @@ func CeltPitchXcorr(x, y []int16, len_, maxPitch int) ([]int32, int32) {
 // len_ downsampled samples.
 func PitchDownsample(x [][]int32, len_, C, factor int) []int16 {
 	xLp := make([]int16, len_)
-	pitchDownsample(x, xLp, len_, C, factor)
+	var sc scratch
+	pitchDownsample(x, xLp, len_, C, factor, &sc)
 	return xLp
 }
 
 // PitchSearch runs pitchSearch and returns the estimated pitch lag.
 func PitchSearch(xLp, y []int16, len_, maxPitch int) int {
 	var pitch int
-	pitchSearch(xLp, y, len_, maxPitch, &pitch)
+	var sc scratch
+	pitchSearch(xLp, y, len_, maxPitch, &pitch, &sc)
 	return pitch
 }
 
@@ -578,6 +580,7 @@ func PitchSearch(xLp, y []int16, len_, maxPitch int) int {
 // pitch lag T0 (in/out in C).
 func RemoveDoubling(x []int16, maxperiod, minperiod, N, T0, prevPeriod int, prevGain int16) (pg int16, t0Out int) {
 	t := T0
-	pg = removeDoubling(x, maxperiod, minperiod, N, &t, prevPeriod, prevGain)
+	var sc scratch
+	pg = removeDoubling(x, maxperiod, minperiod, N, &t, prevPeriod, prevGain, &sc)
 	return pg, t
 }
