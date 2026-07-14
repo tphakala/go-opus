@@ -15,10 +15,17 @@
 // window before reading it, which collapses those three behaviours into one. That
 // is not luck: libopus is valgrind-clean, so a plain ALLOC it reads before writing
 // would be reading uninitialised stack, and the codec would not be deterministic.
-// The two sites where C does NOT rely on that — because C itself issues an
-// OPUS_CLEAR — keep an explicit clear at the point of use: surround_dynalloc
-// (celt_encoder.c:2107) and importance (whose read window in tf_analysis exceeds
-// dynalloc_analysis' write window when start>0). Both are commented there.
+// The sites where C does NOT rely on that keep an explicit clear at the point of
+// use, and there are three:
+//
+//	offsets           C itself issues OPUS_CLEAR(offsets, nbEBands) (celt_encoder.c:1066),
+//	                  so dynalloc_analysis re-initialises it on every call.
+//	surround_dynalloc C issues OPUS_CLEAR(surround_dynalloc, end) (celt_encoder.c:2107).
+//	importance        no OPUS_CLEAR in C, but its read window in tf_analysis exceeds
+//	                  dynalloc_analysis' write window when start>0, so a pooled buffer
+//	                  would read the previous frame there.
+//
+// Each is commented at its clear.
 //
 // NOT SAFE FOR CONCURRENT USE, exactly like the Encoder that owns it (one per
 // goroutine, as documented on EncodeWithEC). That is why the buffers need neither a
@@ -53,7 +60,7 @@ type scratch struct {
 	bandLogE2        []int32 // :2074  C*nbEBands
 	surroundDynalloc []int32 // :2106  C*nbEBands   (explicitly cleared; see below)
 	X                []int32 // :2238  C*N
-	offsets          []int   // :2245  nbEBands
+	offsets          []int   // :2245  nbEBands     (explicitly cleared; see below)
 	importance       []int   // :2246  nbEBands     (explicitly cleared; see below)
 	spreadWeight     []int   // :2247  nbEBands
 	tfRes            []int   // :2255  nbEBands
