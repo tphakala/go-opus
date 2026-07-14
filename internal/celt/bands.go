@@ -512,9 +512,9 @@ var orderyTable = [...]int{
 }
 
 // deinterleaveHadamard is deinterleave_hadamard (bands.c:574).
-func deinterleaveHadamard(X []int32, N0, stride, hadamard int) {
+func deinterleaveHadamard(X []int32, N0, stride, hadamard int, sc *scratch) {
 	N := N0 * stride
-	tmp := make([]int32, N)
+	tmp := alloc(&sc.hadamardTmp, N) // VARDECL(celt_norm, tmp)
 	// celt_assert(stride>0)
 	if hadamard != 0 {
 		ordery := orderyTable[stride-2:]
@@ -534,9 +534,9 @@ func deinterleaveHadamard(X []int32, N0, stride, hadamard int) {
 }
 
 // interleaveHadamard is interleave_hadamard (bands.c:600).
-func interleaveHadamard(X []int32, N0, stride, hadamard int) {
+func interleaveHadamard(X []int32, N0, stride, hadamard int, sc *scratch) {
 	N := N0 * stride
-	tmp := make([]int32, N)
+	tmp := alloc(&sc.hadamardTmp, N) // VARDECL(celt_norm, tmp)
 	if hadamard != 0 {
 		ordery := orderyTable[stride-2:]
 		for i := 0; i < stride; i++ {
@@ -612,6 +612,9 @@ type bandCtx struct {
 	theta_round       int
 	disable_inv       int
 	avoid_split_noise int
+	// Not in C's band_ctx: the pooled stand-in for the VARDECL buffers that
+	// alg_quant / op_pvq_search / the Hadamard reorderings take off the stack.
+	sc *scratch
 }
 
 // tellFrac returns ec_tell_frac(ctx->ec) for whichever coder direction is active
@@ -966,7 +969,7 @@ func quantPartition(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM in
 			K := getPulses(q)
 			// Finally do the actual quantization.
 			if encode != 0 {
-				cm = AlgQuant(X, N, K, spread, B, ctx.enc, gain, ctx.resynth)
+				cm = algQuant(X, N, K, spread, B, ctx.enc, gain, ctx.resynth, ctx.sc)
 			} else {
 				cm = AlgUnquant(X, N, K, spread, B, dec, gain)
 			}
@@ -1075,10 +1078,10 @@ func quantBand(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM int, lo
 	// Reorganize the samples in time order instead of frequency order.
 	if B0 > 1 {
 		if encode != 0 {
-			deinterleaveHadamard(X, N_B>>recombine, B0<<recombine, longBlocks)
+			deinterleaveHadamard(X, N_B>>recombine, B0<<recombine, longBlocks, ctx.sc)
 		}
 		if lowband != nil {
-			deinterleaveHadamard(lowband, N_B>>recombine, B0<<recombine, longBlocks)
+			deinterleaveHadamard(lowband, N_B>>recombine, B0<<recombine, longBlocks, ctx.sc)
 		}
 	}
 
@@ -1088,7 +1091,7 @@ func quantBand(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM int, lo
 	if ctx.resynth != 0 {
 		// Undo the sample reorganization going from time order to frequency order.
 		if B0 > 1 {
-			interleaveHadamard(X, N_B>>recombine, B0<<recombine, longBlocks)
+			interleaveHadamard(X, N_B>>recombine, B0<<recombine, longBlocks, ctx.sc)
 		}
 
 		// Undo time-freq changes that we did earlier.
@@ -1281,7 +1284,7 @@ func specialHybridFolding(m *celtMode, norm, norm2 []int32, start, M, dualStereo
 func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, collapseMasks []byte,
 	bandE []int32, pulses []int, shortBlocks, spread, dualStereo, intensity int, tfRes []int,
 	totalBits, balance int32, enc *rangecoding.Encoder, dec *rangecoding.Decoder, LM, codedBands int,
-	seed *uint32, complexity, disableInv int) {
+	seed *uint32, complexity, disableInv int, sc *scratch) {
 	eBands := m.eBands
 	updateLowband := 1
 	C := 1
@@ -1303,7 +1306,7 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 	// No need to allocate norm for the last band because we don't need an output
 	// in that band.
 	normLen := M*int(eBands[m.nbEBands-1]) - normOffset
-	_norm := make([]int32, C*normLen)
+	_norm := alloc(&sc.norm, C*normLen) // VARDECL(celt_norm, _norm)
 	norm := _norm[:normLen]
 	norm2 := _norm[normLen:]
 
@@ -1318,20 +1321,24 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 	}
 	var lowbandScratch []int32
 	if encode != 0 && resynth != 0 {
-		lowbandScratch = make([]int32, resynthAlloc)
+		lowbandScratch = alloc(&sc.lowbandScratch, resynthAlloc)
 	} else {
+		// NON-LOCAL INVARIANT: this ALIASES X_'s tail. quant_band only touches
+		// lowbandScratch when lowband != nil (bands.go:1040), and on the encode
+		// resynth==0 path lowband is always nil, so the tail is never written. Do
+		// not "clean this up" into an allocation of its own.
 		lowbandScratch = X_[M*int(eBands[m.effEBands-1]):]
 	}
 	// theta-RDO save buffers (X_save/Y_save/X_save2/Y_save2/norm_save2/bytes_save).
 	// Empty unless encode+resynth, and only used on the theta_rdo path.
-	XSave := make([]int32, resynthAlloc)
-	YSave := make([]int32, resynthAlloc)
-	XSave2 := make([]int32, resynthAlloc)
-	YSave2 := make([]int32, resynthAlloc)
-	normSave2 := make([]int32, resynthAlloc)
+	XSave := alloc(&sc.XSave, resynthAlloc)
+	YSave := alloc(&sc.YSave, resynthAlloc)
+	XSave2 := alloc(&sc.XSave2, resynthAlloc)
+	YSave2 := alloc(&sc.YSave2, resynthAlloc)
+	normSave2 := alloc(&sc.normSave2, resynthAlloc)
 	var bytesSave []byte
 	if thetaRdo != 0 {
-		bytesSave = make([]byte, 1275)
+		bytesSave = alloc(&sc.bytesSave, 1275)
 	}
 
 	lowbandOffset := 0
@@ -1342,6 +1349,7 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 	ctx.intensity = intensity
 	ctx.m = m
 	ctx.seed = *seed
+	ctx.sc = sc
 	ctx.spread = spread
 	ctx.disable_inv = disableInv
 	ctx.resynth = resynth
@@ -1555,9 +1563,10 @@ func quantAllBands(encode int, m *celtMode, start, end int, X_, Y_ []int32, coll
 func QuantAllBands(start, end int, X, Y []int32, collapseMasks []byte, bandE []int32,
 	pulses []int, shortBlocks, spread, dualStereo, intensity int, tfRes []int,
 	totalBits, balance int32, dec *rangecoding.Decoder, LM, codedBands int, seed *uint32, disableInv int) {
+	var sc scratch
 	quantAllBands(0, &mode48000_960, start, end, X, Y, collapseMasks, bandE, pulses,
 		shortBlocks, spread, dualStereo, intensity, tfRes, totalBits, balance, nil, dec,
-		LM, codedBands, seed, 0, disableInv)
+		LM, codedBands, seed, 0, disableInv, &sc)
 }
 
 // QuantAllBandsEncode is the exported encode seam over quantAllBands, bound to
@@ -1569,9 +1578,10 @@ func QuantAllBandsEncode(start, end int, X, Y []int32, collapseMasks []byte, ban
 	pulses []int, shortBlocks, spread, dualStereo, intensity int, tfRes []int,
 	totalBits, balance int32, enc *rangecoding.Encoder, LM, codedBands int, seed *uint32,
 	complexity, disableInv int) {
+	var sc scratch
 	quantAllBands(1, &mode48000_960, start, end, X, Y, collapseMasks, bandE, pulses,
 		shortBlocks, spread, dualStereo, intensity, tfRes, totalBits, balance, enc, nil,
-		LM, codedBands, seed, complexity, disableInv)
+		LM, codedBands, seed, complexity, disableInv, &sc)
 }
 
 // DenormaliseBands is the exported seam over denormaliseBands bound to

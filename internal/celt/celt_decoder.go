@@ -408,10 +408,12 @@ func (st *Decoder) foldPrefilter(decMem [][]int32, N int) {
 // [PLC_PITCH_LAG_MIN, PLC_PITCH_LAG_MAX], and return the pitch lag.
 func (st *Decoder) celtPlcPitchSearch(decMem [][]int32, C int) int {
 	lpPitchBuf := make([]int16, decodeBufferSize>>1)
-	pitchDownsample(decMem, lpPitchBuf, decodeBufferSize>>1, C, 2)
+	// Per-call scratch: the PLC is a decode path, outside the encoder pooling work.
+	var sc scratch
+	pitchDownsample(decMem, lpPitchBuf, decodeBufferSize>>1, C, 2, &sc)
 	var pitchIndex int
 	pitchSearch(lpPitchBuf[plcPitchLagMax>>1:], lpPitchBuf,
-		decodeBufferSize-plcPitchLagMax, plcPitchLagMax-plcPitchLagMin, &pitchIndex)
+		decodeBufferSize-plcPitchLagMax, plcPitchLagMax-plcPitchLagMin, &pitchIndex, &sc)
 	pitchIndex = plcPitchLagMax - pitchIndex
 	return pitchIndex
 }
@@ -542,7 +544,8 @@ func (st *Decoder) celtDecodeLost(decMem [][]int32, N, LM int) {
 				var ac [celtLpcOrder + 1]int32
 				// Compute LPC coefficients for the last MAX_PERIOD samples before
 				// the first loss so we can work in the excitation-filter domain.
-				celtAutocorr(exc, ac[:], window, overlap, celtLpcOrder, maxPeriodC)
+				var sc scratch // per-call scratch; decode path, see celtPlcPitchSearch
+				celtAutocorr(exc, ac[:], window, overlap, celtLpcOrder, maxPeriodC, &sc)
 				// Add a noise floor of -40 dB.
 				ac[0] += fixedmath.SHR32(ac[0], 13)
 				// Use lag windowing to stabilize the Levinson-Durbin recursion.
@@ -885,9 +888,10 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 
 	var intensity, dualStereo int
 	var balance int32
+	var allocSc scratch // per-call scratch; decode path, see celtPlcPitchSearch
 	codedBands := cltComputeAllocation(m, start, end, offsets, cap, allocTrim,
 		&intensity, &dualStereo, bits, &balance, pulses, fineQuant, finePriority,
-		C, LM, nil, dec, 0, 0, 0)
+		C, LM, nil, dec, 0, 0, 0, &allocSc)
 
 	unquantFineEnergy(m, start, end, oldBandE, nil, fineQuant, dec, C)
 
@@ -904,10 +908,15 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 	if C == 2 {
 		Y = X[N:]
 	}
+	// A per-call scratch, not decoder-held state: the pooling work (issue #21) and
+	// the zeroing-dependency audit behind it cover the ENCODE path only. Allocating
+	// here per call leaves every decode buffer freshly zeroed exactly as make() did,
+	// so the decoder's behaviour is untouched; it just funnels through one type.
+	var sc scratch
 	quantAllBands(0, m, start, end, X, Y, collapseMasks, nil, pulses, shortBlocks,
 		spreadDecision, dualStereo, intensity, tfRes,
 		int32(dlen*(8<<bitRes)-antiCollapseRsv), balance, nil, dec, LM, codedBands,
-		&st.rng, 0, st.disableInv)
+		&st.rng, 0, st.disableInv, &sc)
 
 	antiCollapseOn := 0
 	if antiCollapseRsv > 0 {

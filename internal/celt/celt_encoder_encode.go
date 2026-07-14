@@ -413,7 +413,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		effEnd = m.effEBands
 	}
 
-	in := make([]int32, CC*(N+overlap))
+	in := alloc(&st.sc.in, CC*(N+overlap)) // VARDECL(celt_sig, in)
 
 	// NOTE the lengths use C (stream_channels), not CC (:1969-1971). With CC==2,
 	// C==1 the C only scans half the interleaved buffer. Reproduced verbatim.
@@ -460,7 +460,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		}
 	}
 
-	toneFreq = toneDetect(in, CC, N+overlap, &toneishness, m.Fs)
+	toneFreq = toneDetect(in, CC, N+overlap, &toneishness, m.Fs, &st.sc)
 	isTransient = 0
 	shortBlocks = 0
 	if st.complexity >= 1 && st.lfe == 0 {
@@ -471,7 +471,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 			allowWeakTransients = 1
 		}
 		isTransient = transientAnalysis(in, N+overlap, CC, &tfEstimate, &tfChan,
-			allowWeakTransients, &weakTransient, toneFreq, toneishness)
+			allowWeakTransients, &weakTransient, toneFreq, toneishness, &st.sc)
 	}
 	toneishness = fixedmath.MIN32(toneishness,
 		fixedmath.QCONST32(1, 29)-fixedmath.SHL32(int32(tfEstimate), 15))
@@ -528,16 +528,16 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		transientGotDisabled = 1
 	}
 
-	freq := make([]int32, CC*N) // interleaved signal MDCTs
-	bandE := make([]int32, nbEBands*CC)
-	bandLogE := make([]int32, nbEBands*CC)
+	freq := alloc(&st.sc.freq, CC*N) // VARDECL(celt_sig, freq): interleaved signal MDCTs
+	bandE := alloc(&st.sc.bandE, nbEBands*CC)
+	bandLogE := alloc(&st.sc.bandLogE, nbEBands*CC)
 
 	if shortBlocks != 0 && st.complexity >= 8 {
 		secondMdct = 1
 	}
-	bandLogE2 := make([]int32, C*nbEBands)
+	bandLogE2 := alloc(&st.sc.bandLogE2, C*nbEBands)
 	if secondMdct != 0 {
-		computeMdcts(m, 0, in, freq, C, CC, LM, st.upsample)
+		computeMdcts(m, 0, in, freq, C, CC, LM, st.upsample, &st.sc)
 		computeBandEnergies(m, freq, bandE, effEnd, C, LM, st.arch)
 		amp2Log2(m, effEnd, end, bandE, bandLogE2, C)
 		for c = 0; c < C; c++ {
@@ -547,7 +547,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		}
 	}
 
-	computeMdcts(m, shortBlocks, in, freq, C, CC, LM, st.upsample)
+	computeMdcts(m, shortBlocks, in, freq, C, CC, LM, st.upsample, &st.sc)
 	// The celt_isnan assert at :2072 is a no-op in fixed point.
 	if CC == 2 && C == 1 {
 		tfChan = 0
@@ -566,10 +566,19 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	}
 	amp2Log2(m, effEnd, end, bandE, bandLogE, C)
 
-	// ALLOC(surround_dynalloc, C*nbEBands) + OPUS_CLEAR(surround_dynalloc, end):
-	// Go zeroes the whole slice, which is a superset of what C defines. Only
-	// [start,end) is ever read (by dynalloc_analysis).
-	surroundDynalloc := make([]int32, C*nbEBands)
+	// ALLOC(surround_dynalloc, C*nbEBands) + OPUS_CLEAR(surround_dynalloc, end).
+	//
+	// THE CLEAR IS LOAD-BEARING and must not be dropped now that the buffer is
+	// pooled rather than make()'d. C clears it explicitly (celt_encoder.c:2107); the
+	// energy_mask writer below is structurally dead on this single-stream path, so
+	// the clear is the ONLY write, and dynalloc_analysis reads [start,end). A pooled
+	// buffer without it would feed the previous frame's values into follower[] and
+	// move packet bytes. Clearing all C*nbEBands (a superset of C's `end`) keeps the
+	// exact semantics the make() had, for 42 words.
+	surroundDynalloc := alloc(&st.sc.surroundDynalloc, C*nbEBands)
+	for i = 0; i < C*nbEBands; i++ {
+		surroundDynalloc[i] = 0
+	}
 
 	// This computes how much masking takes place between surround channels
 	// (:2108-2185). STRUCTURALLY DEAD on the frozen single-stream CELT path:
@@ -688,7 +697,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		if patchTransientDecision(bandLogE, oldBandE, nbEBands, start, end, C) != 0 {
 			isTransient = 1
 			shortBlocks = M
-			computeMdcts(m, shortBlocks, in, freq, C, CC, LM, st.upsample)
+			computeMdcts(m, shortBlocks, in, freq, C, CC, LM, st.upsample, &st.sc)
 			computeBandEnergies(m, freq, bandE, effEnd, C, LM, st.arch)
 			amp2Log2(m, effEnd, end, bandE, bandLogE, C)
 			// Compensate for the scaling of short vs long mdcts.
@@ -708,7 +717,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		enc.EncBitLogp(isTransient, 3)
 	}
 
-	X := make([]int32, C*N) // interleaved normalised MDCTs
+	X := alloc(&st.sc.X, C*N) // VARDECL(celt_norm, X): interleaved normalised MDCTs
 
 	// Band normalisation.
 	normaliseBands(m, freq, X, bandE, effEnd, C, M)
@@ -716,20 +725,31 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	enableTfAnalysis := effectiveBytes >= 15*C && hybrid == 0 && st.complexity >= 2 &&
 		st.lfe == 0 && toneishness < qconst0_98Q29
 
-	offsets := make([]int, nbEBands)
-	importance := make([]int, nbEBands)
-	spreadWeight := make([]int, nbEBands)
+	offsets := alloc(&st.sc.offsets, nbEBands)
+	importance := alloc(&st.sc.importance, nbEBands)
+	spreadWeight := alloc(&st.sc.spreadWeight, nbEBands)
+	// dynalloc_analysis writes importance ONLY over [start,end) (celt_encoder.c:1187
+	// / :1268), but tf_analysis reads [0,effEnd) (:755,:762,:772). When start>0 the
+	// read window exceeds the write window: C reads uninitialised stack there, and a
+	// pooled buffer would read the PREVIOUS FRAME's values, where make() read zeros.
+	// Today that divergence is unreachable — tf_analysis runs only under
+	// enableTfAnalysis, which requires hybrid==0, and hybrid==(start!=0) (:294-297) —
+	// but the invariant spans three files, so pin it here for 21 words rather than
+	// leave a future change to the start band silently observing stale data.
+	for i = 0; i < nbEBands; i++ {
+		importance[i] = 0
+	}
 
 	maxDepth = dynallocAnalysis(bandLogE, bandLogE2, oldBandE, nbEBands, start, end, C, offsets,
 		st.lsbDepth, m.logN, isTransient, st.vbr, st.constrainedVbr, eBands, LM, effectiveBytes,
-		&totBoost, st.lfe, surroundDynalloc, importance, spreadWeight, toneFreq, toneishness)
+		&totBoost, st.lfe, surroundDynalloc, importance, spreadWeight, toneFreq, toneishness, &st.sc)
 
-	tfRes := make([]int, nbEBands)
+	tfRes := alloc(&st.sc.tfRes, nbEBands)
 	// Disable variable tf resolution for hybrid and at very low bitrate.
 	if enableTfAnalysis {
 		var lambda int
 		lambda = fixedmath.IMAX(80, 20480/effectiveBytes+2)
-		tfSelect = tfAnalysis(m, effEnd, isTransient, tfRes, lambda, X, N, LM, tfEstimate, tfChan, importance)
+		tfSelect = tfAnalysis(m, effEnd, isTransient, tfRes, lambda, X, N, LM, tfEstimate, tfChan, importance, &st.sc)
 		for i = effEnd; i < end; i++ {
 			tfRes[i] = tfRes[effEnd-1]
 		}
@@ -754,7 +774,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 		tfSelect = 0
 	}
 
-	energyErr := make([]int32, C*nbEBands) // C: error[]
+	energyErr := alloc(&st.sc.energyErr, C*nbEBands) // VARDECL(celt_glog, error)
 	c = 0
 	for {
 		for i = start; i < end; i++ {
@@ -776,7 +796,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	}
 	coarseIntra := quantCoarseEnergy(m, start, end, effEnd, bandLogE, oldBandE, uint32(totalBits),
 		energyErr, enc, C, LM, nbAvailableBytes, st.forceIntra, &st.delayedIntra,
-		twoPass, st.lossRate, st.lfe)
+		twoPass, st.lossRate, st.lfe, &st.sc)
 
 	// tf_encode MUTATES tf_res in place (unaffordable bands forced to curr, then
 	// every entry remapped through tf_select_table); the remapped array is what
@@ -827,7 +847,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	if st.lfe != 0 {
 		offsets[0] = fixedmath.IMIN(8, effectiveBytes/3)
 	}
-	caps := make([]int, nbEBands)
+	caps := alloc(&st.sc.caps, nbEBands) // VARDECL(int, cap)
 	initCaps(m, caps, LM, C)
 
 	dynallocLogp = 6
@@ -1034,9 +1054,9 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	}
 
 	// Bit allocation.
-	fineQuant := make([]int, nbEBands)
-	pulses := make([]int, nbEBands)
-	finePriority := make([]int, nbEBands)
+	fineQuant := alloc(&st.sc.fineQuant, nbEBands)       // VARDECL(int, fine_quant)
+	pulses := alloc(&st.sc.pulses, nbEBands)             // VARDECL(int, pulses)
+	finePriority := alloc(&st.sc.finePriority, nbEBands) // VARDECL(int, fine_priority)
 
 	// bits = packet size - where we are - safety.
 	bits = ((int32(nbCompressedBytes) * 8) << bitRes) - int32(enc.TellFrac()) - 1
@@ -1052,7 +1072,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	}
 	codedBands = cltComputeAllocation(m, start, end, offsets, caps, allocTrim, &st.intensity,
 		&dualStereo, bits, &balance, pulses, fineQuant, finePriority, C, LM, enc, nil, 1,
-		st.lastCodedBands, signalBandwidth)
+		st.lastCodedBands, signalBandwidth, &st.sc)
 	if st.lastCodedBands != 0 {
 		st.lastCodedBands = fixedmath.IMIN(st.lastCodedBands+1,
 			fixedmath.IMAX(st.lastCodedBands-1, codedBands))
@@ -1066,7 +1086,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	}
 
 	// Residual quantisation.
-	collapseMasks := make([]byte, C*nbEBands)
+	collapseMasks := alloc(&st.sc.collapseMasks, C*nbEBands) // VARDECL(unsigned char, collapse_masks)
 	var Y []int32
 	if C == 2 {
 		Y = X[N:]
@@ -1074,7 +1094,7 @@ func (st *Encoder) encodeObserved(pcm []int16, frameSize int, compressed []byte,
 	quantAllBands(1, m, start, end, X, Y, collapseMasks, bandE, pulses, shortBlocks,
 		st.spreadDecision, dualStereo, st.intensity, tfRes,
 		int32(nbCompressedBytes*(8<<bitRes)-antiCollapseRsv), balance, enc, nil, LM,
-		codedBands, &st.rng, st.complexity, st.disableInv)
+		codedBands, &st.rng, st.complexity, st.disableInv, &st.sc)
 
 	if antiCollapseRsv > 0 {
 		// The RESYNTH anti_collapse() CALL is gated out; only the decision bit is

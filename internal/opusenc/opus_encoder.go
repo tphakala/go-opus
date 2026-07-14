@@ -162,6 +162,14 @@ type Encoder struct {
 
 	celt *celt.Encoder
 
+	// pcmBuf is the pooled stand-in for opus_encoder.c's ALLOC(pcm_buf, ...) stack
+	// buffer (:1966), the largest allocation on the opusenc side. NOT state: every
+	// frame rewrites it completely (delay-buffer history into the head, DCReject
+	// into the tail) before anything reads it, and PCMFront's caller is done with
+	// the returned slice before the next frame. Not safe for concurrent use, like
+	// the rest of the Encoder.
+	pcmBuf []int16
+
 	// wit records which branches the last EncodeRaw took. It is NOT encoder state:
 	// nothing reads it, it is not reset by OPUS_RESET_STATE, and it has no C
 	// counterpart. It exists so the differential test can prove its sweep is not

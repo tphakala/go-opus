@@ -141,14 +141,14 @@ func dynallocAnalysis(bandLogE, bandLogE2, oldBandE []int32,
 	nbEBands, start, end, C int, offsets []int, lsbDepth int, logN []int16,
 	isTransient, vbr, constrainedVbr int, eBands []int16, LM, effectiveBytes int,
 	totBoost_ *int32, lfe int, surroundDynalloc []int32,
-	importance, spreadWeight []int, toneFreq int16, toneishness int32) int32 {
+	importance, spreadWeight []int, toneFreq int16, toneishness int32, sc *scratch) int32 {
 	var i, c int
 	totBoost := int32(0)
 	var maxDepth int32
 
-	follower := make([]int32, C*nbEBands)
-	noiseFloor := make([]int32, C*nbEBands)
-	bandLogE3 := make([]int32, nbEBands)
+	follower := alloc(&sc.follower, C*nbEBands)     // VARDECL(celt_glog, follower)
+	noiseFloor := alloc(&sc.noiseFloor, C*nbEBands) // VARDECL(celt_glog, noise_floor)
+	bandLogE3 := alloc(&sc.bandLogE3, nbEBands)     // VARDECL(celt_glog, bandLogE3)
 	// OPUS_CLEAR(offsets, nbEBands) (:1066).
 	for i = 0; i < nbEBands; i++ {
 		offsets[i] = 0
@@ -176,8 +176,8 @@ func dynallocAnalysis(bandLogE, bandLogE2, oldBandE []int32,
 	{
 		// Compute a really simple masking model to avoid taking into account
 		// completely masked bands when computing the spreading decision.
-		mask := make([]int32, nbEBands)
-		sig := make([]int32, nbEBands)
+		mask := alloc(&sc.mask, nbEBands) // VARDECL(celt_glog, mask)
+		sig := alloc(&sc.sig, nbEBands)   // VARDECL(celt_glog, sig)
 		for i = 0; i < end; i++ {
 			mask[i] = bandLogE[i] - noiseFloor[i]
 		}
@@ -389,10 +389,11 @@ func DynallocAnalysis(bandLogE, bandLogE2, oldBandE []int32, nbEBands, start, en
 		SpreadWeight: make([]int, nbEBands),
 	}
 	var totBoost int32
+	var sc scratch
 	res.MaxDepth = dynallocAnalysis(bandLogE, bandLogE2, oldBandE, nbEBands, start, end, C,
 		res.Offsets, lsbDepth, m.logN, isTransient, vbr, constrainedVbr, m.eBands, LM,
 		effectiveBytes, &totBoost, lfe, surroundDynalloc, res.Importance, res.SpreadWeight,
-		toneFreq, toneishness)
+		toneFreq, toneishness, &sc)
 	res.TotBoost = totBoost
 	return res
 }

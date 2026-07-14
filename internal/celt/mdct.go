@@ -147,7 +147,7 @@ func cltMDCTBackward(l *mdctLookup, in, out []int32, window []int16, overlap, sh
 // engine is entered directly with the scale_shift-headroom downshift budget
 // instead of a range-derived fft_shift; (4) there is no TDAC overlap-add on the
 // output. (celt/mdct.c:122, clt_mdct_forward_c)
-func cltMDCTForward(l *mdctLookup, in, out []int32, window []int16, overlap, shift, stride int) {
+func cltMDCTForward(l *mdctLookup, in, out []int32, window []int16, overlap, shift, stride int, sc *scratch) {
 	var N, N2, N4 int
 	st := l.kfft[shift]
 	// Allows us to scale with MULT16_32_Q16(), which is faster than
@@ -169,8 +169,8 @@ func cltMDCTForward(l *mdctLookup, in, out []int32, window []int16, overlap, shi
 	// real input before the pre-rotation. Unlike the inverse MDCT (which runs
 	// the FFT in place in the output overlap-add buffer), the forward transform
 	// keeps f and f2 separate exactly as the C does.
-	f := make([]int32, N2)
-	f2 := make([]kissFFTCpx, N4)
+	f := alloc(&sc.mdctF, N2)   // VARDECL(kiss_fft_scalar, f)
+	f2 := alloc(&sc.mdctF2, N4) // VARDECL(kiss_fft_cpx, f2)
 
 	// Consider the input to be composed of four blocks: [a, b, c, d].
 	// Window, shuffle, fold.
@@ -309,6 +309,7 @@ func ForwardMDCT(lm, stride int, in []int32) []int32 {
 	inCopy := make([]int32, N2+overlap)
 	copy(inCopy, in)
 	out := make([]int32, stride*N2)
-	cltMDCTForward(&m.mdct, inCopy, out, m.window, overlap, shift, stride)
+	var sc scratch
+	cltMDCTForward(&m.mdct, inCopy, out, m.window, overlap, shift, stride, &sc)
 	return out
 }
