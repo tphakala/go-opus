@@ -65,10 +65,9 @@ phase, behind the scalar function signatures).
 
 ## Performance
 
-go-opus is roughly **2x slower than the equivalent C**, and that is the honest
-headline: fast enough to be unremarkable in a pipeline, slow enough to be worth
-tuning. No optimization work has been done yet, so this is the baseline, not the
-ceiling.
+go-opus encodes at **1.6x to 2.1x the time of the equivalent C**, decodes at
+**1.5x to 1.8x**, and **allocates nothing per frame**. That is the honest
+headline. There is more on the table.
 
 The C it is measured against is the pinned v1.6.1 oracle built `FIXED_POINT +
 DISABLE_FLOAT_API`, with libopus's hand-written NEON and SSE kernels switched
@@ -78,49 +77,59 @@ bit-exact, the harness *asserts* that the two sides encode to byte-identical
 packets before it times either of them. If they were doing different work, the
 bytes would say so.
 
-darwin/arm64 (Apple M4 Pro), Go 1.26, 48 kHz, 64 kbps per channel, median of 5:
+darwin/arm64 (Apple M4 Pro), Go 1.26, 48 kHz, 64 kbps per channel, median of 5.
+"Before" is the pre-optimization baseline; the C column is the same C in both
+runs, so it doubles as a drift control.
 
-| Frame | Encode (Go / C) | Decode (Go / C) | Encode allocs (Go / C) |
-| ----- | --------------: | --------------: | ---------------------: |
-| mono 20 ms | 88.1 / 31.4 us — **2.80x** | 25.1 / 16.9 us — **1.49x** | 150 / **0** |
-| stereo 20 ms | 209.1 / 103.9 us — **2.01x** | 48.5 / 31.4 us — **1.54x** | 501 / **0** |
+**Encode**
 
-Across all sixteen configurations (mono and stereo, 2.5 to 20 ms): encode is
-**1.8x to 3.0x** slower than C, decode **1.5x to 1.7x**.
+| Frame | Go before | Go now | C | Go/C before | **Go/C now** | Allocs |
+| ----- | --------: | -----: | ------: | ---------: | -----------: | -----: |
+| mono 10 ms | 45.9 us | **32.6 us** | 15.5 us | 2.99x | **2.10x** | 94 → **0** |
+| mono 20 ms | 89.0 us | **62.7 us** | 30.2 us | 2.90x | **2.08x** | 151 → **0** |
+| stereo 10 ms | 108.5 us | **88.2 us** | 54.2 us | 2.02x | **1.63x** | 256 → **0** |
+| stereo 20 ms | 212.5 us | **181.1 us** | 109.5 us | 2.04x | **1.65x** | 501 → **0** |
 
-### Where the gap actually comes from
+**Decode** is unchanged (the optimizations so far are encoder-side): 1.5x to
+1.8x, and its allocations are partly reduced as a side effect of the shared
+kernels.
+
+The encoder runs at roughly **110x realtime** for stereo 20 ms frames and the
+decoder at **400x**, so an hour of audio encodes in about half a minute.
+
+### Where the gap comes from, and what closed it
 
 Switching libopus's hand-written SIMD off does **not** produce scalar C, which
 is the trap this benchmark first fell into. `clang -O2` auto-vectorizes the
 fixed-point kernels by itself: disassembling the oracle with its exact build
 flags finds NEON integer multiply-accumulate (`smlal.4s`, `addv.4s`) in 15 of
-the 19 hot kernels. Go's compiler emits none, anywhere. So this is not a
+the 19 hot kernels. Go's compiler emits none, anywhere. So this was never a
 language-overhead measurement; it is **scalar Go against auto-vectorized C**.
 
-Attributing the 117 us encode gap (stereo 20 ms) by measurement rather than
-assumption:
+The original gap, attributed by measurement rather than assumption: **72%**
+missing vectorization, 15% allocation, 11% bounds checks, 2% GC. The control
+that settles it is `quant_partition` — the one hot kernel clang did *not*
+vectorize, and the one kernel where **Go is faster than C**. Go's code
+generation is not the problem. Its lack of vectorization is.
 
-| Cause | Cost | Share |
-| ----- | ---: | ----: |
-| Missing vectorization | 85.1 us | **72%** |
-| Allocation (501/frame, `mallocgc`) | 17.4 us | 15% |
-| Bounds checks (`-gcflags=all=-B`) | 12.9 us | 11% |
-| GC (`GOGC=off`) | 2.0 us | 2% |
+Three things closed most of it:
 
-The control that settles it: `quant_partition` is the one hot kernel clang did
-*not* vectorize, and it is the one kernel where **Go is faster than C**. Go's
-code generation is not the problem. Its lack of vectorization is. On the two
-kernels that vectorize best, `celt_inner_prod` and `celt_pitch_xcorr`, C is
-13x faster.
+- **A transliteration bug.** `celt_pitch_xcorr` had been ported from the `#if 0`
+  branch of the C — the one libopus explicitly disables — instead of the live,
+  register-blocked one. Fixing that was worth 2.3x on the kernel, in pure Go.
+- **Hand-written NEON and SSE2** for `celt_inner_prod` and `xcorr_kernel`, which
+  the profile named as the two worst. 6x and 7.4x on those kernels. Integer SIMD
+  can be bit-exact — wrapping two's-complement addition is associative, so lane
+  grouping cannot change the result — which is a property float SIMD does not
+  have, and a large part of why this codec is fixed-point.
+- **Pooling the per-frame scratch**, taking 501 allocations per stereo frame to
+  zero. Worth less time than it looks (allocation was 15% of the gap, and GC
+  ~0%), but 145 KB of garbage per frame is real pressure on a *host*
+  application's collector, which a benchmark loop cannot see.
 
-That also means the per-frame allocations, though the most visible difference,
-are not the main cost. They are still worth removing — 145 KB of garbage per
-stereo frame is real pressure on a long-running process, which a benchmark loop
-understates — but they are 15% of the gap, not the bulk of it.
-
-In absolute terms the encoder still runs at roughly 90x realtime for stereo
-20 ms frames and the decoder at 400x, so an hour of audio encodes in about 40
-seconds.
+What remains is the rest of that 72%: the fused, Opus-specific kernels the
+profile ranks next — the PVQ search, `exp_rotation`, the MDCT butterflies, the
+comb filter.
 
 Reproduce with:
 
@@ -140,14 +149,15 @@ a 5-minute 48 kHz stereo WAV to Ogg Opus at 96 kbps, single-threaded:
 
 | Encoder | Wall | Peak RSS | Throughput | Achieved |
 | ------- | ---: | -------: | ---------: | -------: |
-| go-opus (`cmd/wav2opus`) | 2.26 s | 12.2 MB | 25.5 MB/s | 95.6 kbps |
-| opusenc (opus-tools 0.2, libopus 1.6.1) | 1.18 s | 3.0 MB | 48.8 MB/s | 93.0 kbps |
-| ffmpeg 8.1.2 (libopus) | 1.26 s | 17.7 MB | 45.7 MB/s | 93.0 kbps |
+| go-opus (`cmd/wav2opus`) | 1.85 s | 9.1 MB | 31.1 MB/s | 95.6 kbps |
+| opusenc (opus-tools 0.2, libopus 1.6.1) | 1.29 s | 3.0 MB | 44.7 MB/s | 93.0 kbps |
+| ffmpeg 8.1.2 (libopus) | 1.45 s | 18.0 MB | 39.7 MB/s | 93.0 kbps |
 
-**go-opus is about 1.9x slower than opusenc**, and the comparison is genuinely
-mode-matched: every packet from all three encoders was parsed back and all
-15,001 of them carry TOC config 31 (CELT-only, 20 ms, fullband), so this is
-CELT against CELT rather than CELT against whatever libopus felt like choosing.
+**go-opus is about 1.4x slower than opusenc** (it was 1.9x before the encoder
+optimizations), and the comparison is genuinely mode-matched: every packet from
+all three encoders was parsed back and all 15,001 of them carry TOC config 31
+(CELT-only, 20 ms, fullband), so this is CELT against CELT rather than CELT
+against whatever libopus felt like choosing.
 
 Two things make this number *kinder* to go-opus than it looks, and both are
 worth stating plainly:
