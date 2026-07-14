@@ -63,6 +63,53 @@ straight onto SSE and NEON, and because integer SIMD is exact, accelerated
 kernels can stay bit-exact against the same test suites (planned for a later
 phase, behind the scalar function signatures).
 
+## Performance
+
+go-opus is roughly **2x slower than the equivalent C**, and that is the honest
+headline: fast enough to be unremarkable in a pipeline, slow enough to be worth
+tuning. No optimization work has been done yet, so this is the baseline, not the
+ceiling.
+
+The comparison below is the only one that isolates the language. libopus here is
+the pinned v1.6.1 oracle compiled the way go-opus is written, `FIXED_POINT +
+DISABLE_FLOAT_API` and **no SIMD**: the same algorithm, the same fixed-point
+arithmetic, the same scalar kernels. Both benchmarks live in one file and one
+package, driven from one PCM generator and one config, so they cannot drift
+apart; and because the port is bit-exact, the harness *asserts* that the two
+sides encode to byte-identical packets before it times either of them. If they
+were doing different work, the bytes would say so.
+
+darwin/arm64 (Apple M4 Pro), Go 1.26, 48 kHz, 64 kbps per channel, median of 5:
+
+| Frame | Encode (Go / C) | Decode (Go / C) | Encode allocs (Go / C) |
+| ----- | --------------: | --------------: | ---------------------: |
+| mono 20 ms | 88.1 / 31.4 us — **2.80x** | 25.1 / 16.9 us — **1.49x** | 150 / **0** |
+| stereo 20 ms | 209.1 / 103.9 us — **2.01x** | 48.5 / 31.4 us — **1.54x** | 501 / **0** |
+
+Across all sixteen configurations (mono and stereo, 2.5 to 20 ms): encode is
+**1.8x to 3.0x** slower than C, decode **1.5x to 1.7x**.
+
+The allocation column is the interesting part, and it points at the first thing
+to fix. C allocates nothing per frame; its scratch arrays are stack `VARDECL`s,
+reclaimed when the frame pops. go-opus transliterates each of them as a Go
+`make()` — deliberately, because keeping the C's shape is what keeps the port
+diffable against upstream and therefore verifiable. That choice costs 501 heap
+allocations per stereo 20 ms frame, and pooling them is very likely a large
+share of the 2x.
+
+In absolute terms the encoder still runs at roughly 90x realtime for stereo
+20 ms frames and the decoder at 400x, so an hour of audio encodes in about 40
+seconds.
+
+Reproduce with:
+
+```bash
+go test -tags refc ./internal/reftest/oracle/ -run '^$' -bench 'Encode|Decode' -benchmem
+```
+
+(That needs the pinned libopus submodule and a C toolchain; the published module
+itself has no cgo.)
+
 ## Packages
 
 - `opus` - the raw packet codec: an `Encoder` and a `Decoder`, operating on Opus
