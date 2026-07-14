@@ -2,6 +2,7 @@ package celt
 
 import (
 	"math"
+	"strconv"
 	"testing"
 )
 
@@ -35,11 +36,16 @@ import (
 
 const simdMaxLen = 600
 
-// fillPattern is one adversarial input generator: given the sample index it
-// returns the x and y sample at that index.
+// fillPattern is one adversarial input generator: given the sample index and the
+// length of x, it returns the x and y sample at that index.
+//
+// n is passed because a pattern that wants to place a sample at the END of the
+// vector has to key off the length actually under test. Keying off a global
+// maximum instead silently degrades the pattern to all-zero for every shorter
+// length, which is exactly the tail-boundary coverage these tests exist to give.
 type fillPattern struct {
 	name string
-	f    func(i int) (x, y int16)
+	f    func(i, n int) (x, y int16)
 }
 
 // simdPatterns are the input patterns both kernels are tested against. The
@@ -47,18 +53,18 @@ type fillPattern struct {
 // 2^31 PMADDWD corner on every single lane, and the saturating patterns push the
 // int32 accumulator through several full wraps well before length 600.
 var simdPatterns = []fillPattern{
-	{"all zero", func(int) (int16, int16) { return 0, 0 }},
-	{"all INT16_MIN", func(int) (int16, int16) { return math.MinInt16, math.MinInt16 }},
-	{"all INT16_MAX", func(int) (int16, int16) { return math.MaxInt16, math.MaxInt16 }},
-	{"INT16_MIN x INT16_MAX", func(int) (int16, int16) { return math.MinInt16, math.MaxInt16 }},
-	{"INT16_MIN x 1", func(int) (int16, int16) { return math.MinInt16, 1 }},
-	{"alternating signs", func(i int) (int16, int16) {
+	{"all zero", func(_, _ int) (int16, int16) { return 0, 0 }},
+	{"all INT16_MIN", func(_, _ int) (int16, int16) { return math.MinInt16, math.MinInt16 }},
+	{"all INT16_MAX", func(_, _ int) (int16, int16) { return math.MaxInt16, math.MaxInt16 }},
+	{"INT16_MIN x INT16_MAX", func(_, _ int) (int16, int16) { return math.MinInt16, math.MaxInt16 }},
+	{"INT16_MIN x 1", func(_, _ int) (int16, int16) { return math.MinInt16, 1 }},
+	{"alternating signs", func(i, _ int) (int16, int16) {
 		if i%2 == 0 {
 			return math.MinInt16, math.MaxInt16
 		}
 		return math.MaxInt16, math.MinInt16
 	}},
-	{"alternating INT16_MIN/0", func(i int) (int16, int16) {
+	{"alternating INT16_MIN/0", func(i, _ int) (int16, int16) {
 		if i%2 == 0 {
 			return math.MinInt16, math.MinInt16
 		}
@@ -66,28 +72,28 @@ var simdPatterns = []fillPattern{
 	}},
 	// Every product is +2^30, so the accumulator wraps every 2 samples: this
 	// walks the full int32 range over and over.
-	{"forced accumulator wrap", func(int) (int16, int16) { return math.MinInt16, math.MinInt16 }},
+	{"forced accumulator wrap", func(_, _ int) (int16, int16) { return math.MinInt16, math.MinInt16 }},
 	// Products alternate around the top of the int32 range to straddle the wrap
 	// boundary rather than sail through it.
-	{"straddle INT32_MAX", func(i int) (int16, int16) {
+	{"straddle INT32_MAX", func(i, _ int) (int16, int16) {
 		if i%3 == 0 {
 			return math.MaxInt16, math.MaxInt16
 		}
 		return math.MinInt16, math.MaxInt16
 	}},
-	{"one nonzero at end", func(i int) (int16, int16) {
-		if i == simdMaxLen-1 {
+	{"one nonzero at end", func(i, n int) (int16, int16) {
+		if i == n-1 {
 			return math.MinInt16, math.MinInt16
 		}
 		return 0, 0
 	}},
-	{"lcg pseudorandom", func(i int) (int16, int16) {
+	{"lcg pseudorandom", func(i, _ int) (int16, int16) {
 		s := uint32(i)*2654435761 ^ 0x9E3779B9
 		s = s*1664525 + 1013904223
 		t := s*1664525 + 1013904223
 		return int16(s >> 16), int16(t >> 16)
 	}},
-	{"full-scale ramp", func(i int) (int16, int16) {
+	{"full-scale ramp", func(i, _ int) (int16, int16) {
 		return int16(math.MinInt16 + i%65536), int16(math.MaxInt16 - i%65536)
 	}},
 }
@@ -98,7 +104,7 @@ func makeVecs(p fillPattern, n, slack int) (x, y []int16) {
 	x = make([]int16, n)
 	y = make([]int16, n+slack)
 	for i := range y {
-		xv, yv := p.f(i)
+		xv, yv := p.f(i, n)
 		if i < n {
 			x[i] = xv
 		}
@@ -305,7 +311,7 @@ func BenchmarkCeltInnerProd(b *testing.B) {
 			s = s*1664525 + 1013904223
 			y[i] = int16(s >> 17)
 		}
-		b.Run("N="+itoa(n), func(b *testing.B) {
+		b.Run("N="+strconv.Itoa(n), func(b *testing.B) {
 			b.ReportAllocs()
 			var sink int32
 			for b.Loop() {
@@ -314,18 +320,4 @@ func BenchmarkCeltInnerProd(b *testing.B) {
 			_ = sink
 		})
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
