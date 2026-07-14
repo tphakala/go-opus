@@ -166,6 +166,25 @@ func (d *Decoder) Decode(packet []byte, frameSize int, decodeFEC bool) ([]int16,
 	return out[:int(n)*d.channels], nil
 }
 
+// DecodeInto decodes one packet into the caller's buffer and returns the number of
+// samples per channel. It allocates nothing.
+//
+// Decode above allocates its output slice on every call; opus.Decoder.Decode, the Go
+// side of the benchmark, decodes into a caller-owned []int16. Comparing the two would
+// charge libopus for a Go allocation that libopus never makes. See EncodeInto.
+func (d *Decoder) DecodeInto(packet []byte, out []int16) (int, error) {
+	var dataPtr *C.uchar
+	if len(packet) > 0 {
+		dataPtr = (*C.uchar)(unsafe.Pointer(&packet[0]))
+	}
+	n := C.oracle_decode(d.dec, dataPtr, C.int(len(packet)),
+		(*C.opus_int16)(unsafe.Pointer(&out[0])), C.int(len(out)/d.channels), 0)
+	if n < 0 {
+		return 0, fmt.Errorf("decode: %w", errString(C.int(n)))
+	}
+	return int(n), nil
+}
+
 // FinalRange returns the decoder's range coder state after the last packet
 // (OPUS_GET_FINAL_RANGE). It must match the encoder's FinalRange for a matching
 // packet, which is the cross-check that pins encoder and decoder together.

@@ -301,6 +301,23 @@ func (e *cOpusencHandle) Encode(pcm []int16, frameSize, maxDataBytes int) (int, 
 	return ret, pkt, state
 }
 
+// EncodeInto encodes one frame into the caller's buffer and returns opus_encode's
+// return value verbatim. It allocates nothing and dumps no state.
+//
+// This is the benchmark's encode path, and it exists to make the Go-vs-C comparison
+// honest in both directions. Encode above allocates two buffers per call and dumps
+// the encoder state; opus.Encoder.Encode, the Go side of the comparison, does
+// neither, because its API takes a caller-owned []byte. Benchmarking the two against
+// each other would measure the oracle's test scaffolding, not libopus.
+func (e *cOpusencHandle) EncodeInto(pcm []int16, frameSize int, buf []byte) int {
+	var pcmPtr *C.int16_t
+	if len(pcm) > 0 {
+		pcmPtr = (*C.int16_t)(unsafe.Pointer(&pcm[0]))
+	}
+	return int(C.oracle_topenc_encode_bare(e.h, pcmPtr, C.int(frameSize),
+		(*C.uchar)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+}
+
 // State returns the field-level state dump without encoding.
 func (e *cOpusencHandle) State() cOpusencState {
 	var st C.oracle_topenc_state

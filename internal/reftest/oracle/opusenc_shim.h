@@ -322,6 +322,23 @@ static int oracle_topenc_encode(oracle_topenc_h *h, const int16_t *pcm, int fram
    return ret;
 }
 
+/* oracle_topenc_encode_bare is oracle_topenc_encode WITHOUT the state dump: it is
+   opus_encode and nothing else.
+
+   It exists ONLY for the Go-vs-C benchmark. oracle_topenc_get_state walks the whole
+   OpusEncoder and copies out ~40 fields including the delay_buffer, which costs real
+   time per frame. Timing the encode entry point the differential tests use would
+   therefore charge libopus for work libopus does not do, making the C look slower
+   than it is and the Go port look better than it is by exactly the margin we are
+   trying to measure. The differential path above is deliberately left alone: it
+   still dumps state, because that is what it is for. */
+static int oracle_topenc_encode_bare(oracle_topenc_h *h, const int16_t *pcm, int frame_size,
+      unsigned char *data, int max_data_bytes)
+{
+   return opus_encode(h->enc, (const opus_int16 *)pcm, frame_size,
+         data, (opus_int32)max_data_bytes);
+}
+
 static void oracle_topenc_destroy(oracle_topenc_h *h)
 {
    if (h == NULL) return;
