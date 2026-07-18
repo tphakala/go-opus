@@ -28,10 +28,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-24.04-arm, ubuntu-latest]
         include:
+          # The race detector is arch-agnostic in what it detects (a happens-before
+          # violation is the same bug on either arch), so it runs once, on the fast
+          # arm runner. amd64 runs the same suite WITHOUT -race: that still exercises
+          # amd64 codegen and the SSE2 kernels (pitch_amd64.go and the SIMD-vs-scalar
+          # tests) without the race detector's 2-10x overhead on the slower runner.
+          # Coverage moved out to its own job (see below); together these take the
+          # amd64 leg from ~35 min down toward the suite's real cost.
+          - os: ubuntu-24.04-arm
+            race: '-race'
           - os: ubuntu-latest
-            coverage: true
+            race: ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -63,14 +72,43 @@ jobs:
       - name: Download dependencies
         run: go mod download
       - name: Run tests
-        run: go test -race -timeout 30m ./...
+        run: go test ${{ matrix.race }} -timeout 15m ./...
       - name: Run codec tests with the scratch poison harness
-        run: go test -tags poison -count=1 -timeout 30m ./internal/celt/... ./internal/packet/... ./opus/...
+        run: go test -tags poison -count=1 -timeout 15m ./internal/celt/... ./internal/packet/... ./opus/...
+
+  # Coverage is arch-agnostic and expensive: -coverpkg=./... instruments the whole
+  # tree and re-runs the suite, which on the slow amd64 runner alone exceeded 20
+  # minutes and was the entire tail of the old combined Test job. It is purely
+  # informational (codecov, fail_ci_if_error: false), never a correctness gate, so
+  # it runs as its own parallel job on the fast arm runner and is off the critical
+  # path.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          # No job here pushes, so the GITHUB_TOKEN has no business sitting in
+          # .git/config for the life of the job.
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Cache conformance vectors
+        uses: actions/cache@v4
+        with:
+          path: testdata/vectors/opus_testvectors-rfc8251.tar.gz
+          key: opus-vectors-rfc8251-${{ hashFiles('testdata/vectors.sha256') }}
+      - name: Fetch conformance vectors
+        run: scripts/fetch-vectors.sh
+      - name: Download dependencies
+        run: go mod download
       - name: Run tests with coverage
-        if: matrix.coverage
-        run: go test -timeout 30m -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -timeout 20m -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
       - name: Upload coverage
-        if: matrix.coverage
         uses: codecov/codecov-action@v7
         with:
           files: coverage.out
@@ -114,7 +152,7 @@ jobs:
       - name: Run differential harness
         env:
           CGO_ENABLED: '1'
-        run: go test -tags "refc poison" -timeout 30m ./internal/reftest/...
+        run: go test -tags "refc poison" -timeout 15m ./internal/reftest/...
 
   gate-long:
     name: Phase 4 gate, tier B (full-length corpus)
