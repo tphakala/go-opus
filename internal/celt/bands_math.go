@@ -99,6 +99,14 @@ func celtExp2Db(x int32) int32 {
 // instead of an independently bounds-checked index; that gives BCE the two
 // one-time slice-header checks instead of two per iteration.
 func celtInnerProdNormShift(x, y []int32, length int) int32 {
+	// The pre-BCE loop was a silent no-op for length <= 0 (as is the C, whose
+	// for loop never runs); the re-slices below would panic instead. No current
+	// caller passes a non-positive length, but the guard keeps the degenerate
+	// domain identical to the original, matching the guards on expRotation1 and
+	// haar1 from the same restructuring.
+	if length <= 0 {
+		return 0
+	}
 	x = x[:length]
 	y = y[:length]
 	var sum int64
