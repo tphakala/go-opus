@@ -12,12 +12,21 @@ var (
 	_ io.WriterTo = (*Decoder)(nil)
 )
 
+// OutputSampleRate is the sample rate of all decoded PCM, in Hz. RFC 7845
+// defines the pre-skip, every granule position, and the decode output at 48 kHz
+// regardless of the informational input sample rate recorded in OpusHead, so
+// Read and WriteTo always produce 48 kHz PCM. The constant is untyped so it
+// compares directly with Info.OutputSampleRate (uint32) and with int sample
+// rates. Label decoded PCM with this, never with Info.InputSampleRate.
+const OutputSampleRate = 48000
+
 // Info reports the stream parameters parsed from OpusHead.
 type Info struct {
-	Channels        int    // decoded channel count (mapping family 0: 1 or 2)
-	InputSampleRate uint32 // original source rate recorded in OpusHead (informational; 0 if unspecified)
-	PreSkip         int    // samples to discard at the start, at 48 kHz
-	OutputGain      int16  // Q7.8 gain in dB applied on decode
+	Channels         int    // decoded channel count (mapping family 0: 1 or 2)
+	InputSampleRate  uint32 // original source rate recorded in OpusHead (informational; 0 if unspecified); NOT the decode output rate
+	OutputSampleRate uint32 // rate of the decoded PCM in Hz; always 48000 (OutputSampleRate)
+	PreSkip          int    // samples to discard at the start, at 48 kHz
+	OutputGain       int16  // Q7.8 gain in dB applied on decode
 }
 
 // Decoder reads an Ogg Opus stream from an io.Reader and yields interleaved
@@ -54,10 +63,11 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 		limit:       -1,
 		preSkipLeft: int(cr.head.preSkip),
 		info: Info{
-			Channels:        int(cr.head.channels),
-			InputSampleRate: cr.head.inputSampleRate,
-			PreSkip:         int(cr.head.preSkip),
-			OutputGain:      cr.head.outputGain,
+			Channels:         int(cr.head.channels),
+			InputSampleRate:  cr.head.inputSampleRate,
+			OutputSampleRate: OutputSampleRate,
+			PreSkip:          int(cr.head.preSkip),
+			OutputGain:       cr.head.outputGain,
 		},
 	}
 	dec, err := newFrameDecoder(cr.head)
@@ -74,6 +84,10 @@ func (d *Decoder) Info() Info { return d.info }
 // Read fills p with interleaved little-endian int16 PCM at 48 kHz, applying the
 // pre-skip drop, the end-trim, and the OpusHead output gain. It returns io.EOF
 // when the stream is exhausted.
+//
+// The output rate is always 48000 (OutputSampleRate), whatever OpusHead's
+// informational input rate says; label decoded PCM with Info().OutputSampleRate,
+// never with Info().InputSampleRate.
 func (d *Decoder) Read(p []byte) (int, error) {
 	if d.dec == nil {
 		return 0, errUninitialized
@@ -93,7 +107,8 @@ func (d *Decoder) Read(p []byte) (int, error) {
 }
 
 // WriteTo streams the whole decoded output to w, implementing io.WriterTo so a
-// caller can io.Copy a Decoder to a sink.
+// caller can io.Copy a Decoder to a sink. The PCM written to w is interleaved
+// little-endian int16 at 48 kHz (OutputSampleRate); see Read.
 func (d *Decoder) WriteTo(w io.Writer) (int64, error) {
 	if d.dec == nil {
 		return 0, errUninitialized
