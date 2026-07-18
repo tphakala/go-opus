@@ -94,9 +94,23 @@ func celtExp2Db(x int32) int32 {
 // celtInnerProdNormShift is the FIXED_POINT celt_inner_prod_norm_shift (vq.c:65):
 // a 64-bit accumulation of x[i]*y[i] over the celt_norm samples, right-shifted by
 // 2*(NORM_SHIFT-14) and returned as opus_val32.
+//
+// x and y are re-sliced to length first so the loop below walks them by range
+// instead of an independently bounds-checked index; that gives BCE the two
+// one-time slice-header checks instead of two per iteration.
 func celtInnerProdNormShift(x, y []int32, length int) int32 {
+	// The pre-BCE loop was a silent no-op for length <= 0 (as is the C, whose
+	// for loop never runs); the re-slices below would panic instead. No current
+	// caller passes a non-positive length, but the guard keeps the degenerate
+	// domain identical to the original, matching the guards on expRotation1 and
+	// haar1 from the same restructuring.
+	if length <= 0 {
+		return 0
+	}
+	x = x[:length]
+	y = y[:length]
 	var sum int64
-	for i := 0; i < length; i++ {
+	for i := range x {
 		sum += int64(x[i]) * int64(y[i])
 	}
 	return int32(sum >> (2 * (normShift - 14)))
