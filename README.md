@@ -115,19 +115,19 @@ language-overhead measurement; it is **scalar Go against auto-vectorized C**.
 
 The original gap, attributed by measurement rather than assumption: **72%**
 missing vectorization, 15% allocation, 11% bounds checks, 2% GC. The control
-that settles it is `quant_partition` — the one hot kernel clang did *not*
+that settles it is `quant_partition`: the one hot kernel clang did *not*
 vectorize, and the one kernel where **Go is faster than C**. Go's code
 generation is not the problem. Its lack of vectorization is.
 
 Four things closed most of it:
 
 - **A transliteration bug.** `celt_pitch_xcorr` had been ported from the `#if 0`
-  branch of the C — the one libopus explicitly disables — instead of the live,
+  branch of the C (the one libopus explicitly disables) instead of the live,
   register-blocked one. Fixing that was worth 2.3x on the kernel, in pure Go.
 - **Hand-written NEON and SSE2** for `celt_inner_prod` and `xcorr_kernel`, which
   the profile named as the two worst. 6x and 7.4x on those kernels. Integer SIMD
-  can be bit-exact — wrapping two's-complement addition is associative, so lane
-  grouping cannot change the result — which is a property float SIMD does not
+  can be bit-exact (wrapping two's-complement addition is associative, so lane
+  grouping cannot change the result), which is a property float SIMD does not
   have, and a large part of why this codec is fixed-point.
 - **Pooling the per-frame scratch on both paths**, taking 501 allocations per
   stereo encode frame and 70 per decode frame to zero. Worth less time than it
@@ -143,7 +143,7 @@ Four things closed most of it:
   at 11% of the gap, so the remaining long tail is tracked but not urgent.
 
 What remains is the rest of that 72%: the fused, Opus-specific kernels the
-profile ranks next — the PVQ search, `exp_rotation`, the MDCT butterflies, the
+profile ranks next: the PVQ search, `exp_rotation`, the MDCT butterflies, the
 comb filter.
 
 Reproduce with:
