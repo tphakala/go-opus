@@ -744,6 +744,14 @@ func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, dec
 	}
 	p := &st.pkt
 	count := len(p.Frames)
+	// The frame slices alias the caller's data buffer and are consumed entirely
+	// within this call; drop the references on the way out so an idle decoder
+	// does not pin the last packet's backing buffer until the next parse.
+	defer func() {
+		clear(st.pktFrames[:count])
+		st.pkt.Frames = nil
+		st.pkt.Padding = nil
+	}()
 
 	if decodeFec != 0 {
 		/* If no FEC can be present, run the PLC (recursive call) */
