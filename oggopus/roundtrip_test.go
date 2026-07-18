@@ -122,6 +122,36 @@ func TestComplexityZeroMeansDefault(t *testing.T) {
 	}
 }
 
+// TestDecodeOutputRateIsFixed48k ties the reported output rate to real decode
+// behavior: whatever the encoded stream's input rate, the decoder always yields
+// 48 kHz PCM, and Info reports that on OutputSampleRate (not InputSampleRate). It
+// derives the expected sample count from the OutputSampleRate constant so a wrong
+// constant fails against the actual output, not just against a stored field.
+func TestDecodeOutputRateIsFixed48k(t *testing.T) {
+	const rate = 16000
+	const n = 4000 // 250 ms at 16 kHz, mono
+	stream := encodeOgg(t, Config{SampleRate: rate, Channels: 1, Bitrate: 32000}, tone(n, 1, 440, rate))
+
+	pcm, info := decodeOgg(t, stream)
+
+	if OutputSampleRate != 48000 {
+		t.Fatalf("OutputSampleRate constant = %d, want 48000", OutputSampleRate)
+	}
+	if info.OutputSampleRate != OutputSampleRate {
+		t.Fatalf("Info.OutputSampleRate = %d, want %d", info.OutputSampleRate, OutputSampleRate)
+	}
+	if info.InputSampleRate != rate {
+		t.Fatalf("Info.InputSampleRate = %d, want %d", info.InputSampleRate, rate)
+	}
+	// decodeOgg drops the pre-skip and end-trims, so the delivered per-channel
+	// count is the input length rescaled from the input rate to the 48 kHz output.
+	wantSamples := n * OutputSampleRate / rate
+	if len(pcm) != wantSamples {
+		t.Fatalf("decoded %d samples, want %d (%d input samples at %d Hz rescaled to %d Hz)",
+			len(pcm), wantSamples, n, rate, OutputSampleRate)
+	}
+}
+
 func packetsEqual(a, b [][]byte) bool {
 	if len(a) != len(b) {
 		return false

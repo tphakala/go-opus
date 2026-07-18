@@ -17,8 +17,11 @@ var _ io.WriteCloser = (*Encoder)(nil)
 // 4096-sample block size internally (see docs/api-design.md resolved question 2).
 const frameDurationMS = 20
 
-// sampleRate48k is the fixed Opus coding/granule rate.
-const sampleRate48k = 48000
+// sampleRate48k is the fixed Opus coding/granule rate, the same rate the
+// decoder's exported OutputSampleRate names for consumers. Tying the two
+// together keeps the internal coding rate and the public output rate from
+// drifting apart.
+const sampleRate48k = OutputSampleRate
 
 // Encoder streams interleaved little-endian int16 PCM (as []byte) to an Ogg
 // Opus stream on an io.Writer, implementing io.WriteCloser. It is shaped exactly

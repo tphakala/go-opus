@@ -175,6 +175,14 @@ func TestDecoderParsesHeaders(t *testing.T) {
 	if info.Channels != 2 || info.InputSampleRate != 24000 || info.PreSkip != 312 || info.OutputGain != -128 {
 		t.Fatalf("Info mismatch: %+v", info)
 	}
+	// OutputSampleRate is the fixed 48 kHz decode rate, distinct from the
+	// informational 24000 Hz input rate; a consumer must not read one for the other.
+	if info.OutputSampleRate != OutputSampleRate {
+		t.Fatalf("OutputSampleRate = %d, want %d", info.OutputSampleRate, OutputSampleRate)
+	}
+	if info.OutputSampleRate == info.InputSampleRate {
+		t.Fatalf("OutputSampleRate must differ from the 24000 Hz InputSampleRate; both = %d", info.OutputSampleRate)
+	}
 	// The packets are random bytes, not real opus: the decoder must reject them
 	// cleanly rather than panic.
 	if _, err := d.Read(make([]byte, 64)); err == nil {
