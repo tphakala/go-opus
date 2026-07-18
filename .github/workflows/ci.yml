@@ -41,6 +41,17 @@ jobs:
             race: '-race'
           - os: ubuntu-latest
             race: ''
+    # The exhaustive SIMD differential sweep in internal/celt (pitch_simd_test.go)
+    # walks every length 0..600 against 12 adversarial patterns, which is the only
+    # place the hand-written vector kernels' scalar tail epilogue is checked at every
+    # remainder class. That breadth is deliberate but too slow to pay on the PR
+    # feedback loop, so pull_request runs it with -short (a boundary-focused subset
+    # that still hits every tail remainder). Every other trigger runs the full sweep:
+    # push to main verifies it on both arches on every merge, and the nightly schedule
+    # plus manual workflow_dispatch re-run it in full. -short only affects that sweep;
+    # no other test in this job gates on testing.Short(). See issue #15.
+    env:
+      SHORT_FLAG: ${{ github.event_name == 'pull_request' && '-short' || '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -72,9 +83,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
       - name: Run tests
-        run: go test ${{ matrix.race }} -timeout 15m ./...
+        run: go test ${{ matrix.race }} $SHORT_FLAG -timeout 15m ./...
       - name: Run codec tests with the scratch poison harness
-        run: go test -tags poison -count=1 -timeout 15m ./internal/celt/... ./internal/packet/... ./opus/...
+        run: go test -tags poison $SHORT_FLAG -count=1 -timeout 15m ./internal/celt/... ./internal/packet/... ./opus/...
 
   # Coverage is arch-agnostic and expensive: -coverpkg=./... instruments the whole
   # tree and re-runs the suite, which on the slow amd64 runner alone exceeded 20

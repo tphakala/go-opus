@@ -113,10 +113,62 @@ func makeVecs(p fillPattern, n, slack int) (x, y []int16) {
 	return x, y
 }
 
+// simdTestLengths returns the sample lengths the SIMD differential sweep runs
+// at. The full set is every length from 0 to simdMaxLen: that breadth is the
+// whole point of these tests, because the vector kernels hand every length's
+// tail remainder to a hand-written scalar epilogue and a bug there can hide at
+// all but a single length. Paying the full sweep on every PR is what issue #15
+// is about, so under -short we run a representative subset and leave the
+// exhaustive sweep to the nightly (non -short) job.
+//
+// The subset keeps every length 0..40, which already covers every residue
+// modulo the 4, 8 and 16 sample block widths several times over, and then adds
+// every multiple of those block widths up to simdMaxLen together with its two
+// neighbors. The block widths are the strides of the vector loops in
+// pitch_amd64.s (16 and 8 samples) and pitch_arm64.s (16, 8 and 4 samples), so
+// each boundary and its neighbors straddle the point where the vector body
+// stops and the scalar epilogue begins, sampled at large lengths where the
+// wrapping int32 accumulator has walked far from zero. Every boundary neighbor,
+// being one off a block multiple, drives a non-zero tail remainder, so the
+// scalar epilogue stays exercised for every pattern even in the short subset.
+func simdTestLengths(short bool) []int {
+	if !short {
+		lengths := make([]int, 0, simdMaxLen+1)
+		for n := 0; n <= simdMaxLen; n++ {
+			lengths = append(lengths, n)
+		}
+		return lengths
+	}
+
+	keep := make([]bool, simdMaxLen+1)
+	for n := 0; n <= 40 && n <= simdMaxLen; n++ {
+		keep[n] = true
+	}
+	for _, width := range []int{4, 8, 16} {
+		for m := width; m <= simdMaxLen; m += width {
+			for _, n := range []int{m - 1, m, m + 1} {
+				if n >= 0 && n <= simdMaxLen {
+					keep[n] = true
+				}
+			}
+		}
+	}
+
+	lengths := make([]int, 0, simdMaxLen+1)
+	for n, ok := range keep {
+		if ok {
+			lengths = append(lengths, n)
+		}
+	}
+	return lengths
+}
+
 func TestCeltInnerProdSIMDMatchesScalar(t *testing.T) {
+	lengths := simdTestLengths(testing.Short())
 	for _, p := range simdPatterns {
 		t.Run(p.name, func(t *testing.T) {
-			for n := 0; n <= simdMaxLen; n++ {
+			t.Parallel()
+			for _, n := range lengths {
 				x, y := makeVecs(p, n, 0)
 				want := celtInnerProdGeneric(x, 0, y, 0, n)
 				got := celtInnerProd(x, 0, y, 0, n)
@@ -136,6 +188,7 @@ func TestCeltInnerProdSIMDMatchesScalar(t *testing.T) {
 func TestCeltInnerProdSIMDOffsets(t *testing.T) {
 	for _, p := range simdPatterns {
 		t.Run(p.name, func(t *testing.T) {
+			t.Parallel()
 			for _, xOff := range []int{0, 1, 3, 7, 8, 15} {
 				for _, yOff := range []int{0, 1, 2, 5, 9, 16} {
 					for _, n := range []int{0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 23, 31, 33, 100, 240, 481} {
@@ -164,9 +217,11 @@ func TestXcorrKernelSIMDMatchesScalar(t *testing.T) {
 		{math.MaxInt32, math.MinInt32, math.MaxInt32 - 1, math.MinInt32 + 1},
 		{-1, -1, -1, -1},
 	}
+	lengths := simdTestLengths(testing.Short())
 	for _, p := range simdPatterns {
 		t.Run(p.name, func(t *testing.T) {
-			for n := 0; n <= simdMaxLen; n++ {
+			t.Parallel()
+			for _, n := range lengths {
 				// xcorrKernel reads three samples of y past the end of x.
 				x, y := makeVecs(p, n, 3)
 				for si, seed := range seeds {
@@ -192,6 +247,7 @@ func TestXcorrKernelSIMDMatchesScalar(t *testing.T) {
 func TestCeltPitchXcorrSIMDMatchesScalar(t *testing.T) {
 	for _, p := range simdPatterns {
 		t.Run(p.name, func(t *testing.T) {
+			t.Parallel()
 			for _, len_ := range []int{3, 4, 5, 7, 8, 9, 16, 17, 60, 240} {
 				// Cover every maxPitch mod 4 so the scalar tail is exercised.
 				for _, maxPitch := range []int{1, 2, 3, 4, 5, 6, 7, 8, 17, 244} {
