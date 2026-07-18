@@ -241,6 +241,13 @@ func opPvqSearch(X []int32, iy []int32, K, N int, sc *scratch) int16 {
 	// BCE prove the N-bounded loops below in range. y and signx come back from
 	// alloc() through a pointer indirection, which loses the same length fact,
 	// so they get the same treatment.
+	//
+	// A re-slice can WIDEN a slice whose len is under N (up to cap), which would
+	// turn a misuse that previously panicked mid-loop into silent writes past the
+	// caller's window. Refuse that explicitly; every real caller passes len == N.
+	if N > len(X) || N > len(iy) {
+		panic("celt: opPvqSearch: N exceeds operand length")
+	}
 	X = X[:N]
 	iy = iy[:N]
 	y := alloc(&sc.pvqY, N)         // VARDECL(celt_norm, y)
