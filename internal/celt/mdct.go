@@ -18,7 +18,7 @@ import "github.com/tphakala/go-opus/internal/fixedmath"
 // frequency-domain input (read with the given stride), out the time-domain
 // overlap-add buffer, window the overlap window, overlap/shift/stride the usual
 // CELT parameters (shift = maxLM-LM for a non-transient block). (celt/mdct.c:268)
-func cltMDCTBackward(l *mdctLookup, in, out []int32, window []int16, overlap, shift, stride int) {
+func cltMDCTBackward(l *mdctLookup, in, out []int32, window []int16, overlap, shift, stride int, sc *scratch) {
 	var N, N2, N4 int
 	trigOff := 0
 
@@ -51,8 +51,11 @@ func cltMDCTBackward(l *mdctLookup, in, out []int32, window []int16, overlap, sh
 	// is stored directly into out+(overlap/2) in bitrev order and the FFT runs
 	// in place there; keeping a separate f2 slice reproduces the exact values
 	// (the post-rotation only reads what was already written) without a []int32
-	// -> []kissFFTCpx reinterpretation.
-	f2 := make([]kissFFTCpx, N4)
+	// -> []kissFFTCpx reinterpretation. Pooled on the codec scratch (shared with
+	// the forward MDCT's f2; see scratch.go): the pre-rotation below writes all N4
+	// entries in bitrev order before the post-rotation reads any, so a carried-over
+	// buffer is never observed.
+	f2 := alloc(&sc.mdctF2, N4) // VARDECL(kiss_fft_cpx, f2)
 
 	// Pre-rotate.
 	{
@@ -285,7 +288,8 @@ func InverseMDCT(lm int, in []int32) []int32 {
 	inCopy := make([]int32, N2)
 	copy(inCopy, in)
 	out := make([]int32, overlap/2+N2)
-	cltMDCTBackward(&m.mdct, inCopy, out, m.window, overlap, shift, 1)
+	var sc scratch
+	cltMDCTBackward(&m.mdct, inCopy, out, m.window, overlap, shift, 1, &sc)
 	return out
 }
 

@@ -180,11 +180,21 @@ func extractCollapseMask(iy []int32, n, b int) uint32 {
 	return collapseMask
 }
 
-// AlgUnquant decodes a PVQ codeword and combines it into the final normalised
-// band signal X (length N), returning the anti-collapse mask. K pulses, spread
-// rotation, B interleaved blocks, band gain (Q31). (vq.c:619). Requires K>0, N>1.
+// AlgUnquant is the differential-test entry point over algUnquant, standing in for
+// the decoder-held scratch the production path threads through.
 func AlgUnquant(X []int32, n, k, spread, b int, dec *rangecoding.Decoder, gain int32) uint32 {
-	iy := make([]int32, n)
+	var sc scratch
+	return algUnquant(X, n, k, spread, b, dec, gain, &sc)
+}
+
+// algUnquant decodes a PVQ codeword and combines it into the final normalised band
+// signal X (length N), returning the anti-collapse mask. K pulses, spread rotation,
+// B interleaved blocks, band gain (Q31). (vq.c:619). Requires K>0, N>1. iy comes
+// from the pooled scratch: cwrsi (DecodePulses) fills all N entries before
+// normalise_residual and extract_collapse_mask read them, so the pooled buffer's
+// carried-over values are never observed (see scratch.go's decode zeroing audit).
+func algUnquant(X []int32, n, k, spread, b int, dec *rangecoding.Decoder, gain int32, sc *scratch) uint32 {
+	iy := alloc(&sc.decIy, n) // VARDECL(int, iy)
 	ryy := DecodePulses(iy, n, k, dec)
 	normaliseResidual(iy, X, n, ryy, gain)
 	expRotation(X, n, -1, b, k, spread)

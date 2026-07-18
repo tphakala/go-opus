@@ -1,10 +1,15 @@
-// Encoder scratch pool. libopus takes every per-frame working buffer off the C
+// Codec scratch pool. libopus takes every per-frame working buffer off the C
 // stack with VARDECL(x,n) / ALLOC(x,n,T) (alloca): free to obtain, reclaimed on
 // frame pop. The transliteration mapped each ALLOC to a Go make(), which is a heap
-// allocation — 501 objects and 145 KB per stereo 20 ms frame. This file holds them
-// on the Encoder instead, so a steady-state Encode allocates nothing.
+// allocation: 501 objects and 145 KB per stereo 20 ms encode, 93 objects and 38 KB
+// per stereo 20 ms decode. This file holds them on the Encoder and the Decoder
+// instead, so a steady-state Encode or Decode allocates nothing. One scratch type
+// serves both: the encode fields (grouped by the encode function that declares
+// them) and the decode fields (the "DECODE PATH" group at the end) are disjoint,
+// and a given codec instance only ever runs one side, so an encode field and a
+// decode field never hold live data in the same scratch at the same time.
 //
-// THE ZEROING CONTRACT — the one thing that can silently break bit-exactness here.
+// THE ZEROING CONTRACT: the one thing that can silently break bit-exactness here.
 // Three behaviours must not be confused:
 //
 //	C's stack ALLOC   is UNINITIALISED: it carries whatever the last stack frame left.
@@ -15,8 +20,8 @@
 // window before reading it, which collapses those three behaviours into one. That
 // is not luck: libopus is valgrind-clean, so a plain ALLOC it reads before writing
 // would be reading uninitialised stack, and the codec would not be deterministic.
-// The sites where C does NOT rely on that keep an explicit clear at the point of
-// use, and there are three:
+// The ENCODE sites where C does NOT rely on that keep an explicit clear at the
+// point of use, and there are three:
 //
 //	offsets           C itself issues OPUS_CLEAR(offsets, nbEBands) (celt_encoder.c:1066),
 //	                  so dynalloc_analysis re-initialises it on every call.
@@ -27,28 +32,49 @@
 //
 // Each is commented at its clear.
 //
-// NOT SAFE FOR CONCURRENT USE, exactly like the Encoder that owns it (one per
-// goroutine, as documented on EncodeWithEC). That is why the buffers need neither a
-// mutex nor a sync.Pool: C gets the same isolation for free from having one stack
-// per thread, and locking here would be pure overhead.
+// THE DECODE PATH NEEDS NO CLEARS. The comment at celt_decoder.go's quantAllBands
+// call once warned that the encoder audit above did NOT cover decode; this is that
+// audit. Every decode buffer was checked the same way, and all of them write their
+// entire read window before any read, so none needs a clear:
+//
+//	decIy             cwrsi (decode_pulses) fills all N before normalise_residual /
+//	                  extract_collapse_mask read it.
+//	decTfRes          tf_decode writes [start,end); quant_all_bands reads [start,end).
+//	decCap            init_caps writes all nbEBands; only [start,end) is read.
+//	decOffsets        the dynalloc loop writes [start,end); clt_compute_allocation
+//	                  reads offsets[j] only for j in [start,end). Note C clears offsets
+//	                  in the ENCODER (OPUS_CLEAR at celt_encoder.c:1066) but NOT in the
+//	                  decoder: the decoder's read window never leaves the write window.
+//	decFineQuant      }
+//	decPulses         } outputs of clt_compute_allocation, written over [start,end),
+//	decFinePriority   } read over [start,end) by the fine-energy / band / anti-collapse
+//	                    passes.
+//	decX              quant_all_bands writes every bin of bands [start,end); celt_synthesis
+//	                  reads X only over [M*eBands[start], M*eBands[effEnd]) with effEnd<=end.
+//	decCollapseMasks  each band writes collapse_masks[i*C..] as it finishes; the fold
+//	                  reads only lower, already-written bands (foldI<i) and anti_collapse
+//	                  reads [start,end). Intra-frame write-before-read.
+//	decFreq           denormalise_bands writes all N (band bins, then OPUS_CLEAR to N).
+//	mdctF2            clt_mdct_backward writes all N4 (bitrev is a permutation) before
+//	                  the post-rotation reads them; shared with the forward MDCT, which a
+//	                  Decoder never runs (Encoder and Decoder own separate scratch).
+//	decDeemph         written [0,N) per channel before the downsample read (downsample>1).
+//
+// This was not taken on trust: a poison pass that filled every pooled buffer with
+// 0x5A before each decode call left the differential and conformance suites bit-exact.
+//
+// NOT SAFE FOR CONCURRENT USE, exactly like the Encoder or Decoder that owns it (one
+// per goroutine, as documented on EncodeWithEC / DecodeWithEC). That is why the
+// buffers need neither a mutex nor a sync.Pool: C gets the same isolation for free
+// from having one stack per thread, and locking here would be pure overhead.
+
+// The alloc helper (the Go stand-in for ALLOC(x, n, T)) lives in scratch_alloc.go;
+// a build-tagged copy in scratch_poison.go fills each window with 0x5A under
+// -tags poison, the read-before-write audit harness this file's contract rests on.
 
 package celt
 
-// alloc is the Go stand-in for ALLOC(x, n, T): it hands out an n-element window of
-// a pooled buffer, growing the backing array only when a call asks for more than
-// any previous call did. Sizes are a function of (mode, channels, frameSize) alone,
-// so after the first largest-frame Encode no call reallocates.
-//
-// The window is NOT zeroed — see the zeroing contract in the file comment.
-func alloc[T any](p *[]T, n int) []T {
-	if cap(*p) < n {
-		*p = make([]T, n)
-	}
-	*p = (*p)[:n]
-	return *p
-}
-
-// scratch pools one Encoder's VARDECL buffers. Fields are named after the C
+// scratch pools one Encoder's or Decoder's VARDECL buffers. Fields are named after the C
 // variable they stand in for and grouped by the function that declares them; two
 // sites share a field only where their lifetimes provably cannot overlap.
 type scratch struct {
@@ -90,9 +116,13 @@ type scratch struct {
 	// _celt_autocorr (celt_lpc.c:284).
 	autocorrXX []int16 // xx, n
 
-	// clt_mdct_forward (mdct.c:107). Called up to CC*B times per frame, so a large
-	// share of the object count even though each buffer is small.
-	mdctF  []int32      // f,  N2
+	// clt_mdct_forward (mdct.c:107) on the encode side, clt_mdct_backward (mdct.c:268)
+	// on the decode side. Called up to CC*B times per frame, so a large share of the
+	// object count even though each buffer is small. mdctF2 is shared by the forward
+	// and backward transforms: a single codec instance runs only one of the two, so
+	// they never contend (Encoder and Decoder own separate scratch instances). The
+	// backward transform uses only f2 (its FFT runs in the caller's overlap buffer).
+	mdctF  []int32      // f,  N2  (forward only)
 	mdctF2 []kissFFTCpx // f2, N4
 
 	// dynalloc_analysis (celt_encoder.c:1049).
@@ -141,4 +171,23 @@ type scratch struct {
 	pvqY     []int32 // y
 	pvqSignx []int   // signx
 	pvqIy    []int32 // iy
+
+	// --- DECODE PATH ---
+	// celt_decode_with_ec (celt_decoder.c:1100) and the functions it calls. A
+	// Decoder funnels its per-frame VARDECLs through this same pool; it never runs
+	// any of the encode functions above, so a decode field and an encode field never
+	// hold live data in one scratch at once. Every buffer below writes its entire
+	// read window before reading it (the decode zeroing audit is in the file
+	// comment), so none is ever cleared. C line numbers are celt_decoder.c.
+	decIy            []int32 // vq.c:619 alg_unquant iy, widest band times M
+	decTfRes         []int   // :1395 tf_res,         nbEBands
+	decCap           []int   // :1403 cap,            nbEBands
+	decOffsets       []int   // :1407 offsets,        nbEBands
+	decFineQuant     []int   // :1440 fine_quant,     nbEBands
+	decPulses        []int   // :1448 pulses,         nbEBands
+	decFinePriority  []int   // :1449 fine_priority,  nbEBands
+	decX             []int32 // :1457 X,              C*N
+	decCollapseMasks []byte  // :1487 collapse_masks, C*nbEBands
+	decFreq          []int32 // :432  celt_synthesis freq, N
+	decDeemph        []int32 // :335  deemphasis scratch,  N (downsample>1 only)
 }

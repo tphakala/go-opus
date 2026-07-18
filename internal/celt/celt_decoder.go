@@ -86,6 +86,20 @@ type Decoder struct {
 	lastTransient    bool
 	lastPostfilterOn bool
 	lastAntiCollapse bool
+
+	// Per-frame working buffers. In C these are stack VARDECL/ALLOCs, reclaimed on
+	// frame pop; here they are pooled on the decoder so a steady-state Decode
+	// allocates nothing (see scratch.go, and its decode zeroing audit). This is
+	// state only in the sense that a C thread's stack is: it carries nothing across
+	// frames that any frame reads, and ResetState does not need to touch it.
+	sc scratch
+
+	// The [][]int32 pointer arrays celt_decode_with_ec and celt_synthesis build
+	// from decode_mem each frame (C uses stack pointer arrays). Backed here by fixed
+	// [2][]int32 storage so decMem := decMemSlices[:CC] and outSyn := outSynSlices[:CC]
+	// reuse the same headers every call instead of make([][]int32, CC).
+	decMemSlices [2][]int32
+	outSynSlices [2][]int32
 }
 
 // NewDecoder allocates and initializes a CELT decoder for the 48 kHz / 960 mode
@@ -265,12 +279,17 @@ func tfDecode(start, end, isTransient int, tfRes []int, LM int, dec *rangecoding
 // coef[1] is unused, non-RES24 so opus_res is int16). It runs the preemphasis
 // inverse (a 1-tap IIR) over each channel of out_syn, optional integer
 // downsampling, and writes interleaved int16 PCM. mem carries preemph_memD.
-func deemphasis(outSyn [][]int32, pcm []int16, N, C, downsample int, coef [4]int16, mem *[2]int32, accum int) {
+func deemphasis(outSyn [][]int32, pcm []int16, N, C, downsample int, coef [4]int16, mem *[2]int32, accum int, sc *scratch) {
 	coef0 := coef[0]
 	Nd := N / downsample
-	var scratch []int32
+	// dScratch is C's VARDECL(celt_sig, scratch) (celt_decoder.c:335), pooled here.
+	// Each channel writes dScratch[0:N] in full before the downsampling read, so the
+	// carried-over buffer is never observed. downsample==1 (the 48 kHz path) never
+	// touches it. See scratch.go's decode zeroing audit. (Renamed off "scratch" to
+	// not shadow the scratch type.)
+	var dScratch []int32
 	if downsample > 1 {
-		scratch = make([]int32, N)
+		dScratch = alloc(&sc.decDeemph, N)
 	}
 	for c := 0; c < C; c++ {
 		m := mem[c]
@@ -281,7 +300,7 @@ func deemphasis(outSyn [][]int32, pcm []int16, N, C, downsample int, coef [4]int
 			for j := 0; j < N; j++ {
 				tmp := fixedmath.SATURATE(x[j]+m, sigSat) // VERY_SMALL == 0
 				m = fixedmath.MULT16_32_Q15(coef0, tmp)
-				scratch[j] = tmp
+				dScratch[j] = tmp
 			}
 			applyDown = true
 		case accum != 0:
@@ -301,11 +320,11 @@ func deemphasis(outSyn [][]int32, pcm []int16, N, C, downsample int, coef [4]int
 		if applyDown {
 			if accum != 0 {
 				for j := 0; j < Nd; j++ {
-					pcm[j*C+c] = sat16(int32(pcm[j*C+c]) + int32(sig2word16(scratch[j*downsample])))
+					pcm[j*C+c] = sat16(int32(pcm[j*C+c]) + int32(sig2word16(dScratch[j*downsample])))
 				}
 			} else {
 				for j := 0; j < Nd; j++ {
-					pcm[j*C+c] = sig2word16(scratch[j*downsample])
+					pcm[j*C+c] = sig2word16(dScratch[j*downsample])
 				}
 			}
 		}
@@ -318,11 +337,14 @@ func deemphasis(outSyn [][]int32, pcm []int16, N, C, downsample int, coef [4]int
 // Opus wrapper. out_syn[c] must be a view into decode_mem[c] starting at
 // decode_buffer_size-N (length N+overlap) so the IMDCT overlap-add and the
 // mono->stereo scratch copy have room.
-func celtSynthesis(m *celtMode, X []int32, outSyn [][]int32, oldBandE []int32, start, effEnd, C, CC, isTransient, LM, downsample, silence int) {
+func celtSynthesis(m *celtMode, X []int32, outSyn [][]int32, oldBandE []int32, start, effEnd, C, CC, isTransient, LM, downsample, silence int, sc *scratch) {
 	overlap := m.overlap
 	nbEBands := m.nbEBands
 	N := m.shortMdctSize << LM
-	freq := make([]int32, N)
+	// Pooled (VARDECL(celt_sig, freq), celt_decoder.c:432): denormalise_bands writes
+	// every one of freq's N samples before the inverse MDCT reads them, so the
+	// carried-over buffer is never observed. See scratch.go's decode zeroing audit.
+	freq := alloc(&sc.decFreq, N)
 	M := 1 << LM
 	var B, NB, shift int
 	if isTransient != 0 {
@@ -343,10 +365,10 @@ func celtSynthesis(m *celtMode, X []int32, outSyn [][]int32, oldBandE []int32, s
 		freq2 := outSyn[1]
 		copy(freq2[freq2Off:freq2Off+N], freq[:N])
 		for b := 0; b < B; b++ {
-			cltMDCTBackward(&m.mdct, freq2[freq2Off+b:], outSyn[0][NB*b:], m.window, overlap, shift, B)
+			cltMDCTBackward(&m.mdct, freq2[freq2Off+b:], outSyn[0][NB*b:], m.window, overlap, shift, B, sc)
 		}
 		for b := 0; b < B; b++ {
-			cltMDCTBackward(&m.mdct, freq[b:], outSyn[1][NB*b:], m.window, overlap, shift, B)
+			cltMDCTBackward(&m.mdct, freq[b:], outSyn[1][NB*b:], m.window, overlap, shift, B, sc)
 		}
 	case CC == 1 && C == 2:
 		// Downmix a stereo stream to mono.
@@ -358,14 +380,14 @@ func celtSynthesis(m *celtMode, X []int32, outSyn [][]int32, oldBandE []int32, s
 			freq[i] = fixedmath.ADD32(fixedmath.HALF32(freq[i]), fixedmath.HALF32(freq2[freq2Off+i]))
 		}
 		for b := 0; b < B; b++ {
-			cltMDCTBackward(&m.mdct, freq[b:], outSyn[0][NB*b:], m.window, overlap, shift, B)
+			cltMDCTBackward(&m.mdct, freq[b:], outSyn[0][NB*b:], m.window, overlap, shift, B, sc)
 		}
 	default:
 		// Normal case (mono or stereo).
 		for c := 0; c < CC; c++ {
 			denormaliseBands(m, X[c*N:], freq, oldBandE[c*nbEBands:], start, effEnd, M, downsample, silence)
 			for b := 0; b < B; b++ {
-				cltMDCTBackward(&m.mdct, freq[b:], outSyn[c][NB*b:], m.window, overlap, shift, B)
+				cltMDCTBackward(&m.mdct, freq[b:], outSyn[c][NB*b:], m.window, overlap, shift, B, sc)
 			}
 		}
 	}
@@ -492,7 +514,7 @@ func (st *Decoder) celtDecodeLost(decMem [][]int32, N, LM int) {
 		}
 		st.rng = seed
 
-		celtSynthesis(m, X, outSyn, oldBandE, start, effEnd, C, C, 0, LM, st.downsample, 0)
+		celtSynthesis(m, X, outSyn, oldBandE, start, effEnd, C, C, 0, LM, st.downsample, 0, &st.sc)
 
 		// Run the postfilter with the last parameters.
 		for c := 0; c < C; c++ {
@@ -714,8 +736,11 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 	N := M * m.shortMdctSize
 
 	per := decodeBufferSize + overlap
-	decMem := make([][]int32, CC)
-	outSyn := make([][]int32, CC)
+	// Reuse the decoder's pointer-array storage instead of make([][]int32, CC) each
+	// call (C uses stack pointer arrays). The headers are overwritten below before
+	// any read, so nothing carries across frames.
+	decMem := st.decMemSlices[:CC]
+	outSyn := st.outSynSlices[:CC]
 	for c := 0; c < CC; c++ {
 		decMem[c] = st.decodeMem[c*per : (c+1)*per]
 		outSyn[c] = decMem[c][decodeBufferSize-N:]
@@ -728,7 +753,7 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 
 	if data == nil || dlen <= 1 {
 		st.celtDecodeLost(decMem, N, LM)
-		deemphasis(outSyn, pcm, N, CC, st.downsample, m.preemph, &st.preemphMemD, accum)
+		deemphasis(outSyn, pcm, N, CC, st.downsample, m.preemph, &st.preemphMemD, accum, &st.sc)
 		return frameSize / st.downsample, nil
 	}
 
@@ -832,7 +857,7 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 	// Coarse band energies.
 	unquantCoarseEnergy(m, start, end, oldBandE, intraEner, dec, C, LM)
 
-	tfRes := make([]int, nbEBands)
+	tfRes := alloc(&st.sc.decTfRes, nbEBands) // VARDECL(int, tf_res)
 	tfDecode(start, end, isTransient, tfRes, LM, dec)
 
 	tell = dec.Tell()
@@ -841,10 +866,10 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 		spreadDecision = dec.DecIcdf(spreadIcdf, 5)
 	}
 
-	cap := make([]int, nbEBands)
+	cap := alloc(&st.sc.decCap, nbEBands) // VARDECL(int, cap)
 	initCaps(m, cap, LM, C)
 
-	offsets := make([]int, nbEBands)
+	offsets := alloc(&st.sc.decOffsets, nbEBands) // VARDECL(int, offsets)
 	dynallocLogp := 6
 	totalBits <<= bitRes // now in 1/8-bit units for dynalloc/trim
 	tellFrac := int(dec.TellFrac())
@@ -870,7 +895,7 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 		}
 	}
 
-	fineQuant := make([]int, nbEBands)
+	fineQuant := alloc(&st.sc.decFineQuant, nbEBands) // VARDECL(int, fine_quant)
 	allocTrim := 5
 	if tellFrac+(6<<bitRes) <= totalBits {
 		allocTrim = dec.DecIcdf(trimIcdf, 7)
@@ -883,19 +908,18 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 	}
 	bits -= int32(antiCollapseRsv)
 
-	pulses := make([]int, nbEBands)
-	finePriority := make([]int, nbEBands)
+	pulses := alloc(&st.sc.decPulses, nbEBands)             // VARDECL(int, pulses)
+	finePriority := alloc(&st.sc.decFinePriority, nbEBands) // VARDECL(int, fine_priority)
 
 	var intensity, dualStereo int
 	var balance int32
-	var allocSc scratch // per-call scratch; decode path, see celtPlcPitchSearch
 	codedBands := cltComputeAllocation(m, start, end, offsets, cap, allocTrim,
 		&intensity, &dualStereo, bits, &balance, pulses, fineQuant, finePriority,
-		C, LM, nil, dec, 0, 0, 0, &allocSc)
+		C, LM, nil, dec, 0, 0, 0, &st.sc)
 
 	unquantFineEnergy(m, start, end, oldBandE, nil, fineQuant, dec, C)
 
-	X := make([]int32, C*N)
+	X := alloc(&st.sc.decX, C*N) // VARDECL(celt_norm, X)
 
 	// Move the decode memory one frame to the left to make room for this frame.
 	for c := 0; c < CC; c++ {
@@ -903,20 +927,20 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 	}
 
 	// Decode the fixed codebook (PVQ bands + folding + LCG noise).
-	collapseMasks := make([]byte, C*nbEBands)
+	collapseMasks := alloc(&st.sc.decCollapseMasks, C*nbEBands) // VARDECL(unsigned char, collapse_masks)
 	var Y []int32
 	if C == 2 {
 		Y = X[N:]
 	}
-	// A per-call scratch, not decoder-held state: the pooling work (issue #21) and
-	// the zeroing-dependency audit behind it cover the ENCODE path only. Allocating
-	// here per call leaves every decode buffer freshly zeroed exactly as make() did,
-	// so the decoder's behaviour is untouched; it just funnels through one type.
-	var sc scratch
+	// The decoder's pooled scratch. Issue #21 pooled the ENCODE path and left decode
+	// on per-call make(); issue #5 (this change) extends the pooling to decode after
+	// auditing every decode buffer for write-before-read (see scratch.go). The same
+	// st.sc also fed cltComputeAllocation above; that call finishes before this one,
+	// and the two use disjoint fields, so sharing the instance is safe.
 	quantAllBands(0, m, start, end, X, Y, collapseMasks, nil, pulses, shortBlocks,
 		spreadDecision, dualStereo, intensity, tfRes,
 		int32(dlen*(8<<bitRes)-antiCollapseRsv), balance, nil, dec, LM, codedBands,
-		&st.rng, 0, st.disableInv, &sc)
+		&st.rng, 0, st.disableInv, &st.sc)
 
 	antiCollapseOn := 0
 	if antiCollapseRsv > 0 {
@@ -944,7 +968,7 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 		st.foldPrefilter(decMem, N)
 	}
 
-	celtSynthesis(m, X, outSyn, oldBandE, start, effEnd, C, CC, isTransient, LM, st.downsample, silence)
+	celtSynthesis(m, X, outSyn, oldBandE, start, effEnd, C, CC, isTransient, LM, st.downsample, silence, &st.sc)
 
 	for c := 0; c < CC; c++ {
 		if st.postfilterPeriod < combfilterMinperiod {
@@ -1011,7 +1035,7 @@ func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *ra
 	}
 	st.rng = dec.Rng()
 
-	deemphasis(outSyn, pcm, N, CC, st.downsample, m.preemph, &st.preemphMemD, accum)
+	deemphasis(outSyn, pcm, N, CC, st.downsample, m.preemph, &st.preemphMemD, accum, &st.sc)
 	st.lossDuration = 0
 	st.plcDuration = 0
 	st.lastFrameType = frameNormal
