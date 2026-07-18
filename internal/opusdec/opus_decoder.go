@@ -167,7 +167,9 @@ type OpusDecoder struct {
 	decodeGain int
 	complexity int
 
-	/* Everything beyond this point gets cleared on a reset */
+	/* Everything beyond this point gets cleared on a reset, except pkt and
+	   pktFrames at the end: those are overwritten on every parse (see their
+	   comment), so ResetState leaves them alone. */
 	/* OPUS_DECODER_RESET_START stream_channels */
 	streamChannels int
 

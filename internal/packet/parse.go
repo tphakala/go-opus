@@ -61,6 +61,11 @@ func ParseInto(data []byte, dst *Packet, frames *[MaxFrames][]byte) error {
 		return err
 	}
 	dst.Frames = frames[:p.count]
+	// Clear the tail so entries beyond this packet's count do not keep aliasing
+	// an earlier packet's data. The frames array outlives the call (it lives on
+	// the decoder), and without this a 2-frame packet after a 48-frame packet
+	// would pin the old packet's backing buffer through the 46 stale entries.
+	clear(frames[p.count:])
 	return p.fillPacket(data, dst)
 }
 

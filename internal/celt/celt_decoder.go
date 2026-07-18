@@ -430,7 +430,10 @@ func (st *Decoder) foldPrefilter(decMem [][]int32, N int) {
 // [PLC_PITCH_LAG_MIN, PLC_PITCH_LAG_MAX], and return the pitch lag.
 func (st *Decoder) celtPlcPitchSearch(decMem [][]int32, C int) int {
 	lpPitchBuf := make([]int16, decodeBufferSize>>1)
-	// Per-call scratch: the PLC is a decode path, outside the encoder pooling work.
+	// Per-call scratch: the PLC regime is exempt from the decoder's steady-state
+	// pooling (it only runs on packet loss, and pooling it needs its own zeroing
+	// audit; issue #17). The same goes for the plain make() buffers in
+	// celtDecodeLost and foldPrefilter.
 	var sc scratch
 	pitchDownsample(decMem, lpPitchBuf, decodeBufferSize>>1, C, 2, &sc)
 	var pitchIndex int
@@ -566,7 +569,7 @@ func (st *Decoder) celtDecodeLost(decMem [][]int32, N, LM int) {
 				var ac [celtLpcOrder + 1]int32
 				// Compute LPC coefficients for the last MAX_PERIOD samples before
 				// the first loss so we can work in the excitation-filter domain.
-				var sc scratch // per-call scratch; decode path, see celtPlcPitchSearch
+				var sc scratch // per-call: PLC is exempt from pooling, see celtPlcPitchSearch
 				celtAutocorr(exc, ac[:], window, overlap, celtLpcOrder, maxPeriodC, &sc)
 				// Add a noise floor of -40 dB.
 				ac[0] += fixedmath.SHR32(ac[0], 13)
@@ -698,6 +701,9 @@ func (st *Decoder) Decode(data []byte, pcm []int16, frameSize int) (int, error) 
 // If dec is nil a range decoder is initialized over data; accum!=0 accumulates
 // into pcm (used by the hybrid Opus path). Only the NORMAL (data present) path
 // is implemented; a lost frame routes to the celtDecodeLost stub.
+//
+// Not safe for concurrent use: one Decoder per goroutine. The decoder state and
+// its pooled scratch (see scratch.go) are mutated without synchronization.
 func (st *Decoder) DecodeWithEC(data []byte, pcm []int16, frameSize int, dec *rangecoding.Decoder, accum int) (int, error) {
 	m := st.mode
 	CC := st.channels

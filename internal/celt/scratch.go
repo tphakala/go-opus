@@ -4,10 +4,13 @@
 // allocation: 501 objects and 145 KB per stereo 20 ms encode, 93 objects and 38 KB
 // per stereo 20 ms decode. This file holds them on the Encoder and the Decoder
 // instead, so a steady-state Encode or Decode allocates nothing. One scratch type
-// serves both: the encode fields (grouped by the encode function that declares
-// them) and the decode fields (the "DECODE PATH" group at the end) are disjoint,
-// and a given codec instance only ever runs one side, so an encode field and a
-// decode field never hold live data in the same scratch at the same time.
+// serves both: a given codec instance only ever runs one side, so an encode field
+// and a decode field never hold live data in the same scratch at the same time.
+// Most decode-only buffers live in the "DECODE PATH" group at the end; the decode
+// path ALSO draws on fields declared in the shared-function groups below, because
+// the declaring C function runs on both sides: norm and hadamardTmp (quant_all_bands),
+// bits1/bits2/thresh/trimOffset (clt_compute_allocation), and mdctF2 (the MDCT).
+// Those six are part of the decode zeroing audit exactly like the dec* fields.
 //
 // THE ZEROING CONTRACT: the one thing that can silently break bit-exactness here.
 // Three behaviours must not be confused:
@@ -59,6 +62,14 @@
 //	                  the post-rotation reads them; shared with the forward MDCT, which a
 //	                  Decoder never runs (Encoder and Decoder own separate scratch).
 //	decDeemph         written [0,N) per channel before the downsample read (downsample>1).
+//	                  Only allocated for sub-48 kHz output; TestDecoderScratchCarryover
+//	                  decodes at 24 kHz so the poison run reaches it.
+//	norm, hadamardTmp (shared with encode; declared in the quant_all_bands and
+//	bits1, bits2,      Hadamard groups below) and the clt_compute_allocation
+//	thresh, trimOffset quartet: on decode these follow the same [start,end)-bounded
+//	                  write-before-read pattern as their encode use; norm's lowband
+//	                  fill is contiguous from start, and rate.go writes bits1/bits2/
+//	                  thresh/trimOffset over [start,end) before any read.
 //
 // This was not taken on trust: a poison pass that filled every pooled buffer with
 // 0x5A before each decode call left the differential and conformance suites bit-exact.

@@ -210,6 +210,9 @@ func (st *Encoder) Encode(pcm []int16, frameSize int, compressed []byte, nbCompr
 // is read only in the hybrid branch at :2433; and the CBR clamp needs
 // bitrate != OPUS_BITRATE_MAX, which opus_encode_frame_native never leaves).
 // EncodeWithEC exists so the port does not DEPEND on that equivalence.
+//
+// Not safe for concurrent use: one Encoder per goroutine. The encoder state and
+// its pooled scratch (see scratch.go) are mutated without synchronization.
 func (st *Encoder) EncodeWithEC(pcm []int16, frameSize int, ec *rangecoding.Encoder, nbCompressedBytes int) int {
 	return st.encodeObserved(pcm, frameSize, nil, nbCompressedBytes, ec, nil)
 }

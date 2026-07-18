@@ -30,6 +30,11 @@ tasks:
     cmds:
       - go test -race ./...
 
+  test:poison:
+    desc: Run the codec tests with the scratch poison harness (alloc stamps 0x5A instead of leaving reused memory; guards the zeroing contract in internal/celt/scratch.go)
+    cmds:
+      - go test -tags poison -count=1 ./internal/celt/... ./internal/packet/... ./opus/...
+
   bench:
     desc: Run all benchmarks
     cmds:
