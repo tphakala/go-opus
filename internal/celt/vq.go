@@ -70,13 +70,19 @@ func celtInnerProdNorm(x, y []int32, length int) int32 {
 }
 
 // expRotation1 applies one Givens-style rotation pass with the given stride and
-// (c,s) coefficients. Rounding-brittle: the PSHR32 rounding and the scaledown/
-// scaleup around the Q14 domain are transliterated exactly (vq.c:75). Because
-// celt_norm is int32 here, MULT16_16(c,x) is a 32-bit product and MAC16_16 a
-// 32-bit multiply-add; the results still fit int32 for scaled norm inputs.
+// (c,s) coefficients, working in the Q14 rotation domain. Rounding-brittle: the
+// PSHR32 rounding and the int16 (EXTRACT16) lane truncation are transliterated
+// exactly (vq.c:75). The norm_scaledown/norm_scaleup that bridge celt_norm's
+// wider storage shift (normShift) down to this Q14 domain are hoisted to the
+// caller (expRotation), which brackets a whole block's rotation passes once; a
+// scaleup at the end of one pass followed by a scaledown at the start of the next
+// is the identity for the int16-range values EXTRACT16 produces, so hoisting them
+// drops two full passes per block in the two-pass case without changing a byte.
+// Because celt_norm is int32 here, MULT16_16(c,x) is a 32-bit product and
+// MAC16_16 a 32-bit multiply-add; the results still fit int32 for scaled norm
+// inputs.
 func expRotation1(X []int32, length, stride int, c, s int16) {
 	ms := int16(fixedmath.NEG16(s))
-	normScaledown(X, length, normShift-14)
 
 	// Both passes below touch the pair (X[i], X[i+stride]); length<=stride makes
 	// the original forward loop (i<length-stride) empty, and by extension the
@@ -109,8 +115,6 @@ func expRotation1(X []int32, length, stride int, c, s int16) {
 			}
 		}
 	}
-
-	normScaleup(X, length, normShift-14)
 }
 
 // expRotation applies (dir<0) or undoes (dir>0) the spread rotation over the band
@@ -147,6 +151,12 @@ func expRotation(X []int32, length, dir, stride, k, spread int) {
 	length = int(fixedmath.Celt_udiv(uint32(length), uint32(stride)))
 	for i := 0; i < stride; i++ {
 		block := X[i*length:]
+		// Bridge celt_norm's storage shift to the Q14 rotation domain once around
+		// all of this block's passes (the C celt_norm is already opus_val16 so it
+		// has no equivalent). Consecutive expRotation1 passes then share the Q14
+		// domain rather than each round-tripping it through scaleup/scaledown, which
+		// is the identity for the int16-range values EXTRACT16 produces.
+		normScaledown(block, length, normShift-14)
 		if dir < 0 {
 			if stride2 != 0 {
 				expRotation1(block, length, stride2, s, c)
@@ -158,6 +168,7 @@ func expRotation(X []int32, length, dir, stride, k, spread int) {
 				expRotation1(block, length, stride2, s, int16(fixedmath.NEG16(c)))
 			}
 		}
+		normScaleup(block, length, normShift-14)
 	}
 }
 
