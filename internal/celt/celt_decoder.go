@@ -409,7 +409,11 @@ func (st *Decoder) foldPrefilter(decMem [][]int32, N int) {
 	m := st.mode
 	overlap := st.overlap
 	CC := st.channels
-	etmp := make([]int32, overlap)
+	// etmp is pooled: comb_filter below writes all `overlap` samples of it before the
+	// TDAC fold reads them, so the reused buffer never exposes a prior frame's data. It
+	// is local to this call; prefilter_and_fold's cross-frame span is in the flag and
+	// decode_mem, not here.
+	etmp := alloc(&st.sc.decEtmp, overlap)
 	for c := 0; c < CC; c++ {
 		base := decodeBufferSize - N
 		// comb_filter into etmp from decode_mem[c]+decode_buffer_size-N.
@@ -429,16 +433,15 @@ func (st *Decoder) foldPrefilter(decMem [][]int32, N int) {
 // the decode history by 2, run the pitch search over it bounded to
 // [PLC_PITCH_LAG_MIN, PLC_PITCH_LAG_MAX], and return the pitch lag.
 func (st *Decoder) celtPlcPitchSearch(decMem [][]int32, C int) int {
-	lpPitchBuf := make([]int16, decodeBufferSize>>1)
-	// Per-call scratch: the PLC regime is exempt from the decoder's steady-state
-	// pooling (it only runs on packet loss, and pooling it needs its own zeroing
-	// audit; issue #17). The same goes for the plain make() buffers in
-	// celtDecodeLost and foldPrefilter.
-	var sc scratch
-	pitchDownsample(decMem, lpPitchBuf, decodeBufferSize>>1, C, 2, &sc)
+	// lpPitchBuf is pooled: pitch_downsample writes every element before pitch_search
+	// reads it, so the reused buffer is fully reinitialised each call. The searches
+	// borrow the decoder's own scratch (st.sc); pitch_downsample / pitch_search are
+	// leaf calls here and hold nothing else live on the PLC path.
+	lpPitchBuf := alloc(&st.sc.decLpPitchBuf, decodeBufferSize>>1)
+	pitchDownsample(decMem, lpPitchBuf, decodeBufferSize>>1, C, 2, &st.sc)
 	var pitchIndex int
 	pitchSearch(lpPitchBuf[plcPitchLagMax>>1:], lpPitchBuf,
-		decodeBufferSize-plcPitchLagMax, plcPitchLagMax-plcPitchLagMin, &pitchIndex, &sc)
+		decodeBufferSize-plcPitchLagMax, plcPitchLagMax-plcPitchLagMin, &pitchIndex, &st.sc)
 	pitchIndex = plcPitchLagMax - pitchIndex
 	return pitchIndex
 }
@@ -464,7 +467,9 @@ func (st *Decoder) celtDecodeLost(decMem [][]int32, N, LM int) {
 	eBands := m.eBands
 	per := decodeBufferSize + overlap
 
-	outSyn := make([][]int32, C)
+	// Reuse the Decoder's pointer-array storage (as celt_decode_with_ec does) instead of
+	// make([][]int32, C); every header is overwritten below before any read.
+	outSyn := st.outSynSlices[:C]
 	for c := 0; c < C; c++ {
 		outSyn[c] = decMem[c][decodeBufferSize-N:]
 	}
@@ -484,7 +489,11 @@ func (st *Decoder) celtDecodeLost(decMem [][]int32, N, LM int) {
 		// Noise-based PLC/CNG.
 		end := st.end
 		effEnd := fixedmath.IMAX(start, fixedmath.IMIN(end, m.effEBands))
-		X := make([]int32, C*N) // Interleaved normalised MDCTs.
+		// X reuses decX (the normal path's C*N normalised-MDCT buffer; the two paths are
+		// never live at once). The LCG-noise fill below writes bands [start,effEnd) and the
+		// celtSynthesis call reads exactly that window, so decX's normal-path write-before-
+		// read bound holds here too and no clear is needed.
+		X := alloc(&st.sc.decX, C*N) // Interleaved normalised MDCTs.
 		for c := 0; c < C; c++ {
 			copy(decMem[c][:per-N], decMem[c][N:per])
 		}
@@ -555,8 +564,12 @@ func (st *Decoder) celtDecodeLost(decMem [][]int32, N, LM int) {
 		// We want the excitation for 2 pitch periods in order to look for a
 		// decaying signal, but we can't get more than MAX_PERIOD.
 		excLength := fixedmath.IMIN(2*pitchIndex, maxPeriodC)
-		excBuf := make([]int16, maxPeriodC+celtLpcOrder)
-		firTmp := make([]int16, excLength)
+		// excBuf and firTmp are pooled. The per-channel copy loop below rewrites all of
+		// excBuf before celtFir / celtAutocorr read it, and celtFir writes all excLength
+		// outputs of firTmp before the copy-back into exc reads them, so neither reused
+		// buffer exposes a prior frame's data.
+		excBuf := alloc(&st.sc.decExcBuf, maxPeriodC+celtLpcOrder)
+		firTmp := alloc(&st.sc.decFirTmp, excLength)
 		exc := excBuf[celtLpcOrder:]
 
 		for c := 0; c < C; c++ {
@@ -569,8 +582,9 @@ func (st *Decoder) celtDecodeLost(decMem [][]int32, N, LM int) {
 				var ac [celtLpcOrder + 1]int32
 				// Compute LPC coefficients for the last MAX_PERIOD samples before
 				// the first loss so we can work in the excitation-filter domain.
-				var sc scratch // per-call: PLC is exempt from pooling, see celtPlcPitchSearch
-				celtAutocorr(exc, ac[:], window, overlap, celtLpcOrder, maxPeriodC, &sc)
+				// celtAutocorr borrows st.sc (autocorrXX): it writes its whole read
+				// window before reading, and nothing else on this path is live in it.
+				celtAutocorr(exc, ac[:], window, overlap, celtLpcOrder, maxPeriodC, &st.sc)
 				// Add a noise floor of -40 dB.
 				ac[0] += fixedmath.SHR32(ac[0], 13)
 				// Use lag windowing to stabilize the Levinson-Durbin recursion.

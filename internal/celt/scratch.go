@@ -54,6 +54,9 @@
 //	                    passes.
 //	decX              quant_all_bands writes every bin of bands [start,end); celt_synthesis
 //	                  reads X only over [M*eBands[start], M*eBands[effEnd]) with effEnd<=end.
+//	                  Reused by celtDecodeLost's noise-PLC branch: there the LCG-noise fill
+//	                  writes bands [start,effEnd) and celt_synthesis reads exactly that same
+//	                  window, so the identical write-before-read bound holds on that path too.
 //	decCollapseMasks  each band writes collapse_masks[i*C..] as it finishes; the fold
 //	                  reads only lower, already-written bands (foldI<i) and anti_collapse
 //	                  reads [start,end). Intra-frame write-before-read.
@@ -64,6 +67,18 @@
 //	decDeemph         written [0,N) per channel before the downsample read (downsample>1).
 //	                  Only allocated for sub-48 kHz output; TestDecoderScratchCarryover
 //	                  decodes at 24 kHz so the poison run reaches it.
+//
+//	The PLC buffers (lost-frame path only) follow the same rule:
+//	decExcBuf         celtDecodeLost's per-channel copy loop rewrites all MAX_PERIOD+
+//	                  CELT_LPC_ORDER samples before celt_fir / celt_autocorr read them.
+//	decFirTmp         celt_fir writes all exc_length outputs before the copy-back into
+//	                  exc reads them; exc_length shrinks freely since the read window is
+//	                  the same [0,exc_length) that was just written.
+//	decLpPitchBuf     pitch_downsample writes every element (the downsample loop fills
+//	                  [0,len), then celt_fir5 filters in place) before pitch_search reads.
+//	decEtmp           comb_filter writes all `overlap` samples before the TDAC fold reads
+//	                  them; etmp is local to prefilter_and_fold (the cross-frame coupling
+//	                  of prefilter_and_fold lives in the flag and decode_mem, not here).
 //	norm, hadamardTmp (shared with encode; declared in the quant_all_bands and
 //	bits1, bits2,      Hadamard groups below) and the clt_compute_allocation
 //	thresh, trimOffset quartet: on decode these follow the same [start,end)-bounded
@@ -114,7 +129,7 @@ type scratch struct {
 	toneX        []int16 // :1368  N
 
 	// run_prefilter (:1404) and the pitch analysis it drives.
-	pre      []int32    // :1415  CC*(N+maxPeriod) — the largest single buffer
+	pre      []int32    // :1415  CC*(N+maxPeriod), the largest single buffer
 	pitchBuf []int16    // :1440  (maxPeriod+N)>>1
 	preCh    [2][]int32 // :1441  the 2-element pointer array; a value field, never allocated
 
@@ -176,8 +191,8 @@ type scratch struct {
 	// quant_band is not recursive (only quant_partition is, and it never reorders).
 	hadamardTmp []int32
 
-	// op_pvq_search (vq.c:205) / alg_quant (vq.c:550). alg_quant is a leaf — it
-	// consumes iy entirely before returning — so quant_partition's recursion cannot
+	// op_pvq_search (vq.c:205) / alg_quant (vq.c:550). alg_quant is a leaf: it
+	// consumes iy entirely before returning, so quant_partition's recursion cannot
 	// hold two of these live at once. N is bounded by the widest band times M (176).
 	pvqY     []int32 // y
 	pvqSignx []int   // signx
@@ -201,4 +216,17 @@ type scratch struct {
 	decCollapseMasks []byte  // :1487 collapse_masks, C*nbEBands
 	decFreq          []int32 // :432  celt_synthesis freq, N
 	decDeemph        []int32 // :335  deemphasis scratch,  N (downsample>1 only)
+
+	// PLC (packet-loss concealment) working buffers: celtDecodeLost (celt_decode_lost)
+	// and the two helpers it calls, celtPlcPitchSearch (celt_plc_pitch_search) and
+	// foldPrefilter (prefilter_and_fold). Reached only on a lost frame, so they are
+	// never live while the normal-decode buffers above are, and they never carry data
+	// a later frame reads. The noise-PLC spectrum reuses decX (same C*N buffer, same
+	// celt_synthesis read window) and the outSyn pointer array reuses the Decoder's
+	// outSynSlices, so neither needs a field here. Every buffer below writes its whole
+	// read window before any read, so none is cleared (audit in the file comment above).
+	decExcBuf     []int16 // celt_decode_lost _exc,          MAX_PERIOD+CELT_LPC_ORDER
+	decFirTmp     []int16 // celt_decode_lost fir_tmp,       exc_length
+	decLpPitchBuf []int16 // celt_plc_pitch_search lp_pitch_buf, DECODE_BUFFER_SIZE>>1
+	decEtmp       []int32 // prefilter_and_fold etmp,        overlap
 }
