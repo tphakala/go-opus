@@ -179,6 +179,13 @@ type OpusDecoder struct {
 	lastPacketDuration int
 
 	rangeFinal uint32
+
+	// Per-packet scratch for packet.ParseInto, so opusDecodeNative parses without
+	// allocating (C parses into a stack opus_packet). pktFrames backs pkt.Frames;
+	// both are overwritten on every parse and carry nothing across calls, so a reset
+	// need not touch them. Not for concurrent use, like the decoder that owns them.
+	pkt       packet.Packet
+	pktFrames [packet.MaxFrames][]byte
 }
 
 // NewDecoder is opus_decoder_create + opus_decoder_init (opus_decoder.c:135-217):
@@ -727,10 +734,13 @@ func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, dec
 	packetFrameSize := opusPacketGetSamplesPerFrame(data[0], int(st.Fs))
 	packetStreamChannels := opusPacketGetNbChannels(data[0])
 
-	p, err := packet.Parse(data)
-	if err != nil {
+	// Parse into decoder-held storage (no per-packet allocation). The recursive
+	// opusDecodeNative calls on the FEC/PLC path below always pass data==nil and
+	// return before reaching here, so they never clobber st.pkt while it is live.
+	if err := packet.ParseInto(data, &st.pkt, &st.pktFrames); err != nil {
 		return opusInvalidPacket
 	}
+	p := &st.pkt
 	count := len(p.Frames)
 
 	if decodeFec != 0 {
