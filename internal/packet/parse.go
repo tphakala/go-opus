@@ -102,7 +102,7 @@ func parse(data []byte, selfDelimited bool) (*Packet, error) {
 // Both the allocating Parse and the zero-allocation ParseInto funnel through here.
 func (p *parser) fillPacket(data []byte, dst *Packet) error {
 	pos := p.pos
-	for i := 0; i < p.count; i++ {
+	for i := range p.count {
 		sz := p.sizes[i]
 		if sz < 0 || pos+sz > len(data) {
 			return ErrInvalidPacket
