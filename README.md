@@ -193,13 +193,20 @@ input, prints both caveats, and skips any comparator that is not installed.
 
 ## Packages
 
-- `opus` - the raw packet codec: an `Encoder` and a `Decoder`, operating on Opus
+- `opus`: the raw packet codec, an `Encoder` and a `Decoder` operating on Opus
   packets and interleaved 16-bit PCM.
-- `oggopus` - the RFC 7845 Ogg Opus container, an io-based streaming reader and
+- `oggopus`: the RFC 7845 Ogg Opus container, an io-based streaming reader and
   writer whose page granules are written inline, so the output duration is
   correct even on a non-seekable sink. The writer's pre-skip and end trim are
   checked by decoding an impulse back to the exact sample it went in at, and the
   output is validated against ffmpeg rather than only against our own reader.
+- `pcm`: a thin facade over `oggopus` that presents the codec under the uniform
+  `<module>/pcm` import path, matching
+  [go-flac](https://github.com/tphakala/go-flac)'s and
+  [go-aac](https://github.com/tphakala/go-aac)'s `pcm` packages so a consumer
+  that wraps all three behind one codec interface swaps only the import path. Its
+  types are aliases of the `oggopus` types, so the two packages interoperate
+  without conversion.
 
 The public API follows the conventions of its sibling project
 [go-flac](https://github.com/tphakala/go-flac).

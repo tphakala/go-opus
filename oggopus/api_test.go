@@ -198,3 +198,33 @@ func TestDecoderRejectsGarbage(t *testing.T) {
 		t.Fatalf("NewDecoder accepted empty stream")
 	}
 }
+
+// TestNilSinkAndSourceRejected pins that the public constructors reject a nil
+// io.Writer or io.Reader with an error rather than panicking, the contract the
+// pcm facade (and the go-flac/go-aac siblings) rely on. Config validation still
+// takes precedence over the nil-writer check, so a bad config reports
+// ErrInvalidConfig even when the writer is also nil.
+func TestNilSinkAndSourceRejected(t *testing.T) {
+	valid := Config{SampleRate: 48000, Channels: 1}
+
+	if _, err := NewEncoder(nil, valid); err == nil {
+		t.Fatal("NewEncoder(nil, valid): got nil error, want a nil-writer error")
+	}
+	if err := (&Encoder{}).Reset(nil, valid); err == nil {
+		t.Fatal("Encoder.Reset(nil, valid): got nil error, want a nil-writer error")
+	}
+	if err := EncodeInterleaved(nil, valid, make([]byte, 4)); err == nil {
+		t.Fatal("EncodeInterleaved(nil, valid, ...): got nil error, want a nil-writer error")
+	}
+	if _, err := NewDecoder(nil); err == nil {
+		t.Fatal("NewDecoder(nil): got nil error, want a nil-reader error")
+	}
+
+	// A bad config is reported before the nil-writer check on both entry points.
+	if _, err := NewEncoder(nil, Config{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("NewEncoder(nil, bad cfg): got %v, want ErrInvalidConfig", err)
+	}
+	if err := EncodeInterleaved(nil, Config{}, nil); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("EncodeInterleaved(nil, bad cfg): got %v, want ErrInvalidConfig", err)
+	}
+}
