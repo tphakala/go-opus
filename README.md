@@ -65,9 +65,9 @@ phase, behind the scalar function signatures).
 
 ## Performance
 
-go-opus encodes at **1.6x to 2.1x the time of the equivalent C**, decodes at
-**1.5x to 1.8x**, and **allocates nothing per frame**. That is the honest
-headline. There is more on the table.
+go-opus encodes at **1.6x to 2.0x the time of the equivalent C**, decodes at
+**1.4x to 1.5x**, and **allocates nothing per frame on either path**. That is
+the honest headline. There is more on the table.
 
 The C it is measured against is the pinned v1.6.1 oracle built `FIXED_POINT +
 DISABLE_FLOAT_API`, with libopus's hand-written NEON and SSE kernels switched
@@ -85,17 +85,24 @@ runs, so it doubles as a drift control.
 
 | Frame | Go before | Go now | C | Go/C before | **Go/C now** | Allocs |
 | ----- | --------: | -----: | ------: | ---------: | -----------: | -----: |
-| mono 10 ms | 45.9 us | **32.6 us** | 15.5 us | 2.99x | **2.10x** | 94 → **0** |
-| mono 20 ms | 89.0 us | **62.7 us** | 30.2 us | 2.90x | **2.08x** | 151 → **0** |
-| stereo 10 ms | 108.5 us | **88.2 us** | 54.2 us | 2.02x | **1.63x** | 256 → **0** |
-| stereo 20 ms | 212.5 us | **181.1 us** | 109.5 us | 2.04x | **1.65x** | 501 → **0** |
+| mono 10 ms | 45.9 us | **31.0 us** | 15.3 us | 2.99x | **2.03x** | 94 → **0** |
+| mono 20 ms | 89.0 us | **59.6 us** | 30.4 us | 2.90x | **1.96x** | 151 → **0** |
+| stereo 10 ms | 108.5 us | **85.8 us** | 52.0 us | 2.02x | **1.65x** | 256 → **0** |
+| stereo 20 ms | 212.5 us | **173.7 us** | 101.8 us | 2.04x | **1.71x** | 501 → **0** |
 
-**Decode** is unchanged (the optimizations so far are encoder-side): 1.5x to
-1.8x, and its allocations are partly reduced as a side effect of the shared
-kernels.
+**Decode**
 
-The encoder runs at roughly **110x realtime** for stereo 20 ms frames and the
-decoder at **400x**, so an hour of audio encodes in about half a minute.
+Pooling the decoder's per-frame scratch took decode from its old 1.5x-1.8x to:
+
+| Frame | Go | C | **Go/C** | Allocs |
+| ----- | --: | ------: | -------: | -----: |
+| mono 10 ms | 10.9 us | 7.5 us | **1.45x** | 32 → **0** |
+| mono 20 ms | 23.0 us | 16.9 us | **1.36x** | 46 → **0** |
+| stereo 10 ms | 21.7 us | 14.3 us | **1.52x** | 43 → **0** |
+| stereo 20 ms | 45.1 us | 31.8 us | **1.42x** | 70 → **0** |
+
+The encoder runs at roughly **115x realtime** for stereo 20 ms frames and the
+decoder at **440x**, so an hour of audio encodes in about half a minute.
 
 ### Where the gap comes from, and what closed it
 
@@ -112,7 +119,7 @@ that settles it is `quant_partition` — the one hot kernel clang did *not*
 vectorize, and the one kernel where **Go is faster than C**. Go's code
 generation is not the problem. Its lack of vectorization is.
 
-Three things closed most of it:
+Four things closed most of it:
 
 - **A transliteration bug.** `celt_pitch_xcorr` had been ported from the `#if 0`
   branch of the C — the one libopus explicitly disables — instead of the live,
@@ -122,10 +129,18 @@ Three things closed most of it:
   can be bit-exact — wrapping two's-complement addition is associative, so lane
   grouping cannot change the result — which is a property float SIMD does not
   have, and a large part of why this codec is fixed-point.
-- **Pooling the per-frame scratch**, taking 501 allocations per stereo frame to
-  zero. Worth less time than it looks (allocation was 15% of the gap, and GC
-  ~0%), but 145 KB of garbage per frame is real pressure on a *host*
-  application's collector, which a benchmark loop cannot see.
+- **Pooling the per-frame scratch on both paths**, taking 501 allocations per
+  stereo encode frame and 70 per decode frame to zero. Worth less time than it
+  looks on encode (allocation was 15% of the gap, and GC ~0%) but 5-10% on
+  decode, and 145 KB of garbage per encode frame is real pressure on a *host*
+  application's collector, which a benchmark loop cannot see. The contract that
+  makes pooling bit-exact (every buffer written before it is read) is enforced
+  on every CI run by a build-tagged allocator that poisons reused buffers.
+- **Bounds-check elimination in the four hottest scalar kernels** (the PVQ
+  search, `exp_rotation`, the norm inner product, `haar1`): overlapping window
+  slices let the compiler prove the hot loops in range, removing 2-4 checks per
+  element. Worth 4-5% on stereo encode. Whole-program bounds checks are bounded
+  at 11% of the gap, so the remaining long tail is tracked but not urgent.
 
 What remains is the rest of that 72%: the fused, Opus-specific kernels the
 profile ranks next — the PVQ search, `exp_rotation`, the MDCT butterflies, the
