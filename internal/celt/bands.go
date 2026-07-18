@@ -971,7 +971,7 @@ func quantPartition(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM in
 			if encode != 0 {
 				cm = algQuant(X, N, K, spread, B, ctx.enc, gain, ctx.resynth, ctx.sc)
 			} else {
-				cm = AlgUnquant(X, N, K, spread, B, dec, gain)
+				cm = algUnquant(X, N, K, spread, B, dec, gain, ctx.sc)
 			}
 		} else {
 			// If there's no pulse, fill the band anyway.

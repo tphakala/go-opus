@@ -167,7 +167,9 @@ type OpusDecoder struct {
 	decodeGain int
 	complexity int
 
-	/* Everything beyond this point gets cleared on a reset */
+	/* Everything beyond this point gets cleared on a reset, except pkt and
+	   pktFrames at the end: those are overwritten on every parse (see their
+	   comment), so ResetState leaves them alone. */
 	/* OPUS_DECODER_RESET_START stream_channels */
 	streamChannels int
 
@@ -179,6 +181,13 @@ type OpusDecoder struct {
 	lastPacketDuration int
 
 	rangeFinal uint32
+
+	// Per-packet scratch for packet.ParseInto, so opusDecodeNative parses without
+	// allocating (C parses into a stack opus_packet). pktFrames backs pkt.Frames;
+	// both are overwritten on every parse and carry nothing across calls, so a reset
+	// need not touch them. Not for concurrent use, like the decoder that owns them.
+	pkt       packet.Packet
+	pktFrames [packet.MaxFrames][]byte
 }
 
 // NewDecoder is opus_decoder_create + opus_decoder_init (opus_decoder.c:135-217):
@@ -727,11 +736,22 @@ func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, dec
 	packetFrameSize := opusPacketGetSamplesPerFrame(data[0], int(st.Fs))
 	packetStreamChannels := opusPacketGetNbChannels(data[0])
 
-	p, err := packet.Parse(data)
-	if err != nil {
+	// Parse into decoder-held storage (no per-packet allocation). The recursive
+	// opusDecodeNative calls on the FEC/PLC path below always pass data==nil and
+	// return before reaching here, so they never clobber st.pkt while it is live.
+	if err := packet.ParseInto(data, &st.pkt, &st.pktFrames); err != nil {
 		return opusInvalidPacket
 	}
+	p := &st.pkt
 	count := len(p.Frames)
+	// The frame slices alias the caller's data buffer and are consumed entirely
+	// within this call; drop the references on the way out so an idle decoder
+	// does not pin the last packet's backing buffer until the next parse.
+	defer func() {
+		clear(st.pktFrames[:count])
+		st.pkt.Frames = nil
+		st.pkt.Padding = nil
+	}()
 
 	if decodeFec != 0 {
 		/* If no FEC can be present, run the PLC (recursive call) */

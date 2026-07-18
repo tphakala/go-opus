@@ -64,6 +64,8 @@ jobs:
         run: go mod download
       - name: Run tests
         run: go test -race -timeout 30m ./...
+      - name: Run codec tests with the scratch poison harness
+        run: go test -tags poison -count=1 -timeout 30m ./internal/celt/... ./internal/packet/... ./opus/...
       - name: Run tests with coverage
         if: matrix.coverage
         run: go test -timeout 30m -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
@@ -112,7 +114,7 @@ jobs:
       - name: Run differential harness
         env:
           CGO_ENABLED: '1'
-        run: go test -tags refc -timeout 30m ./internal/reftest/...
+        run: go test -tags "refc poison" -timeout 30m ./internal/reftest/...
 
   gate-long:
     name: Phase 4 gate, tier B (full-length corpus)

@@ -46,6 +46,29 @@ func ParseSelfDelimited(data []byte) (*Packet, error) {
 	return parse(data, true)
 }
 
+// ParseInto decodes a standard (non-self-delimited) Opus packet into
+// caller-provided storage, allocating nothing: dst and frames are owned by the
+// caller. On success dst.Frames is set to frames[:count], with each entry
+// aliasing data (no copy), and dst.TOC / dst.Padding / dst.Consumed are filled.
+// It is the zero-allocation form of Parse for the steady-state decode path (the
+// multi-frame loop in internal/opusdec). frames must stay live for as long as the
+// caller reads dst.Frames. On error dst is left in an unspecified partial state
+// and must not be read. It returns ErrInvalidPacket for any malformed input and
+// never panics.
+func ParseInto(data []byte, dst *Packet, frames *[MaxFrames][]byte) error {
+	p := parser{data: data}
+	if err := p.run(false); err != nil {
+		return err
+	}
+	dst.Frames = frames[:p.count]
+	// Clear the tail so entries beyond this packet's count do not keep aliasing
+	// an earlier packet's data. The frames array outlives the call (it lives on
+	// the decoder), and without this a 2-frame packet after a 48-frame packet
+	// would pin the old packet's backing buffer through the 46 stale entries.
+	clear(frames[p.count:])
+	return p.fillPacket(data, dst)
+}
+
 // parser transliterates opus_packet_parse_impl() from libopus src/opus.c. It
 // carries the running parse state so each frame-count code can be handled by a
 // small method instead of one deeply nested function.
@@ -65,32 +88,41 @@ func parse(data []byte, selfDelimited bool) (*Packet, error) {
 	if err := p.run(selfDelimited); err != nil {
 		return nil, err
 	}
+	pkt := &Packet{Frames: make([][]byte, p.count)}
+	if err := p.fillPacket(data, pkt); err != nil {
+		return nil, err
+	}
+	return pkt, nil
+}
 
-	frames := make([][]byte, p.count)
+// fillPacket slices the decoded frames out of data into dst.Frames (which the
+// caller has already sized to p.count) and sets dst.TOC / dst.Padding /
+// dst.Consumed. It aliases data (no copy) and validates every frame length and the
+// padding against the buffer bounds, returning ErrInvalidPacket on any overflow.
+// Both the allocating Parse and the zero-allocation ParseInto funnel through here.
+func (p *parser) fillPacket(data []byte, dst *Packet) error {
 	pos := p.pos
 	for i := range p.count {
 		sz := p.sizes[i]
 		if sz < 0 || pos+sz > len(data) {
-			return nil, ErrInvalidPacket
+			return ErrInvalidPacket
 		}
-		frames[i] = data[pos : pos+sz : pos+sz]
+		dst.Frames[i] = data[pos : pos+sz : pos+sz]
 		pos += sz
 	}
 
 	var padding []byte
 	if p.pad > 0 {
 		if pos+p.pad > len(data) {
-			return nil, ErrInvalidPacket
+			return ErrInvalidPacket
 		}
 		padding = data[pos : pos+p.pad : pos+p.pad]
 	}
 
-	return &Packet{
-		TOC:      TOC{b: data[0]},
-		Frames:   frames,
-		Padding:  padding,
-		Consumed: pos + p.pad,
-	}, nil
+	dst.TOC = TOC{b: data[0]}
+	dst.Padding = padding
+	dst.Consumed = pos + p.pad
+	return nil
 }
 
 // run decodes the header and frame lengths, leaving p.pos at the first frame,

@@ -29,40 +29,44 @@ import (
 //	go test ./opus/ -run '^$' -bench . -benchmem
 //
 // ---------------------------------------------------------------------------
-// THE 0-ALLOC BASELINE IS NOT MET, AND THIS IS WHY. (measured at CP10, M4 Pro,
-// go1.26, 48 kHz, 64 kbps/channel)
+// THE 0-ALLOC BASELINE IS MET, ON BOTH PATHS. Every C `VARDECL(...)` / `ALLOC(...)`
+// in the transliterated CELT core is a VLA or alloca on the C stack (free, reclaimed
+// by the frame pop); the port first mapped each to a `make([]T, n)` on the heap. At
+// CP10 that cost 501 allocs/op for a stereo 20 ms encode and 93 for the matching
+// decode. Those are now pooled onto the Encoder and the Decoder respectively:
 //
-//	BenchmarkEncode/ch1/20ms      91 us/op    64 kB/op   151 allocs/op    220x realtime
-//	BenchmarkEncode/ch2/20ms     221 us/op   145 kB/op   501 allocs/op     90x realtime
-//	BenchmarkDecode/ch2/20ms      54 us/op    38 kB/op    93 allocs/op    370x realtime
+//	PR #29 (issue #21): the encode path. op_pvq_search's y/iy/signx, alg_quant's y,
+//	                    the Hadamard tmp, and celt_encode_with_ec's own frame-sized
+//	                    VARDECLs became fields on the Encoder's scratch.
+//	This change (issue #5): the decode path. alg_unquant's iy, celt_decode_with_ec's
+//	                    tf_res/cap/offsets/fine_quant/pulses/fine_priority/X/collapse_masks,
+//	                    celt_synthesis's freq, clt_mdct_backward's f2, deemphasis's
+//	                    scratch, the decode_mem/out_syn pointer arrays, and the packet
+//	                    parse frame table all became decoder-held pooled storage.
 //
-// The public API contributes NONE of it: Encode writes into the caller's []byte and
-// Decode into the caller's []int16, and the wrappers allocate nothing per call. Every
-// one of those allocations is a C `VARDECL(...)` / `ALLOC(...)` scratch array inside
-// the transliterated CELT core, which in C is a VLA or an alloca on the stack (free,
-// and reclaimed by the frame pop) and in the Go port is a `make([]T, n)` on the heap.
-// An alloc profile of ch2/20ms attributes them to exactly those sites:
+// BenchmarkEncode and BenchmarkDecode now report 0 allocs/op on every config.
+// BenchmarkDecode makes one untimed warm-up pass over its packet corpus so the
+// pools' first-use growth lands outside the timed loop and 0 B/op holds at any
+// -benchtime. BenchmarkEncode deliberately has no warm-up pass (it would settle
+// the VBR reservoir into a different trajectory and shift ns/op by several
+// percent, redefining the published numbers), so at a tiny explicit -benchtime
+// it can show a residual B/op (up to a couple of kB/op at -benchtime=1x, gone at
+// realistic N) from first-use pool growth; a few encode scratch sizes also depend
+// on cross-frame state and keep growing briefly. The
+// public API never allocated (Encode writes the caller's []byte, Decode the caller's
+// []int16). The pool is one buffer per codec instance, sized by (mode, channels,
+// frameSize), so after the first largest frame nothing reallocates. See
+// internal/celt/scratch.go.
 //
-//	op_pvq_search (celt/vq.c)              55% of objects   (y, iy, signx)
-//	alg_quant / alg_unquant                11%              (y)
-//	de/interleave_hadamard                 19%              (tmp)
-//	celt_encode_with_ec's own VARDECLs      4% of objects, 20% of bytes
-//	run_prefilter, clt_mdct_forward, quant_all_bands, tf_analysis: the rest
-//
-// This is the deferral plan.md made deliberately: the transliteration keeps the C's
-// shape so the port stays diffable against libopus v1.6.1, and hoisting these into
-// per-encoder scratch owned by the Encoder struct changes the shape of every function
-// that declares one. It is a PERF-PHASE change, not a CP10 one, and doing it here
-// would trade the property the whole project is built on (bit-exactness, verified by
-// diffing against the C) for a number nobody is yet blocked by: at 90x realtime for
-// 20 ms stereo, an hour of audio encodes in 40 seconds.
-//
-// NOTED FOR THE PERF PHASE, in the order the profile ranks them: op_pvq_search's three
-// arrays, alg_quant's y, the Hadamard tmp, and celt_encode_with_ec's frame-sized
-// VARDECLs. All four are per-call scratch whose size is bounded by the mode, so all
-// four can become fields on the Encoder/Decoder struct with no change to the
-// arithmetic, which is what keeps the change safe: the packets must not move by a
-// single byte, and the differential gate is what will say so.
+// THE ZEROING CONTRACT is what keeps this bit-exact. A C stack ALLOC is uninitialised,
+// a Go make() zeroes, and a pooled buffer carries the previous frame's values. Every
+// pooled site was audited to write its entire read window before reading it (so all
+// three collapse to the same behaviour); the handful of encode sites that do not are
+// cleared explicitly. scratch.go documents the audit per site, and a build-tagged
+// poison pass (`go test -tags poison`, and `-tags "refc poison"` against the C oracle)
+// stamps every window with 0x5A to prove no site reads before it writes. The
+// differential and conformance suites are the judge: the packets and the decoded PCM
+// must not move by a single byte, and they do not.
 // ---------------------------------------------------------------------------
 
 // benchRate is the coding rate the benchmarks run at. 48 kHz is the rate the whole
@@ -127,6 +131,11 @@ func BenchmarkEncode(b *testing.B) {
 				frames := benchPCM(frameSize, ch)
 				buf := make([]byte, 1500)
 
+				// No warm-up pass here, deliberately: encoding the corpus once first
+				// settles the VBR reservoir into a different trajectory and moves
+				// ns/op by several percent, which would redefine the published encode
+				// numbers. The cost is that a tiny explicit -benchtime can show a
+				// small residual B/op from first-use pool growth; see the doc block.
 				b.ReportAllocs()
 				b.SetBytes(int64(frameSize * ch * 2)) // input PCM bytes per op
 				i := 0
@@ -175,6 +184,13 @@ func BenchmarkDecode(b *testing.B) {
 					b.Fatalf("NewDecoder: %v", err)
 				}
 				pcm := make([]int16, frameSize*ch)
+
+				// Untimed full-corpus pool warm-up; see BenchmarkEncode.
+				for _, p := range pkts {
+					if _, err := dec.Decode(p, pcm); err != nil {
+						b.Fatalf("Decode: %v", err)
+					}
+				}
 
 				b.ReportAllocs()
 				b.SetBytes(int64(frameSize * ch * 2)) // output PCM bytes per op
