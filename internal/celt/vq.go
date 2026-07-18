@@ -77,22 +77,39 @@ func celtInnerProdNorm(x, y []int32, length int) int32 {
 func expRotation1(X []int32, length, stride int, c, s int16) {
 	ms := int16(fixedmath.NEG16(s))
 	normScaledown(X, length, normShift-14)
-	xp := 0
-	for i := 0; i < length-stride; i++ {
-		x1 := X[xp]
-		x2 := X[xp+stride]
-		X[xp+stride] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x2+int32(s)*x1, 15)))
-		X[xp] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x1+int32(ms)*x2, 15)))
-		xp++
+
+	// Both passes below touch the pair (X[i], X[i+stride]); length<=stride makes
+	// the original forward loop (i<length-stride) empty, and by extension the
+	// original backward loop too (its start length-2*stride-1 is then also
+	// negative), so this guard reproduces both no-ops without slicing on a
+	// negative bound.
+	if length > stride {
+		// Forward pass, i from 0 while i<length-stride. The overlapping windows
+		// a, b give a[i]==X[i] and b[i]==X[i+stride] for i in [0,length-stride),
+		// so walking a by range drops the per-iteration check entirely.
+		a := X[: length-stride : length]
+		b := X[stride:length]
+		for i := range a {
+			x1 := a[i]
+			x2 := b[i]
+			b[i] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x2+int32(s)*x1, 15)))
+			a[i] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x1+int32(ms)*x2, 15)))
+		}
+
+		// Backward pass, i from length-2*stride-1 down to 0: the same pair shape
+		// over a shorter prefix. Re-cap a and b to that prefix so BCE can prove
+		// this loop too.
+		if n2 := length - 2*stride; n2 > 0 {
+			a2, b2 := a[:n2], b[:n2]
+			for i := n2 - 1; i >= 0; i-- {
+				x1 := a2[i]
+				x2 := b2[i]
+				b2[i] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x2+int32(s)*x1, 15)))
+				a2[i] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x1+int32(ms)*x2, 15)))
+			}
+		}
 	}
-	xp = length - 2*stride - 1
-	for i := length - 2*stride - 1; i >= 0; i-- {
-		x1 := X[xp]
-		x2 := X[xp+stride]
-		X[xp+stride] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x2+int32(s)*x1, 15)))
-		X[xp] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x1+int32(ms)*x2, 15)))
-		xp--
-	}
+
 	normScaleup(X, length, normShift-14)
 }
 
@@ -218,8 +235,18 @@ func RenormaliseVector(X []int32, n int, gain int32) {
 // widening (no int16 truncation), so those sites use the int32 value directly.
 // The ENABLE_QEXT op_pvq_search_N2 / _extra refine variants are excluded.
 func opPvqSearch(X []int32, iy []int32, K, N int, sc *scratch) int16 {
+	// X and iy are caller-owned windows (algQuant passes its own X parameter and
+	// an alloc(&sc.pvqIy, N) slice); re-slicing both to the exact length N here,
+	// where N is otherwise opaque to this function's compiled body, is what lets
+	// BCE prove the N-bounded loops below in range. y and signx come back from
+	// alloc() through a pointer indirection, which loses the same length fact,
+	// so they get the same treatment.
+	X = X[:N]
+	iy = iy[:N]
 	y := alloc(&sc.pvqY, N)         // VARDECL(celt_norm, y)
 	signx := alloc(&sc.pvqSignx, N) // VARDECL(int, signx)
+	y = y[:N]
+	signx = signx[:N]
 	var i, j int
 	var pulsesLeft int
 	var sum int32 // opus_val32

@@ -555,16 +555,35 @@ func interleaveHadamard(X []int32, N0, stride, hadamard int, sc *scratch) {
 }
 
 // haar1 is haar1 (bands.c:623): the in-place length-2 Hadamard butterfly over
-// stride-interleaved pairs.
+// stride-interleaved pairs. For a given j, the stride evens (index stride*2*j+i,
+// i in [0,stride)) sit immediately next to the stride odds (index
+// stride*(2*j+1)+i), so together they are one contiguous 2*stride comb at
+// offset stride*2*j. Walking j as a shrinking window over that comb, and i as a
+// plain range over the two halves, addresses every element the original
+// double loop touches with the same values, just grouped by comb instead of by
+// i; the two halves of a comb never depend on any other comb, so which comb is
+// processed first cannot change the result.
 func haar1(X []int32, N0, stride int) {
-	N0 >>= 1
-	for i := 0; i < stride; i++ {
-		for j := 0; j < N0; j++ {
-			tmp1 := fixedmath.MULT32_32_Q31(sqrt2Inv31, X[stride*2*j+i])
-			tmp2 := fixedmath.MULT32_32_Q31(sqrt2Inv31, X[stride*(2*j+1)+i])
-			X[stride*2*j+i] = fixedmath.ADD32(tmp1, tmp2)
-			X[stride*(2*j+1)+i] = fixedmath.SUB32(tmp1, tmp2)
+	m := N0 >> 1
+	// stride<=0 makes the original outer loop (i<stride) empty, and m<=0 makes
+	// the original inner loop (j<N0>>1) empty; either way nothing is touched.
+	if stride <= 0 || m <= 0 {
+		return
+	}
+	// haar1 only ever reaches the first m*stride*2 elements of X (m combs, each
+	// 2*stride wide); re-slicing to that exact bound is what lets BCE prove the
+	// per-comb windows below in range.
+	rest := X[:m*stride*2]
+	for len(rest) >= 2*stride {
+		evens := rest[:stride]
+		odds := rest[stride:][:stride]
+		for i := range evens {
+			tmp1 := fixedmath.MULT32_32_Q31(sqrt2Inv31, evens[i])
+			tmp2 := fixedmath.MULT32_32_Q31(sqrt2Inv31, odds[i])
+			evens[i] = fixedmath.ADD32(tmp1, tmp2)
+			odds[i] = fixedmath.SUB32(tmp1, tmp2)
 		}
+		rest = rest[2*stride:]
 	}
 }
 
