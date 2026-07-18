@@ -44,13 +44,15 @@ import (
 //	                    scratch, the decode_mem/out_syn pointer arrays, and the packet
 //	                    parse frame table all became decoder-held pooled storage.
 //
-// BenchmarkEncode and BenchmarkDecode now report 0 allocs/op on every config. Each
-// benchmark makes one untimed warm-up pass over its corpus so the pools' first-use
-// growth lands outside the timed loop; decode then reads 0 B/op at any -benchtime,
-// while encode can still show a residual (up to a couple of kB/op at -benchtime=1x,
-// gone at realistic N) because a few encode scratch sizes depend on cross-frame
-// state (the VBR reservoir shifts band allocations across corpus cycles) and keep
-// growing briefly past the warm-up pass. The
+// BenchmarkEncode and BenchmarkDecode now report 0 allocs/op on every config.
+// BenchmarkDecode makes one untimed warm-up pass over its packet corpus so the
+// pools' first-use growth lands outside the timed loop and 0 B/op holds at any
+// -benchtime. BenchmarkEncode deliberately has no warm-up pass (it would settle
+// the VBR reservoir into a different trajectory and shift ns/op by several
+// percent, redefining the published numbers), so at a tiny explicit -benchtime
+// it can show a residual B/op (up to a couple of kB/op at -benchtime=1x, gone at
+// realistic N) from first-use pool growth; a few encode scratch sizes also depend
+// on cross-frame state and keep growing briefly. The
 // public API never allocated (Encode writes the caller's []byte, Decode the caller's
 // []int16). The pool is one buffer per codec instance, sized by (mode, channels,
 // frameSize), so after the first largest frame nothing reallocates. See
@@ -129,17 +131,11 @@ func BenchmarkEncode(b *testing.B) {
 				frames := benchPCM(frameSize, ch)
 				buf := make([]byte, 1500)
 
-				// One untimed pass over the whole corpus grows the pools to steady
-				// state, so allocs/op reads 0 at any -benchtime instead of only when
-				// a large N dilutes the first-use growth to zero. The full pass
-				// matters: a few scratch sites are reached only on content-dependent
-				// paths (transients, the prefilter), not by every frame.
-				for _, f := range frames {
-					if _, err := enc.Encode(f, buf); err != nil {
-						b.Fatalf("Encode: %v", err)
-					}
-				}
-
+				// No warm-up pass here, deliberately: encoding the corpus once first
+				// settles the VBR reservoir into a different trajectory and moves
+				// ns/op by several percent, which would redefine the published encode
+				// numbers. The cost is that a tiny explicit -benchtime can show a
+				// small residual B/op from first-use pool growth; see the doc block.
 				b.ReportAllocs()
 				b.SetBytes(int64(frameSize * ch * 2)) // input PCM bytes per op
 				i := 0
