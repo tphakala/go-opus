@@ -94,6 +94,12 @@ func (e *Encoder) reset(w io.Writer, cfg *Config) error {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
+	// Reject a nil sink after validation, so NewEncoder and EncodeInterleaved (which
+	// validates before it ever calls reset) both report a bad config first and agree
+	// on precedence. Without this, writing the header pages to a nil io.Writer panics.
+	if w == nil {
+		return errNilWriter
+	}
 	e.w = w
 	e.cfg = *cfg
 	e.frameLen = cfg.SampleRate / (1000 / frameDurationMS)

@@ -54,6 +54,11 @@ type Decoder struct {
 // returns a Decoder positioned at the first audio packet. Header parsing is
 // real; the PCM output path is stubbed at the codec seam.
 func NewDecoder(r io.Reader) (*Decoder, error) {
+	// Reject a nil source up front; otherwise the first container read dereferences
+	// a nil io.Reader and panics.
+	if r == nil {
+		return nil, errNilReader
+	}
 	cr, err := newContainerReader(r)
 	if err != nil {
 		return nil, err

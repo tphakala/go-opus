@@ -22,3 +22,14 @@ var (
 // unexported because it reports a programming error rather than a condition a
 // caller can act on. In-package tests assert against it directly.
 var errUninitialized = errors.New("oggopus: encoder or decoder is not initialized")
+
+// errNilWriter and errNilReader report a nil sink or source passed to the public
+// constructors. They are plain errors, not exported sentinels: a nil io.Writer or
+// io.Reader is a programming error, not a condition a caller branches on (matching
+// go-flac's and go-aac's pcm packages). They replace the panic that the first
+// header-page write (nil io.Writer) or the first container read (nil io.Reader)
+// would otherwise raise, so a caller that passes nil gets a clean error instead.
+var (
+	errNilWriter = errors.New("oggopus: nil writer")
+	errNilReader = errors.New("oggopus: nil reader")
+)
