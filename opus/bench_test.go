@@ -47,9 +47,10 @@ import (
 // BenchmarkEncode and BenchmarkDecode now report 0 allocs/op on every config. Each
 // benchmark makes one untimed warm-up pass over its corpus so the pools' first-use
 // growth lands outside the timed loop; decode then reads 0 B/op at any -benchtime,
-// while encode can still show a few hundred B/op at a tiny explicit -benchtime
-// because some encode scratch sizes depend on cross-frame state (the VBR reservoir
-// shifts band allocations across corpus cycles) and keep growing briefly. The
+// while encode can still show a residual (up to a couple of kB/op at -benchtime=1x,
+// gone at realistic N) because a few encode scratch sizes depend on cross-frame
+// state (the VBR reservoir shifts band allocations across corpus cycles) and keep
+// growing briefly past the warm-up pass. The
 // public API never allocated (Encode writes the caller's []byte, Decode the caller's
 // []int16). The pool is one buffer per codec instance, sized by (mode, channels,
 // frameSize), so after the first largest frame nothing reallocates. See

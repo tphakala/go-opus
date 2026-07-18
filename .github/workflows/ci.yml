@@ -114,7 +114,7 @@ jobs:
       - name: Run differential harness
         env:
           CGO_ENABLED: '1'
-        run: go test -tags refc -timeout 30m ./internal/reftest/...
+        run: go test -tags "refc poison" -timeout 30m ./internal/reftest/...
 
   gate-long:
     name: Phase 4 gate, tier B (full-length corpus)

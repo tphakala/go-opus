@@ -10,7 +10,7 @@
 // path ALSO draws on fields declared in the shared-function groups below, because
 // the declaring C function runs on both sides: norm and hadamardTmp (quant_all_bands),
 // bits1/bits2/thresh/trimOffset (clt_compute_allocation), and mdctF2 (the MDCT).
-// Those six are part of the decode zeroing audit exactly like the dec* fields.
+// All of them are part of the decode zeroing audit exactly like the dec* fields.
 //
 // THE ZEROING CONTRACT: the one thing that can silently break bit-exactness here.
 // Three behaviours must not be confused:
