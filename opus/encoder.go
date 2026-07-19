@@ -272,6 +272,17 @@ func (e *Encoder) checkFrameSize(frameSize int) error {
 // the difference.
 func (e *Encoder) Lookahead() int { return e.enc.Lookahead() }
 
+// PreSkip returns the encoder pre-skip in samples at 48 kHz: the value a
+// container writes into the Ogg OpusHead or the MP4 dOps box. RFC 7845 defines
+// the pre-skip at 48 kHz regardless of the coding rate, so this scales Lookahead
+// accordingly, PreSkip = Lookahead() * 48000 / SampleRate. Both terms are
+// proportional to the sample rate and divide exactly, so the result is 312 at
+// every rate this encoder accepts. Use this, not Lookahead, to fill a container
+// header; Lookahead returns the unscaled coding-rate delay (OPUS_GET_LOOKAHEAD),
+// and conflating the two misaligns a decoded stream by the difference. This is
+// the encode-side counterpart of oggopus.Info.PreSkip on the decode side.
+func (e *Encoder) PreSkip() int { return e.Lookahead() * 48000 / e.sampleRate }
+
 // FinalRange returns the range-coder state after the last encoded packet
 // (OPUS_GET_FINAL_RANGE). It is the strong per-packet bit-exactness check: a
 // conformant decoder that consumes the packet ends on the same value, and the

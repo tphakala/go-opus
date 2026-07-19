@@ -437,6 +437,29 @@ func TestEncodeLookahead(t *testing.T) {
 	}
 }
 
+// TestEncodePreSkip pins the container-facing pre-skip accessor. PreSkip is the
+// value a muxer writes into the Ogg OpusHead or the MP4 dOps box, so it must be
+// the 48 kHz-domain figure (312 at every accepted rate), not the raw
+// coding-rate Lookahead, and it must equal the scaling the doc promises.
+func TestEncodePreSkip(t *testing.T) {
+	for _, fs := range encRates {
+		for _, ch := range []int{1, 2} {
+			e, err := NewEncoder(EncoderConfig{SampleRate: fs, Channels: ch})
+			if err != nil {
+				t.Fatalf("NewEncoder(fs=%d): %v", fs, err)
+			}
+			if got := e.PreSkip(); got != 312 {
+				t.Errorf("fs=%d: PreSkip() = %d, want 312 (the 48 kHz pre-skip)", fs, got)
+			}
+			// PreSkip must be exactly Lookahead scaled to 48 kHz, so the two never
+			// drift apart if the lookahead math changes.
+			if got, want := e.PreSkip(), e.Lookahead()*48000/fs; got != want {
+				t.Errorf("fs=%d: PreSkip() = %d, want Lookahead()*48000/fs = %d", fs, got, want)
+			}
+		}
+	}
+}
+
 // TestEncodePacketParses closes the loop inside this package: what Encode returns
 // must be a packet this package's own ParseTOC / PacketFrames / PacketDuration
 // accept, and that its own Decoder decodes to the frame length that went in.
