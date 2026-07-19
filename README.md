@@ -143,8 +143,11 @@ Four things closed most of it:
   at 11% of the gap, so the remaining long tail is tracked but not urgent.
 
 What remains is the rest of that 72%: the fused, Opus-specific kernels the
-profile ranks next: the PVQ search, `exp_rotation`, the MDCT butterflies, the
-comb filter.
+profile ranks next. The MDCT/FFT radix butterflies are vectorized (via the
+`tphakala/simd` `cint` kernels), and their strided twiddle gather is precomputed
+at plan time rather than looked up through a process-global map, so the ones
+still on the list are the PVQ search, `exp_rotation`, the comb filter, and the
+spreading decision.
 
 Reproduce with:
 
