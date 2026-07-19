@@ -67,11 +67,15 @@ func benchBfly3(b *testing.B, useCint bool, fstride, m, N, mm int) {
 	golden := make([]kissFFTCpx, n)
 	fillCpx(golden, r)
 	buf := make([]kissFFTCpx, n)
+	// The cint core takes its twiddle runs as inputs; build them once for the
+	// benched (fstride,m) the same way buildPackedTwiddles would for a real stage.
+	tw1p := packTwiddleRun(st.twiddles, fstride, m)
+	tw2p := packTwiddleRun(st.twiddles, 2*fstride, m)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		copy(buf, golden)
 		if useCint {
-			kfBfly3Cint(buf, fstride, st, m, N, mm)
+			kfBfly3Cint(buf, m, N, mm, tw1p, tw2p)
 		} else {
 			kfBfly3Scalar(buf, fstride, st, m, N, mm)
 		}
@@ -104,13 +108,19 @@ func benchBfly5(b *testing.B, useCint bool, fstride, m int) {
 	golden := make([]kissFFTCpx, n)
 	fillCpx(golden, r)
 	buf := make([]kissFFTCpx, n)
+	// The cint core takes its four twiddle runs as inputs; build them once for the
+	// benched (fstride,m) the same way buildPackedTwiddles would for a real stage.
+	tw1p := packTwiddleRun(st.twiddles, fstride, m)
+	tw2p := packTwiddleRun(st.twiddles, 2*fstride, m)
+	tw3p := packTwiddleRun(st.twiddles, 3*fstride, m)
+	tw4p := packTwiddleRun(st.twiddles, 4*fstride, m)
 	// Call the cores directly so each arm measures the intended path regardless
 	// of the production m-gate.
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		copy(buf, golden)
 		if useCint {
-			kfBfly5Cint(buf, fstride, st, m, 1, 1)
+			kfBfly5Cint(buf, m, 1, 1, tw1p, tw2p, tw3p, tw4p)
 		} else {
 			kfBfly5Scalar(buf, fstride, st, m, 1, 1)
 		}
@@ -155,11 +165,11 @@ func BenchmarkInverseMDCT_LM1(b *testing.B) { benchInverseMDCT(b, 1) }
 func BenchmarkInverseMDCT_LM0(b *testing.B) { benchInverseMDCT(b, 0) }
 
 // TestFFTCintAllocFree pins the cint FFT hot path at zero allocations per call.
-// The path is perf-motivated (stack-allocated scratch plus a sync.Map twiddle
-// cache that is warmed once per key), so a regression that escaped the scratch
-// to the heap, or that allocated on the cache path every call, would otherwise
-// pass the bit-exact oracle silently. Runs all four FFT sizes so both the cint
-// and below-crossover scalar dispatches are covered.
+// The path is perf-motivated (stack-allocated scratch plus twiddle runs precomputed
+// once at init), so a regression that escaped the scratch to the heap, or that
+// re-packed twiddles on the hot path, would otherwise pass the bit-exact oracle
+// silently. Runs all four FFT sizes so both the cint and below-crossover scalar
+// dispatches are covered.
 func TestFFTCintAllocFree(t *testing.T) {
 	for idx := 0; idx < 4; idx++ {
 		st := mode48000_960.mdct.kfft[idx]
@@ -167,10 +177,6 @@ func TestFFTCintAllocFree(t *testing.T) {
 		golden := make([]kissFFTCpx, st.nfft)
 		fillCpx(golden, r)
 		buf := make([]kissFFTCpx, st.nfft)
-		// Warm the twiddle cache so the once-per-key LoadOrStore miss is not
-		// charged against the steady-state budget measured below.
-		copy(buf, golden)
-		opusFFTImpl(st, buf, 6)
 		got := testing.AllocsPerRun(50, func() {
 			copy(buf, golden)
 			opusFFTImpl(st, buf, 6)
