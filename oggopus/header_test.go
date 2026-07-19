@@ -62,7 +62,7 @@ func TestOpusHeadRoundTrip(t *testing.T) {
 
 func TestOpusTagsRoundTrip(t *testing.T) {
 	want := opusTags{
-		vendor:   "go-opus 0.1.0-dev",
+		vendor:   "go-opus 0.1.1",
 		comments: []string{"ENCODER=go-opus", "TITLE=hello", "ARTIST=BirdNET-Go"},
 	}
 	got, err := parseOpusTags(want.marshal())

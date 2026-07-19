@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the go-opus release string, mirroring flac.Version in go-flac.
-const Version = "0.1.0-dev"
+const Version = "0.1.1"
 
 // Sentinel errors returned by the opus package, testable with errors.Is. They
 // map from the libopus OPUS_* error codes (see docs/api-design.md): OPUS_BAD_ARG
