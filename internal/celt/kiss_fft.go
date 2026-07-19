@@ -55,6 +55,16 @@ const (
 	minCintBfly5 = 48
 )
 
+// Compile-time guard: kissFFTCpx must stay exactly two adjacent int32 (8 bytes,
+// no padding) for cpxAsInt32's reinterpret to []int32 to be sound. If a future
+// field or padding (e.g. a QEXT variant) changes the size, one of these array
+// lengths leaves the [0, ...] range and the build fails loudly rather than
+// silently misreading memory. Both are [0]byte at the correct size.
+var (
+	_ [unsafe.Sizeof(kissFFTCpx{}) - 8]byte
+	_ [8 - unsafe.Sizeof(kissFFTCpx{})]byte
+)
+
 // cpxAsInt32 reinterprets a run of kissFFTCpx as the interleaved [r,i,r,i,...]
 // []int32 that the cint package operates on. kissFFTCpx is struct{r,i int32}
 // (8 bytes, no padding), so a []kissFFTCpx is bit-for-bit a []int32 of twice the
