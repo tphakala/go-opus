@@ -13,15 +13,12 @@
 // internal/reftest/oracle (plc_test.go). Type mapping (celt/arch.h):
 // opus_val16 = int16, opus_val32/celt_sig = int32.
 //
-// celt_inner_prod and xcorr_kernel are the two hot kernels and they have SIMD
-// overrides: the scalar reference lives in pitch_ref.go (compiled into every
-// build, and the live implementation on !arm64 && !amd64 via pitch_generic.go),
-// with NEON and SSE2 assembly in pitch_arm64.s / pitch_amd64.s selected by build
-// tag. No runtime dispatch is needed -- NEON is mandatory in the ARMv8 baseline
-// and PMADDWD is SSE2, which GOAMD64=v1 already requires -- so every arm64 and
-// amd64 Go target has the instructions unconditionally. The assembly is proven
-// bit-identical to the scalar reference in pitch_simd_test.go; see pitch_ref.go
-// for why reassociating a wrapping-int32 accumulation is exact.
+// celt_inner_prod and xcorr_kernel are the two hot kernels. They are backed by
+// github.com/tphakala/simd/i16 (DotProduct and XCorr) in pitch_simd.go; the
+// scalar reference lives in pitch_ref.go and is proven bit-identical to the
+// library path in pitch_simd_test.go. See pitch_ref.go for why reassociating a
+// wrapping-int32 accumulation is exact, which is what lets the library's
+// vectorized horizontal sum match the scalar loop for every input.
 //
 // celt_pitch_xcorr itself (pitch.c:230) stays in Go: it is just the driver loop
 // around xcorr_kernel and the work is all inside the kernel.
