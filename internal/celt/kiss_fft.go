@@ -20,10 +20,81 @@ package celt
 // uint32 round-trip; the S_MUL macros are the OPUS_FAST_INT64 int64 forms in
 // internal/fixedmath (docs/hard-parts.md section 4).
 
-import "github.com/tphakala/go-opus/internal/fixedmath"
+import (
+	"sync"
+	"unsafe"
+
+	"github.com/tphakala/simd/cint"
+
+	"github.com/tphakala/go-opus/internal/fixedmath"
+)
 
 // coefShift mirrors COEF_SHIFT for the non-QEXT build (celt/kiss_fft.h:52).
 const coefShift = 16
+
+// maxFFTRun bounds the largest contiguous per-block span a radix butterfly
+// vectorizes: the radix-5 stage of the nfft=480 transform has m=96 (N=1 block of
+// 96 complex). Scratch arrays sized to this live on the stack, so the cint paths
+// stay zero-allocation.
+const maxFFTRun = 96
+
+// minCintBfly3 / minCintBfly5 are the per-butterfly run-length thresholds below
+// which the scalar inner loop wins: the cint call plus scratch setup does not
+// amortize on short runs. The values are the empirical crossovers from
+// BenchmarkBfly3_* / BenchmarkBfly5_* on the arm64 NEON kernels. radix-3
+// vectorizes both C_MULs plus the add/sub/scale and crosses over near m=16
+// (-25% at m=16, +2% at m=8). radix-5 vectorizes only its four C_MULs (the large
+// ya/yb combine stays scalar and reads the results back from scratch), so it
+// needs a longer run to pay back and crosses over near m=48 (-11% at m=48, +3.5%
+// at m=24). radix-4 non-CUSTOM runs are only ever m<=8, below any crossover, so
+// it is left fully scalar.
+const (
+	minCintBfly3 = 16
+	minCintBfly5 = 48
+)
+
+// cpxAsInt32 reinterprets a run of kissFFTCpx as the interleaved [r,i,r,i,...]
+// []int32 that the cint package operates on. kissFFTCpx is struct{r,i int32}
+// (8 bytes, no padding), so a []kissFFTCpx is bit-for-bit a []int32 of twice the
+// length; this is a view, not a copy. cint's data model is exactly this layout.
+func cpxAsInt32(c []kissFFTCpx) []int32 {
+	if len(c) == 0 {
+		return nil
+	}
+	return unsafe.Slice((*int32)(unsafe.Pointer(&c[0])), 2*len(c))
+}
+
+// twKey identifies a packed twiddle run by its source table, stride and count.
+type twKey struct {
+	base   *kissTwiddleCpx
+	stride int
+	count  int
+}
+
+// packedTwiddleCache memoizes the strided-to-contiguous twiddle gathers. The
+// gather pattern is data-independent (it depends only on the static mode's
+// twiddle table, the stage stride and the run length), so each (table, stride,
+// count) tuple is packed exactly once for the process lifetime and every FFT call
+// thereafter reuses the contiguous []int16 directly.
+var packedTwiddleCache sync.Map // twKey -> []int16
+
+// packedTwiddles returns the contiguous Q15 [tr,ti,tr,ti,...] int16 slice of the
+// twiddles tw[j*stride] for j in 0..count-1, the layout cint.Mul consumes. The
+// result is cached (see packedTwiddleCache) so the strided gather runs once.
+func packedTwiddles(tw []kissTwiddleCpx, stride, count int) []int16 {
+	key := twKey{&tw[0], stride, count}
+	if v, ok := packedTwiddleCache.Load(key); ok {
+		return v.([]int16)
+	}
+	p := make([]int16, 2*count)
+	for j := 0; j < count; j++ {
+		c := tw[j*stride]
+		p[2*j] = c.r
+		p[2*j+1] = c.i
+	}
+	v, _ := packedTwiddleCache.LoadOrStore(key, p)
+	return v.([]int16)
+}
 
 // kissFFTCpx mirrors celt/kiss_fft.h kiss_fft_cpx in the FIXED_POINT build: r
 // and i are kiss_fft_scalar (opus_int32).
@@ -174,7 +245,19 @@ func kfBfly4(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
 
 // kf_bfly3 is the radix-3 butterfly. epi3.i is the fixed constant
 // -QCONST32(0.86602540f, COEF_SHIFT-1). (celt/kiss_fft.c:180)
+//
+// Small runs do not amortize the cint call and scratch-setup overhead (the
+// crossover sits near m=16 for this two-C_MUL stage, -25% at m=16, +2% at m=8),
+// so they keep the scalar inner loop. See BenchmarkBfly3_*.
 func kfBfly3(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
+	if m < minCintBfly3 {
+		kfBfly3Scalar(fout, fstride, st, m, N, mm)
+		return
+	}
+	kfBfly3Cint(fout, fstride, st, m, N, mm)
+}
+
+func kfBfly3Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
 	m2 := 2 * m
 	epi3i := int16(-fixedmath.QCONST32(0.86602540, coefShift-1))
 	for i := 0; i < N; i++ {
@@ -208,17 +291,85 @@ func kfBfly3(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
 	}
 }
 
+// kfBfly3Cint vectorizes the two C_MULs plus the add/sub/scale via cint, then
+// finishes each block with the scalar cross-lane combine. The inner k-loop
+// touches disjoint fout indices per k (pos+k, pos+m+k, pos+m2+k), and the two
+// per-k C_MUL inputs (the m- and m2-groups) are read before any combine writes
+// them, so a whole block splits cleanly into a vectorized phase and a scalar
+// cross-lane combine. The three groups are the contiguous runs fout[pos:pos+3m].
+func kfBfly3Cint(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
+	m2 := 2 * m
+	epi3i := int16(-fixedmath.QCONST32(0.86602540, coefShift-1))
+
+	tw1p := packedTwiddles(st.twiddles, fstride, m)   // twiddles[j*fstride]
+	tw2p := packedTwiddles(st.twiddles, fstride*2, m) // twiddles[j*2*fstride]
+
+	var s1a, s2a, s3a, s0a [maxFFTRun]kissFFTCpx
+	s1i := cpxAsInt32(s1a[:m])
+	s2i := cpxAsInt32(s2a[:m])
+	s3 := s3a[:m]
+	s0 := s0a[:m]
+	s3i := cpxAsInt32(s3)
+	s0i := cpxAsInt32(s0)
+
+	for i := 0; i < N; i++ {
+		pos := i * mm
+		foutM := cpxAsInt32(fout[pos+m : pos+m+m])    // scratch[1] source
+		foutM2 := cpxAsInt32(fout[pos+m2 : pos+m2+m]) // scratch[2] source
+
+		cint.Mul(s1i, foutM, tw1p)  // scratch[1] = C_MUL(fout[pos+m], tw1)
+		cint.Mul(s2i, foutM2, tw2p) // scratch[2] = C_MUL(fout[pos+m2], tw2)
+		cint.Add(s3i, s1i, s2i)     // scratch[3] = scratch[1] + scratch[2]
+		cint.Sub(s0i, s1i, s2i)     // scratch[0] = scratch[1] - scratch[2]
+		cint.MulByScalar(s0i, epi3i)
+
+		for k := 0; k < m; k++ {
+			p := pos + k
+			// HALF_OF(x) = x>>1 (arithmetic). Computed from the pre-add fout[pos].
+			fmr := fixedmath.SUB32_ovflw(fout[p].r, s3[k].r>>1)
+			fmi := fixedmath.SUB32_ovflw(fout[p].i, s3[k].i>>1)
+
+			fout[p] = cAdd(fout[p], s3[k])
+
+			fout[pos+m2+k].r = fixedmath.ADD32_ovflw(fmr, s0[k].i)
+			fout[pos+m2+k].i = fixedmath.SUB32_ovflw(fmi, s0[k].r)
+			fout[pos+m+k].r = fixedmath.SUB32_ovflw(fmr, s0[k].i)
+			fout[pos+m+k].i = fixedmath.ADD32_ovflw(fmi, s0[k].r)
+		}
+	}
+}
+
 // kf_bfly5 is the radix-5 butterfly. ya and yb are the fixed constants derived
 // from the fifth roots of unity. (celt/kiss_fft.c:239)
+//
+// radix-5 vectorizes only its four C_MULs; the large ya/yb combine stays scalar
+// and reads the results back from scratch, so it needs a longer run than radix-3
+// to pay back and crosses over near m=48 (-11% at m=48, +3.5% at m=24). See
+// BenchmarkBfly5_*.
 func kfBfly5(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
-	ya := kissTwiddleCpx{
+	if m < minCintBfly5 {
+		kfBfly5Scalar(fout, fstride, st, m, N, mm)
+		return
+	}
+	kfBfly5Cint(fout, fstride, st, m, N, mm)
+}
+
+// bfly5Consts returns the fifth-root-of-unity twiddle constants ya, yb shared by
+// the scalar and cint radix-5 cores.
+func bfly5Consts() (ya, yb kissTwiddleCpx) {
+	ya = kissTwiddleCpx{
 		r: int16(fixedmath.QCONST32(0.30901699, coefShift-1)),
 		i: int16(-fixedmath.QCONST32(0.95105652, coefShift-1)),
 	}
-	yb := kissTwiddleCpx{
+	yb = kissTwiddleCpx{
 		r: int16(-fixedmath.QCONST32(0.80901699, coefShift-1)),
 		i: int16(-fixedmath.QCONST32(0.58778525, coefShift-1)),
 	}
+	return ya, yb
+}
+
+func kfBfly5Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
+	ya, yb := bfly5Consts()
 	tw := st.twiddles
 	for i := 0; i < N; i++ {
 		f0 := i * mm
@@ -265,6 +416,79 @@ func kfBfly5(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
 			f2++
 			f3++
 			f4++
+		}
+	}
+}
+
+// kfBfly5Cint vectorizes the four C_MULs (scratch[1..4]) over the contiguous
+// m-length groups via precomputed contiguous twiddle runs. The ya/yb combine
+// mixes real and imag lanes with per-lane constants, which cint does not express,
+// so it stays a scalar pass reading the C_MUL results from scratch. The four
+// C_MUL inputs (groups f1..f4) are fully read before the combine overwrites any
+// group, so there is no read-after-write hazard.
+func kfBfly5Cint(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
+	ya, yb := bfly5Consts()
+	tw := st.twiddles
+
+	tw1p := packedTwiddles(tw, fstride, m)
+	tw2p := packedTwiddles(tw, 2*fstride, m)
+	tw3p := packedTwiddles(tw, 3*fstride, m)
+	tw4p := packedTwiddles(tw, 4*fstride, m)
+
+	var s1a, s2a, s3a, s4a [maxFFTRun]kissFFTCpx
+	s1 := s1a[:m]
+	s2 := s2a[:m]
+	s3 := s3a[:m]
+	s4 := s4a[:m]
+	s1i := cpxAsInt32(s1)
+	s2i := cpxAsInt32(s2)
+	s3i := cpxAsInt32(s3)
+	s4i := cpxAsInt32(s4)
+
+	for i := 0; i < N; i++ {
+		f0 := i * mm
+		f1 := f0 + m
+		f2 := f0 + 2*m
+		f3 := f0 + 3*m
+		f4 := f0 + 4*m
+
+		cint.Mul(s1i, cpxAsInt32(fout[f1:f1+m]), tw1p)
+		cint.Mul(s2i, cpxAsInt32(fout[f2:f2+m]), tw2p)
+		cint.Mul(s3i, cpxAsInt32(fout[f3:f3+m]), tw3p)
+		cint.Mul(s4i, cpxAsInt32(fout[f4:f4+m]), tw4p)
+
+		for u := 0; u < m; u++ {
+			var scratch [13]kissFFTCpx
+			scratch[0] = fout[f0+u]
+			scratch[1] = s1[u]
+			scratch[2] = s2[u]
+			scratch[3] = s3[u]
+			scratch[4] = s4[u]
+
+			scratch[7] = cAdd(scratch[1], scratch[4])
+			scratch[10] = cSub(scratch[1], scratch[4])
+			scratch[8] = cAdd(scratch[2], scratch[3])
+			scratch[9] = cSub(scratch[2], scratch[3])
+
+			fout[f0+u].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(scratch[7].r, scratch[8].r))
+			fout[f0+u].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(scratch[7].i, scratch[8].i))
+
+			scratch[5].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(sMul(scratch[7].r, ya.r), sMul(scratch[8].r, yb.r)))
+			scratch[5].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(sMul(scratch[7].i, ya.r), sMul(scratch[8].i, yb.r)))
+
+			scratch[6].r = fixedmath.ADD32_ovflw(sMul(scratch[10].i, ya.i), sMul(scratch[9].i, yb.i))
+			scratch[6].i = fixedmath.NEG32_ovflw(fixedmath.ADD32_ovflw(sMul(scratch[10].r, ya.i), sMul(scratch[9].r, yb.i)))
+
+			fout[f1+u] = cSub(scratch[5], scratch[6])
+			fout[f4+u] = cAdd(scratch[5], scratch[6])
+
+			scratch[11].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(sMul(scratch[7].r, yb.r), sMul(scratch[8].r, ya.r)))
+			scratch[11].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(sMul(scratch[7].i, yb.r), sMul(scratch[8].i, ya.r)))
+			scratch[12].r = fixedmath.SUB32_ovflw(sMul(scratch[9].i, ya.i), sMul(scratch[10].i, yb.i))
+			scratch[12].i = fixedmath.SUB32_ovflw(sMul(scratch[10].r, yb.i), sMul(scratch[9].r, ya.i))
+
+			fout[f2+u] = cAdd(scratch[11], scratch[12])
+			fout[f3+u] = cSub(scratch[11], scratch[12])
 		}
 	}
 }
