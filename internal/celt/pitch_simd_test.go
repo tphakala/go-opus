@@ -98,19 +98,50 @@ var simdPatterns = []fillPattern{
 	}},
 }
 
+// poisonPad samples of poisonValue are written into the spare capacity past the
+// logical end of every slice makeVecs returns. A kernel that reads past its
+// operand length lands in this region and diverges from the scalar reference
+// (which reads only the logical length), turning a silent over-read into a
+// deterministic differential failure instead of a read of zeroed allocator
+// padding. poisonValue (0x5555) is deliberately odd, so its self-product is odd
+// and has full additive order (2^32) in the wrapping int32 accumulator: even a
+// block-aligned, even-count over-read shifts the sum and is caught. INT16_MIN
+// would be useless as the poison here, because its self-product 2^30 has
+// additive order 4, so a block-aligned over-read of it sums to exactly zero and
+// stays invisible. That is why the poison tail carries its own odd value rather
+// than reusing the adversarial operand patterns above (several of which center
+// on INT16_MIN for their wrap behavior). poisonPad is 32, wider than one whole
+// block of the widest backend kernel (16 samples on AVX2).
+const (
+	poisonPad   = 32
+	poisonValue = 0x5555
+)
+
 // makeVecs builds x and y for a pattern. y is given `slack` extra samples beyond
-// n, which xcorrKernel needs (it reads three past the end of x).
+// n, which xcorrKernel needs (it reads three past the end of x). Both returned
+// slices carry poisonPad poison samples in the spare capacity past their logical
+// length (see poisonValue), so an over-reading kernel fails the differential
+// comparison rather than silently reading zeroed padding.
 func makeVecs(p fillPattern, n, slack int) (x, y []int16) {
-	x = make([]int16, n)
-	y = make([]int16, n+slack)
-	for i := range y {
-		xv, yv := p.f(i, n)
+	xback := make([]int16, n+poisonPad)
+	yback := make([]int16, n+slack+poisonPad)
+	for i := range xback {
 		if i < n {
-			x[i] = xv
+			xv, _ := p.f(i, n)
+			xback[i] = xv
+		} else {
+			xback[i] = poisonValue
 		}
-		y[i] = yv
 	}
-	return x, y
+	for i := range yback {
+		if i < n+slack {
+			_, yv := p.f(i, n)
+			yback[i] = yv
+		} else {
+			yback[i] = poisonValue
+		}
+	}
+	return xback[:n], yback[:n+slack]
 }
 
 // simdTestLengths returns the sample lengths the SIMD differential sweep runs

@@ -35,7 +35,9 @@ const coefShift = 16
 // maxFFTRun bounds the largest contiguous per-block span a radix butterfly
 // vectorizes: the radix-5 stage of the nfft=480 transform has m=96 (N=1 block of
 // 96 complex). Scratch arrays sized to this live on the stack, so the cint paths
-// stay zero-allocation.
+// stay zero-allocation. The butterfly dispatch treats it as a hard upper bound
+// and falls back to the scalar path for any m above it, so a future mode with a
+// longer run stays correct (scalar) instead of overrunning the stack scratch.
 const maxFFTRun = 96
 
 // minCintBfly3 / minCintBfly5 are the per-butterfly run-length thresholds below
@@ -250,7 +252,7 @@ func kfBfly4(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
 // crossover sits near m=16 for this two-C_MUL stage, -25% at m=16, +2% at m=8),
 // so they keep the scalar inner loop. See BenchmarkBfly3_*.
 func kfBfly3(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
-	if m < minCintBfly3 {
+	if m < minCintBfly3 || m > maxFFTRun {
 		kfBfly3Scalar(fout, fstride, st, m, N, mm)
 		return
 	}
@@ -347,7 +349,7 @@ func kfBfly3Cint(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int)
 // to pay back and crosses over near m=48 (-11% at m=48, +3.5% at m=24). See
 // BenchmarkBfly5_*.
 func kfBfly5(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
-	if m < minCintBfly5 {
+	if m < minCintBfly5 || m > maxFFTRun {
 		kfBfly5Scalar(fout, fstride, st, m, N, mm)
 		return
 	}

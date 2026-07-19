@@ -618,8 +618,9 @@ func computeMdcts(m *celtMode, shortBlocks int, in, out []int32, C, CC, LM, upsa
 		}
 	}
 	if CC == 2 && C == 1 {
-		ob := out[:B*N]
-		o2 := out[B*N : 2*B*N]
+		bn := B * N
+		ob := out[:bn]
+		o2 := out[bn : bn+bn]
 		for i := range ob {
 			ob[i] = fixedmath.ADD32(fixedmath.HALF32(ob[i]), fixedmath.HALF32(o2[i]))
 		}

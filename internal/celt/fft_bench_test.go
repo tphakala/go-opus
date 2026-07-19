@@ -153,3 +153,30 @@ func BenchmarkInverseMDCT_LM3(b *testing.B) { benchInverseMDCT(b, 3) }
 func BenchmarkInverseMDCT_LM2(b *testing.B) { benchInverseMDCT(b, 2) }
 func BenchmarkInverseMDCT_LM1(b *testing.B) { benchInverseMDCT(b, 1) }
 func BenchmarkInverseMDCT_LM0(b *testing.B) { benchInverseMDCT(b, 0) }
+
+// TestFFTCintAllocFree pins the cint FFT hot path at zero allocations per call.
+// The path is perf-motivated (stack-allocated scratch plus a sync.Map twiddle
+// cache that is warmed once per key), so a regression that escaped the scratch
+// to the heap, or that allocated on the cache path every call, would otherwise
+// pass the bit-exact oracle silently. Runs all four FFT sizes so both the cint
+// and below-crossover scalar dispatches are covered.
+func TestFFTCintAllocFree(t *testing.T) {
+	for idx := 0; idx < 4; idx++ {
+		st := mode48000_960.mdct.kfft[idx]
+		r := rand.New(rand.NewPCG(0x1234+uint64(idx), 0x9e3779b97f4a7c15))
+		golden := make([]kissFFTCpx, st.nfft)
+		fillCpx(golden, r)
+		buf := make([]kissFFTCpx, st.nfft)
+		// Warm the twiddle cache so the once-per-key LoadOrStore miss is not
+		// charged against the steady-state budget measured below.
+		copy(buf, golden)
+		opusFFTImpl(st, buf, 6)
+		got := testing.AllocsPerRun(50, func() {
+			copy(buf, golden)
+			opusFFTImpl(st, buf, 6)
+		})
+		if got != 0 {
+			t.Errorf("nfft=%d: opusFFTImpl allocated %v allocs/op, want 0", st.nfft, got)
+		}
+	}
+}
