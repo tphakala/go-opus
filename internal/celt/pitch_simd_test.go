@@ -7,28 +7,28 @@ import (
 )
 
 // Differential tests for the SIMD pitch kernels. celtInnerProd and xcorrKernel
-// are assembly on arm64 and amd64 (pitch_arm64.s, pitch_amd64.s) and the scalar
-// reference in pitch_ref.go on everything else; celtInnerProdGeneric and
-// xcorrKernelGeneric are compiled into *every* build, so these tests always
-// compare the live implementation against the reference on identical inputs. On
-// the generic build the comparison is a tautology, which is fine -- the point is
-// that on arm64/amd64 it is not.
+// are backed by github.com/tphakala/simd/i16 (i16.DotProduct and i16.XCorr) on
+// every architecture (pitch_simd.go), while celtInnerProdGeneric and
+// xcorrKernelGeneric in pitch_ref.go are the scalar reference. These tests
+// compare the live library-backed kernels against that reference on identical
+// inputs, so a mapping bug (wrong slice, wrong operand order, write-vs-
+// accumulate) or a library regression surfaces here.
 //
 // The hazard being hunted here is a vector kernel that agrees with the scalar
 // path on well-behaved audio-shaped input but diverges on the corners:
 //
 //   - -32768 (INT16_MIN) operands. This is the one input where the products can
-//     reach 2^30 and a PMADDWD lane can land exactly on 2^31, i.e. wrap to
-//     INT32_MIN. A kernel that saturates instead of wrapping passes random tests
-//     and fails here.
+//     reach 2^30 and a widening multiply-accumulate lane can land exactly on
+//     2^31, i.e. wrap to INT32_MIN. A kernel that saturates instead of wrapping
+//     passes random tests and fails here.
 //   - int32 accumulator overflow. MAC16_16 accumulates into a *wrapping* int32;
 //     any implementation that widens to int64 and saturates, or that reduces
 //     lanes through a wider type without truncating back, diverges once the sum
 //     exceeds 2^31.
-//   - every tail remainder. The vector loops step 16/8/4 samples at a time and
-//     hand the rest to a scalar epilogue, so every length mod the vector width
-//     has to be exercised -- hence every length from 0 to 600 rather than a
-//     handful of sizes.
+//   - every tail remainder. The library's vector loops step several samples at a
+//     time and hand the rest to a scalar epilogue, so every length mod the
+//     vector width has to be exercised -- hence every length from 0 to 600
+//     rather than a handful of sizes.
 //
 // A codec that is bit-exact for random input and wrong on INT16_MIN would ship
 // broken packets on real clipped audio, so these cases are tested deliberately
@@ -98,19 +98,50 @@ var simdPatterns = []fillPattern{
 	}},
 }
 
+// poisonPad samples of poisonValue are written into the spare capacity past the
+// logical end of every slice makeVecs returns. A kernel that reads past its
+// operand length lands in this region and diverges from the scalar reference
+// (which reads only the logical length), turning a silent over-read into a
+// deterministic differential failure instead of a read of zeroed allocator
+// padding. poisonValue (0x5555) is deliberately odd, so its self-product is odd
+// and has full additive order (2^32) in the wrapping int32 accumulator: even a
+// block-aligned, even-count over-read shifts the sum and is caught. INT16_MIN
+// would be useless as the poison here, because its self-product 2^30 has
+// additive order 4, so a block-aligned over-read of it sums to exactly zero and
+// stays invisible. That is why the poison tail carries its own odd value rather
+// than reusing the adversarial operand patterns above (several of which center
+// on INT16_MIN for their wrap behavior). poisonPad is 32, wider than one whole
+// block of the widest backend kernel (16 samples on AVX2).
+const (
+	poisonPad   = 32
+	poisonValue = 0x5555
+)
+
 // makeVecs builds x and y for a pattern. y is given `slack` extra samples beyond
-// n, which xcorrKernel needs (it reads three past the end of x).
+// n, which xcorrKernel needs (it reads three past the end of x). Both returned
+// slices carry poisonPad poison samples in the spare capacity past their logical
+// length (see poisonValue), so an over-reading kernel fails the differential
+// comparison rather than silently reading zeroed padding.
 func makeVecs(p fillPattern, n, slack int) (x, y []int16) {
-	x = make([]int16, n)
-	y = make([]int16, n+slack)
-	for i := range y {
-		xv, yv := p.f(i, n)
+	xback := make([]int16, n+poisonPad)
+	yback := make([]int16, n+slack+poisonPad)
+	for i := range xback {
 		if i < n {
-			x[i] = xv
+			xv, _ := p.f(i, n)
+			xback[i] = xv
+		} else {
+			xback[i] = poisonValue
 		}
-		y[i] = yv
 	}
-	return x, y
+	for i := range yback {
+		if i < n+slack {
+			_, yv := p.f(i, n)
+			yback[i] = yv
+		} else {
+			yback[i] = poisonValue
+		}
+	}
+	return xback[:n], yback[:n+slack]
 }
 
 // simdTestLengths returns the sample lengths the SIMD differential sweep runs
@@ -124,13 +155,14 @@ func makeVecs(p fillPattern, n, slack int) (x, y []int16) {
 // The subset keeps every length 0..40, which already covers every residue
 // modulo the 4, 8 and 16 sample block widths several times over, and then adds
 // every multiple of those block widths up to simdMaxLen together with its two
-// neighbors. The block widths are the strides of the vector loops in
-// pitch_amd64.s (16 and 8 samples) and pitch_arm64.s (16, 8 and 4 samples), so
-// each boundary and its neighbors straddle the point where the vector body
-// stops and the scalar epilogue begins, sampled at large lengths where the
-// wrapping int32 accumulator has walked far from zero. Every boundary neighbor,
-// being one off a block multiple, drives a non-zero tail remainder, so the
-// scalar epilogue stays exercised for every pattern even in the short subset.
+// neighbors. The block widths are the strides the i16 library's vector loops
+// use (4 samples per SMLAL/SMLAL2 on arm64, 8 per PMADDWD and 16 per AVX2 on
+// amd64), so each boundary and its neighbors straddle the point where the
+// vector body stops and the scalar epilogue begins, sampled at large lengths
+// where the wrapping int32 accumulator has walked far from zero. Every boundary
+// neighbor, being one off a block multiple, drives a non-zero tail remainder,
+// so the scalar epilogue stays exercised for every pattern even in the short
+// subset.
 func simdTestLengths(short bool) []int {
 	if !short {
 		lengths := make([]int, 0, simdMaxLen+1)

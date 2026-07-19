@@ -293,24 +293,28 @@ func deemphasis(outSyn [][]int32, pcm []int16, N, C, downsample int, coef [4]int
 	}
 	for c := 0; c < C; c++ {
 		m := mem[c]
-		x := outSyn[c]
+		// Slice to N once so the per-sample reads carry no bounds check. The
+		// strided pcm[j*C+c] stores keep their check (the stride defeats the
+		// prover), but the outSyn/dScratch reads no longer do.
+		x := outSyn[c][:N]
 		applyDown := false
 		switch {
 		case downsample > 1:
-			for j := 0; j < N; j++ {
+			db := dScratch[:N]
+			for j := range x {
 				tmp := fixedmath.SATURATE(x[j]+m, sigSat) // VERY_SMALL == 0
 				m = fixedmath.MULT16_32_Q15(coef0, tmp)
-				dScratch[j] = tmp
+				db[j] = tmp
 			}
 			applyDown = true
 		case accum != 0:
-			for j := 0; j < N; j++ {
+			for j := range x {
 				tmp := fixedmath.SATURATE(x[j]+m, sigSat)
 				m = fixedmath.MULT16_32_Q15(coef0, tmp)
 				pcm[j*C+c] = sat16(int32(pcm[j*C+c]) + int32(sig2word16(tmp)))
 			}
 		default:
-			for j := 0; j < N; j++ {
+			for j := range x {
 				tmp := fixedmath.SATURATE(x[j]+m, sigSat)
 				m = fixedmath.MULT16_32_Q15(coef0, tmp)
 				pcm[j*C+c] = sig2word16(tmp)
@@ -376,8 +380,10 @@ func celtSynthesis(m *celtMode, X []int32, outSyn [][]int32, oldBandE []int32, s
 		freq2 := outSyn[0]
 		denormaliseBands(m, X, freq, oldBandE, start, effEnd, M, downsample, silence)
 		denormaliseBands(m, X[N:], freq2[freq2Off:], oldBandE[nbEBands:], start, effEnd, M, downsample, silence)
-		for i := 0; i < N; i++ {
-			freq[i] = fixedmath.ADD32(fixedmath.HALF32(freq[i]), fixedmath.HALF32(freq2[freq2Off+i]))
+		fb := freq[:N]
+		f2 := freq2[freq2Off : freq2Off+N]
+		for i := range fb {
+			fb[i] = fixedmath.ADD32(fixedmath.HALF32(fb[i]), fixedmath.HALF32(f2[i]))
 		}
 		for b := 0; b < B; b++ {
 			cltMDCTBackward(&m.mdct, freq[b:], outSyn[0][NB*b:], m.window, overlap, shift, B, sc)
@@ -393,8 +399,9 @@ func celtSynthesis(m *celtMode, X []int32, outSyn [][]int32, oldBandE []int32, s
 	}
 	// Saturate IMDCT output so the post-filter and de-emphasis can't overflow.
 	for c := 0; c < CC; c++ {
-		for i := 0; i < N; i++ {
-			outSyn[c][i] = fixedmath.SATURATE(outSyn[c][i], sigSat)
+		oc := outSyn[c][:N]
+		for i := range oc {
+			oc[i] = fixedmath.SATURATE(oc[i], sigSat)
 		}
 	}
 }

@@ -21,13 +21,19 @@ is licensed under the same 3-clause BSD license (see LICENSE).
   are built only by the cgo differential-test harness (build tag `refc`); they
   are never compiled into the published pure-Go module.
 
-## SIMD (deferred to a later phase)
+## SIMD
 
-- github.com/tphakala/simd (MIT, same author) is the intended acceleration path
-  for profiled hot kernels, mirroring the go-flac scalar-reference-plus-SIMD
-  structure. It is NOT a dependency yet: the v1 codec is a pure-Go scalar
-  reference, and SIMD lands only after correctness gates pass (phase 6). Any
-  Opus-specific SIMD kernels are deferred until then.
+- github.com/tphakala/simd (MIT, same author) is a runtime dependency. It backs
+  the two hot pitch kernels (celt_inner_prod and xcorr_kernel) through
+  i16.DotProduct and i16.XCorr, and the radix-3/radix-5 FFT butterflies
+  (kiss_fft.go) through the cint fixed-point complex ops (cint.Mul / Add / Sub /
+  MulByScalar), mirroring the go-flac scalar-reference-plus-SIMD structure. The
+  library is pure Go plus its own per-arch assembly (SMLAL/SMLAL2 on arm64,
+  PMADDWD/AVX2 on amd64) and has no cgo; it pulls golang.org/x/sys (indirect,
+  also cgo-free) for CPU-feature detection. Each kernel keeps a scalar reference
+  (internal/celt/pitch_ref.go for pitch, the frozen *Scalar butterflies for the
+  FFT) that the library results are asserted bit-exact against
+  (internal/celt/pitch_simd_test.go, internal/celt/fft_cint_oracle_test.go).
 
 ## Test corpus and conformance vectors
 

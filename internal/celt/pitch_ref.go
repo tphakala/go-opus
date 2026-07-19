@@ -1,14 +1,14 @@
-// Scalar reference implementations of the two pitch kernels that have SIMD
-// overrides (celt_inner_prod and xcorr_kernel). These are the transliteration of
-// the C generic path and they are the source of truth: the arm64/amd64 assembly
-// in pitch_arm64.s / pitch_amd64.s is verified against them, sample for sample,
-// by TestCeltInnerProdSIMDMatchesScalar / TestXcorrKernelSIMDMatchesScalar and
+// Scalar reference implementations of the two pitch kernels that are backed by
+// SIMD (celt_inner_prod and xcorr_kernel). These are the transliteration of the
+// C generic path and they are the source of truth: the library-backed
+// celtInnerProd / xcorrKernel in pitch_simd.go (github.com/tphakala/simd/i16,
+// i16.DotProduct and i16.XCorr) are verified against them, sample for sample, by
+// TestCeltInnerProdSIMDMatchesScalar / TestXcorrKernelSIMDMatchesScalar and
 // FuzzCeltInnerProd in pitch_simd_test.go.
 //
-// This file carries no build tag on purpose. It compiles into *every* build,
-// including the ones whose celtInnerProd/xcorrKernel are assembly, so the
-// differential test always has the reference to compare against. On !arm64 &&
-// !amd64 these are additionally the live implementations (see pitch_generic.go).
+// This file carries no build tag on purpose. It compiles into *every* build, so
+// the differential test always has the reference to compare the library-backed
+// kernels against.
 //
 // Why reordering the accumulation is legal here, and why that is the whole basis
 // for vectorizing these two kernels at all: both accumulate via MAC16_16, i.e.
