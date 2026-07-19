@@ -21,7 +21,6 @@ package celt
 // internal/fixedmath (docs/hard-parts.md section 4).
 
 import (
-	"sync"
 	"unsafe"
 
 	"github.com/tphakala/simd/cint"
@@ -76,36 +75,74 @@ func cpxAsInt32(c []kissFFTCpx) []int32 {
 	return unsafe.Slice((*int32)(unsafe.Pointer(&c[0])), 2*len(c))
 }
 
-// twKey identifies a packed twiddle run by its source table, stride and count.
-type twKey struct {
-	base   *kissTwiddleCpx
-	stride int
-	count  int
+// init precomputes the packed twiddle runs for every static FFT state before any
+// FFT can run. Package-level vars (the states and the mode) are fully initialized
+// before init functions execute, so mode48000_960.mdct.kfft is ready here. Doing
+// this once, single-threaded, at init means the per-state runs are read-only for
+// the process lifetime and the hot butterflies index them directly, with no atomic
+// and no map hash.
+func init() {
+	for _, st := range mode48000_960.mdct.kfft {
+		st.buildPackedTwiddles()
+	}
 }
 
-// packedTwiddleCache memoizes the strided-to-contiguous twiddle gathers. The
-// gather pattern is data-independent (it depends only on the static mode's
-// twiddle table, the stage stride and the run length), so each (table, stride,
-// count) tuple is packed exactly once for the process lifetime and every FFT call
-// thereafter reuses the contiguous []int16 directly.
-var packedTwiddleCache sync.Map // twKey -> []int16
-
-// packedTwiddles returns the contiguous Q15 [tr,ti,tr,ti,...] int16 slice of the
-// twiddles tw[j*stride] for j in 0..count-1, the layout cint.Mul consumes. The
-// result is cached (see packedTwiddleCache) so the strided gather runs once.
-func packedTwiddles(tw []kissTwiddleCpx, stride, count int) []int16 {
-	key := twKey{&tw[0], stride, count}
-	if v, ok := packedTwiddleCache.Load(key); ok {
-		return v.([]int16)
+// buildPackedTwiddles fills st.packedTw[stage] with the contiguous twiddle runs the
+// radix-3/5 butterfly at that stage consumes: entries 0..1 for radix 3 and 0..3 for
+// radix 5, where entry k is the twiddles[j*(k+1)*stride] gather. It mirrors the
+// fstride/m walk in opusFFTImpl exactly, so the stage index it fills is the same one
+// the driver passes back down to kfBfly3/kfBfly5; radix-2/4 stages and the m==1
+// terminal consume no packed twiddles and leave their rows nil.
+func (st *kissFFTState) buildPackedTwiddles() {
+	var fstride [maxFactors]int
+	shift := 0
+	if st.shift > 0 {
+		shift = st.shift
 	}
+	fstride[0] = 1
+	L := 0
+	var m, m2 int
+	for {
+		p := int(st.factors[2*L])
+		m = int(st.factors[2*L+1])
+		fstride[L+1] = fstride[L] * p
+		L++
+		if m == 1 {
+			break
+		}
+	}
+	m = int(st.factors[2*L-1])
+	for i := L - 1; i >= 0; i-- {
+		if i != 0 {
+			m2 = int(st.factors[2*i-1])
+		} else {
+			m2 = 1
+		}
+		bf := fstride[i] << shift
+		switch st.factors[2*i] {
+		case 3:
+			st.packedTw[i][0] = packTwiddleRun(st.twiddles, bf, m)
+			st.packedTw[i][1] = packTwiddleRun(st.twiddles, 2*bf, m)
+		case 5:
+			st.packedTw[i][0] = packTwiddleRun(st.twiddles, bf, m)
+			st.packedTw[i][1] = packTwiddleRun(st.twiddles, 2*bf, m)
+			st.packedTw[i][2] = packTwiddleRun(st.twiddles, 3*bf, m)
+			st.packedTw[i][3] = packTwiddleRun(st.twiddles, 4*bf, m)
+		}
+		m = m2
+	}
+}
+
+// packTwiddleRun gathers the strided twiddles tw[j*stride] for j in 0..count-1 into
+// the contiguous Q15 [tr,ti,tr,ti,...] int16 layout cint.Mul consumes.
+func packTwiddleRun(tw []kissTwiddleCpx, stride, count int) []int16 {
 	p := make([]int16, 2*count)
 	for j := 0; j < count; j++ {
 		c := tw[j*stride]
 		p[2*j] = c.r
 		p[2*j+1] = c.i
 	}
-	v, _ := packedTwiddleCache.LoadOrStore(key, p)
-	return v.([]int16)
+	return p
 }
 
 // kissFFTCpx mirrors celt/kiss_fft.h kiss_fft_cpx in the FIXED_POINT build: r
@@ -261,12 +298,12 @@ func kfBfly4(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
 // Small runs do not amortize the cint call and scratch-setup overhead (the
 // crossover sits near m=16 for this two-C_MUL stage, -25% at m=16, +2% at m=8),
 // so they keep the scalar inner loop. See BenchmarkBfly3_*.
-func kfBfly3(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
+func kfBfly3(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm, stage int) {
 	if m < minCintBfly3 || m > maxFFTRun {
 		kfBfly3Scalar(fout, fstride, st, m, N, mm)
 		return
 	}
-	kfBfly3Cint(fout, fstride, st, m, N, mm)
+	kfBfly3Cint(fout, m, N, mm, st.packedTw[stage][0], st.packedTw[stage][1])
 }
 
 func kfBfly3Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
@@ -309,12 +346,12 @@ func kfBfly3Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm in
 // per-k C_MUL inputs (the m- and m2-groups) are read before any combine writes
 // them, so a whole block splits cleanly into a vectorized phase and a scalar
 // cross-lane combine. The three groups are the contiguous runs fout[pos:pos+3m].
-func kfBfly3Cint(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
+// tw1p and tw2p are the precomputed twiddles[j*fstride] and twiddles[j*2*fstride]
+// runs for this stage (see buildPackedTwiddles); the caller supplies them so the
+// core stays a pure kernel with no plan lookup.
+func kfBfly3Cint(fout []kissFFTCpx, m, N, mm int, tw1p, tw2p []int16) {
 	m2 := 2 * m
 	epi3i := int16(-fixedmath.QCONST32(0.86602540, coefShift-1))
-
-	tw1p := packedTwiddles(st.twiddles, fstride, m)   // twiddles[j*fstride]
-	tw2p := packedTwiddles(st.twiddles, fstride*2, m) // twiddles[j*2*fstride]
 
 	var s1a, s2a, s3a, s0a [maxFFTRun]kissFFTCpx
 	s1i := cpxAsInt32(s1a[:m])
@@ -358,12 +395,12 @@ func kfBfly3Cint(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int)
 // and reads the results back from scratch, so it needs a longer run than radix-3
 // to pay back and crosses over near m=48 (-11% at m=48, +3.5% at m=24). See
 // BenchmarkBfly5_*.
-func kfBfly5(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
+func kfBfly5(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm, stage int) {
 	if m < minCintBfly5 || m > maxFFTRun {
 		kfBfly5Scalar(fout, fstride, st, m, N, mm)
 		return
 	}
-	kfBfly5Cint(fout, fstride, st, m, N, mm)
+	kfBfly5Cint(fout, m, N, mm, st.packedTw[stage][0], st.packedTw[stage][1], st.packedTw[stage][2], st.packedTw[stage][3])
 }
 
 // bfly5Consts returns the fifth-root-of-unity twiddle constants ya, yb shared by
@@ -438,14 +475,11 @@ func kfBfly5Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm in
 // so it stays a scalar pass reading the C_MUL results from scratch. The four
 // C_MUL inputs (groups f1..f4) are fully read before the combine overwrites any
 // group, so there is no read-after-write hazard.
-func kfBfly5Cint(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
+// tw1p..tw4p are the precomputed twiddles[j*k*fstride] runs (k=1..4) for this
+// stage (see buildPackedTwiddles); the caller supplies them so the core stays a
+// pure kernel with no plan lookup.
+func kfBfly5Cint(fout []kissFFTCpx, m, N, mm int, tw1p, tw2p, tw3p, tw4p []int16) {
 	ya, yb := bfly5Consts()
-	tw := st.twiddles
-
-	tw1p := packedTwiddles(tw, fstride, m)
-	tw2p := packedTwiddles(tw, 2*fstride, m)
-	tw3p := packedTwiddles(tw, 3*fstride, m)
-	tw4p := packedTwiddles(tw, 4*fstride, m)
 
 	var s1a, s2a, s3a, s4a [maxFFTRun]kissFFTCpx
 	s1 := s1a[:m]
@@ -545,10 +579,10 @@ func opusFFTImpl(st *kissFFTState, fout []kissFFTCpx, downshift int) {
 			kfBfly4(fout, fstride[i]<<shift, st, m, fstride[i], m2)
 		case 3:
 			fftDownshift(fout, st.nfft, &downshift, 2)
-			kfBfly3(fout, fstride[i]<<shift, st, m, fstride[i], m2)
+			kfBfly3(fout, fstride[i]<<shift, st, m, fstride[i], m2, i)
 		case 5:
 			fftDownshift(fout, st.nfft, &downshift, 3)
-			kfBfly5(fout, fstride[i]<<shift, st, m, fstride[i], m2)
+			kfBfly5(fout, fstride[i]<<shift, st, m, fstride[i], m2, i)
 		}
 		m = m2
 	}

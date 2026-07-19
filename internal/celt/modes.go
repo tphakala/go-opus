@@ -40,6 +40,12 @@ type kissFFTState struct {
 	factors    [2 * maxFactors]int16
 	bitrev     []int16
 	twiddles   []kissTwiddleCpx
+	// packedTw holds the strided-to-contiguous twiddle runs the radix-3/5
+	// butterflies consume, indexed by [stage][k] (k selects the j*(k+1)*stride
+	// gather). It is written only during init and read-only thereafter, so
+	// concurrent FFT calls index it without synchronization. Rows for radix-2/4
+	// stages stay nil. See buildPackedTwiddles in kiss_fft.go.
+	packedTw [maxFactors][4][]int16
 }
 
 // mdctLookup mirrors celt/mdct.h mdct_lookup. kfft holds the four decimation
