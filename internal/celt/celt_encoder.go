@@ -374,10 +374,13 @@ func celtPreemphasis(pcmp []int16, pcmOff int, inp []int32, N, CC, upsample int,
 
 	// Fast path for the normal 48 kHz case and no clipping.
 	if coef[1] == 0 && upsample == 1 && clip == 0 {
-		for i := 0; i < N; i++ {
+		// Slice to N so the destination store drops its per-sample check; the
+		// strided pcmp[pcmOff+CC*i] read keeps its check (stride defeats BCE).
+		ib := inp[:N]
+		for i := range ib {
 			// RES2SIG(pcmp[CC*i]) = SHL32(EXTEND32(a), SIG_SHIFT).
 			x := fixedmath.SHL32(fixedmath.EXTEND32(pcmp[pcmOff+CC*i]), sigShift)
-			inp[i] = x - m
+			ib[i] = x - m
 			m = fixedmath.MULT16_32_Q15(coef0, x)
 		}
 		*mem = m
@@ -385,9 +388,10 @@ func celtPreemphasis(pcmp []int16, pcmOff int, inp []int32, N, CC, upsample int,
 	}
 
 	Nu := N / upsample
+	ib := inp[:N]
 	if upsample != 1 {
-		for i := 0; i < N; i++ {
-			inp[i] = 0
+		for i := range ib {
+			ib[i] = 0
 		}
 	}
 	for i := 0; i < Nu; i++ {
@@ -395,9 +399,9 @@ func celtPreemphasis(pcmp []int16, pcmOff int, inp []int32, N, CC, upsample int,
 	}
 	// clip is a no-op here (FIXED_POINT, non-RES24); the coef[1]!=0 branch is
 	// gated out (non-CUSTOM_MODES/QEXT), leaving only the coef0 loop.
-	for i := 0; i < N; i++ {
-		x := inp[i]
-		inp[i] = x - m
+	for i := range ib {
+		x := ib[i]
+		ib[i] = x - m
 		m = fixedmath.MULT16_32_Q15(coef0, x)
 	}
 	*mem = m
@@ -614,8 +618,10 @@ func computeMdcts(m *celtMode, shortBlocks int, in, out []int32, C, CC, LM, upsa
 		}
 	}
 	if CC == 2 && C == 1 {
-		for i := 0; i < B*N; i++ {
-			out[i] = fixedmath.ADD32(fixedmath.HALF32(out[i]), fixedmath.HALF32(out[B*N+i]))
+		ob := out[:B*N]
+		o2 := out[B*N : 2*B*N]
+		for i := range ob {
+			ob[i] = fixedmath.ADD32(fixedmath.HALF32(ob[i]), fixedmath.HALF32(o2[i]))
 		}
 	}
 	if upsample != 1 {

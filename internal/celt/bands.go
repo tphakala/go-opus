@@ -121,14 +121,13 @@ func computeBandEnergies(m *celtMode, X, bandE []int32, end, C, LM, arch int) {
 			maxval = celtMaxabs32(X, c*N+int(eBands[i])<<LM, int(eBands[i+1]-eBands[i])<<LM)
 			if maxval > 0 {
 				shift := fixedmath.IMAX(0, 30-fixedmath.Celt_ilog2(maxval+(maxval>>14)+1)-((((int(m.logN[i])+7)>>bitRes)+LM+1)>>1))
-				j := int(eBands[i]) << LM
-				for {
-					x := fixedmath.SHL32(X[j+c*N], shift)
+				// Slice the band once so the range loop carries no per-sample
+				// bounds check; celtMaxabs32 above already read this exact range.
+				lo := c*N + int(eBands[i])<<LM
+				hi := c*N + int(eBands[i+1])<<LM
+				for _, xv := range X[lo:hi] {
+					x := fixedmath.SHL32(xv, shift)
 					sum = fixedmath.ADD32(sum, fixedmath.MULT32_32_Q31(x, x))
-					j++
-					if j >= int(eBands[i+1])<<LM {
-						break
-					}
 				}
 				bandE[i+c*m.nbEBands] = fixedmath.MAX32(maxval, fixedmath.PSHR32(fixedmath.Celt_sqrt32(fixedmath.SHR32(sum, 1)), shift))
 			} else {
@@ -163,13 +162,15 @@ func normaliseBands(m *celtMode, freq, X, bandE []int32, end, C, M int) {
 			shift := 30 - fixedmath.Celt_zlog2(E)
 			E = fixedmath.SHL32(E, shift)
 			g := fixedmath.Celt_rcp_norm32(E)
-			j := M * int(eBands[i])
-			for {
-				X[j+c*N] = fixedmath.PSHR32(fixedmath.MULT32_32_Q31(g, fixedmath.SHL32(freq[j+c*N], shift)), 30-normShift)
-				j++
-				if j >= M*int(eBands[i+1]) {
-					break
-				}
+			// Slice X and freq to the band range with the same lo/hi so the
+			// prover sees equal lengths; ranging freq (read) and indexing X
+			// (write) drops the per-sample bounds checks.
+			lo := c*N + M*int(eBands[i])
+			hi := c*N + M*int(eBands[i+1])
+			xb := X[lo:hi]
+			fb := freq[lo:hi]
+			for k, fv := range fb {
+				xb[k] = fixedmath.PSHR32(fixedmath.MULT32_32_Q31(g, fixedmath.SHL32(fv, shift)), 30-normShift)
 			}
 			i++
 			if i >= end {
@@ -197,8 +198,10 @@ func denormaliseBands(m *celtMode, X, freq, bandLogE []int32, start, end, M, dow
 		start = 0
 		end = 0
 	}
-	fi := 0                      // f = freq
-	xi := M * int(eBands[start]) // x = X + M*eBands[start]
+	// fi indexes both freq (f) and X (x = X + M*eBands[start]). After the setup
+	// below fi == M*eBands[start], which is exactly where X is first read, so a
+	// single index tracks both and lets the prover elide the inner-loop checks.
+	fi := 0
 	if start != 0 {
 		for i := 0; i < M*int(eBands[start]); i++ {
 			freq[fi] = 0
@@ -208,7 +211,6 @@ func denormaliseBands(m *celtMode, X, freq, bandLogE []int32, start, end, M, dow
 		fi += M * int(eBands[start])
 	}
 	for i := start; i < end; i++ {
-		j := M * int(eBands[i])
 		bandEnd := M * int(eBands[i+1])
 		lg := fixedmath.ADD32(bandLogE[i], fixedmath.SHL32(int32(eMeans[i]), dbShift-4))
 		// Handle the integer part of the log energy.
@@ -226,15 +228,14 @@ func denormaliseBands(m *celtMode, X, freq, bandLogE []int32, start, end, M, dow
 			g = 2147483647
 			shift = 0
 		}
-		for {
-			freq[fi] = fixedmath.PSHR32(fixedmath.MULT32_32_Q31(fixedmath.SHL32(X[xi], 30-normShift), g), shift)
-			fi++
-			xi++
-			j++
-			if j >= bandEnd {
-				break
-			}
+		// Slice freq and X from the same fi so the prover sees equal lengths;
+		// ranging X (read) and indexing freq (write) drops the per-sample checks.
+		fb := freq[fi:bandEnd]
+		xb := X[fi:bandEnd]
+		for k, xv := range xb {
+			fb[k] = fixedmath.PSHR32(fixedmath.MULT32_32_Q31(fixedmath.SHL32(xv, 30-normShift), g), shift)
 		}
+		fi = bandEnd
 	}
 	// celt_assert(start <= end); OPUS_CLEAR(&freq[bound], N-bound)
 	for i := bound; i < N; i++ {
@@ -333,8 +334,11 @@ func intensityStereo(m *celtMode, X, Y, bandE []int32, bandID, N int) {
 	right = int16(fixedmath.MIN32(int32(right), int32(norm)-1))
 	a1 := div32_16(fixedmath.SHL32(fixedmath.EXTEND32(left), 15), norm)
 	a2 := div32_16(fixedmath.SHL32(fixedmath.EXTEND32(right), 15), norm)
-	for j := 0; j < N; j++ {
-		X[j] = fixedmath.ADD32(fixedmath.MULT16_32_Q15(a1, X[j]), fixedmath.MULT16_32_Q15(a2, Y[j]))
+	// Slice to N with matching bounds so the loop needs no per-sample check.
+	xb := X[:N]
+	yb := Y[:N]
+	for j := range xb {
+		xb[j] = fixedmath.ADD32(fixedmath.MULT16_32_Q15(a1, xb[j]), fixedmath.MULT16_32_Q15(a2, yb[j]))
 		// Side is not encoded, no need to calculate.
 	}
 }
@@ -343,11 +347,13 @@ func intensityStereo(m *celtMode, X, Y, bandE []int32, bandID, N int) {
 // rotation (a 45-degree Hadamard) applied when the coded theta is nonzero. It is
 // exercised through the encode differential test.
 func stereoSplit(X, Y []int32, N int) {
-	for j := 0; j < N; j++ {
-		l := fixedmath.MULT32_32_Q31(sqrt2Inv31, X[j])
-		r := fixedmath.MULT32_32_Q31(sqrt2Inv31, Y[j])
-		X[j] = fixedmath.ADD32(l, r)
-		Y[j] = fixedmath.SUB32(r, l)
+	xb := X[:N]
+	yb := Y[:N]
+	for j := range xb {
+		l := fixedmath.MULT32_32_Q31(sqrt2Inv31, xb[j])
+		r := fixedmath.MULT32_32_Q31(sqrt2Inv31, yb[j])
+		xb[j] = fixedmath.ADD32(l, r)
+		yb[j] = fixedmath.SUB32(r, l)
 	}
 }
 
@@ -396,12 +402,14 @@ func stereoMerge(X, Y []int32, mid int32, N int) {
 		kr = 7
 	}
 
-	for j := 0; j < N; j++ {
+	xb := X[:N]
+	yb := Y[:N]
+	for j := range xb {
 		// Apply mid scaling (side is already scaled).
-		l := fixedmath.MULT32_32_Q31(mid, X[j])
-		r := Y[j]
-		X[j] = fixedmath.VSHR32(fixedmath.MULT32_32_Q31(lgain, fixedmath.SUB32(l, r)), kl-15)
-		Y[j] = fixedmath.VSHR32(fixedmath.MULT32_32_Q31(rgain, fixedmath.ADD32(l, r)), kr-15)
+		l := fixedmath.MULT32_32_Q31(mid, xb[j])
+		r := yb[j]
+		xb[j] = fixedmath.VSHR32(fixedmath.MULT32_32_Q31(lgain, fixedmath.SUB32(l, r)), kl-15)
+		yb[j] = fixedmath.VSHR32(fixedmath.MULT32_32_Q31(rgain, fixedmath.ADD32(l, r)), kr-15)
 	}
 }
 
