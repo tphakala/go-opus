@@ -10,7 +10,7 @@
 
 A native Go implementation of the [Opus](https://opus-codec.org/) audio codec
 (RFC 6716), built as a pure-Go port of [libopus](https://gitlab.xiph.org/xiph/opus).
-No cgo and no external libraries in the published module.
+No cgo. The one runtime dependency is github.com/tphakala/simd (pure Go plus its own assembly, also cgo-free), which backs the hot pitch kernels.
 
 ## Status
 
