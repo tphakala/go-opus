@@ -438,27 +438,15 @@ func spreadingDecision(m *celtMode, X []int32, average *int, lastDecision int,
 	c := 0
 	for {
 		for i := 0; i < end; i++ {
-			var tcount [3]int
 			x := X[M*int(eBands[i])+c*N0:]
 			N := M * (int(eBands[i+1]) - int(eBands[i]))
 			if N <= 8 {
 				continue
 			}
-			// Compute rough CDF of |x[j]|.
-			for j := 0; j < N; j++ {
-				// x2N is Q13.
-				xj := int16(fixedmath.SHR32(x[j], normShift-14))
-				x2N := fixedmath.MULT16_16(int16(fixedmath.MULT16_16_Q15(xj, xj)), int16(N))
-				if x2N < int32(fixedmath.QCONST16(0.25, 13)) {
-					tcount[0]++
-				}
-				if x2N < int32(fixedmath.QCONST16(0.0625, 13)) {
-					tcount[1]++
-				}
-				if x2N < int32(fixedmath.QCONST16(0.015625, 13)) {
-					tcount[2]++
-				}
-			}
+			// Compute rough CDF of |x[j]|. The per-position histogram is the
+			// vectorizable core, factored into spreadingHist (spreading_hist.go).
+			var tcount [3]int
+			tcount[0], tcount[1], tcount[2] = spreadingHist(x, N)
 			// Only include four last bands (8 kHz and up).
 			if i > m.nbEBands-4 {
 				hfSum += int(fixedmath.Celt_udiv(uint32(32*(tcount[1]+tcount[0])), uint32(N)))
