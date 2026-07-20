@@ -413,6 +413,13 @@ func stereoMerge(X, Y []int32, mid int32, N int) {
 	}
 }
 
+// spreadingDecision ports spreading_decision (bands.c:470): the encoder-only
+// decision of how much to spread the pulses in the current frame. It builds a
+// rough |x| CDF per band, folds it into a running average with hysteresis, and
+// (when updateHf) updates the tapset decision from the high-frequency content.
+// average / hfAverage / tapsetDecision are read-modify-write, matching the C
+// int* out-parameters. The FUZZING override is excluded (it is not in the frozen
+// build).
 func spreadingDecision(m *celtMode, X []int32, average *int, lastDecision int,
 	hfAverage, tapsetDecision *int, updateHf, end, C, M int, spreadWeight []int) int {
 	sum := 0
@@ -493,13 +500,6 @@ func spreadingDecision(m *celtMode, X []int32, average *int, lastDecision int,
 
 // orderyTable is the natural-to-ordery Hadamard index table for N=2,4,8,16
 // (bands.c:567).
-// spreadingDecision ports spreading_decision (bands.c:470): the encoder-only
-// decision of how much to spread the pulses in the current frame. It builds a
-// rough |x| CDF per band, folds it into a running average with hysteresis, and
-// (when updateHf) updates the tapset decision from the high-frequency content.
-// average / hfAverage / tapsetDecision are read-modify-write, matching the C
-// int* out-parameters. The FUZZING override is excluded (it is not in the frozen
-// build).
 var orderyTable = [...]int{
 	1, 0,
 	3, 0, 2, 1,
