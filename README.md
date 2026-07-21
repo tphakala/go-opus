@@ -145,9 +145,9 @@ Four things closed most of it:
 What remains is the rest of that 72%: the fused, Opus-specific kernels the
 profile ranks next. The MDCT/FFT radix butterflies are vectorized (via the
 `tphakala/simd` `cint` kernels), and their strided twiddle gather is precomputed
-at plan time rather than looked up through a process-global map, so the ones
-still on the list are the PVQ search, `exp_rotation`, the comb filter, and the
-spreading decision.
+at plan time rather than looked up through a process-global map; the
+spreading-decision histogram has a hand-written NEON and SSE2 kernel. So the
+ones still on the list are the PVQ search, `exp_rotation`, and the comb filter.
 
 Reproduce with:
 
