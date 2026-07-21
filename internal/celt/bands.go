@@ -413,8 +413,6 @@ func stereoMerge(X, Y []int32, mid int32, N int) {
 	}
 }
 
-// orderyTable is the natural-to-ordery Hadamard index table for N=2,4,8,16
-// (bands.c:567).
 // spreadingDecision ports spreading_decision (bands.c:470): the encoder-only
 // decision of how much to spread the pulses in the current frame. It builds a
 // rough |x| CDF per band, folds it into a running average with hysteresis, and
@@ -500,6 +498,8 @@ func spreadingDecision(m *celtMode, X []int32, average *int, lastDecision int,
 	return decision
 }
 
+// orderyTable is the natural-to-ordery Hadamard index table for N=2,4,8,16
+// (bands.c:567).
 var orderyTable = [...]int{
 	1, 0,
 	3, 0, 2, 1,
