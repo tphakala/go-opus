@@ -44,6 +44,11 @@ func fillRandI32(r *rand.Rand, n int) []int32 {
 func TestHaar1SIMDMatchesScalar(t *testing.T) {
 	r := rand.New(rand.NewSource(1))
 	strides := []int{-1, 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 30}
+	// Both sides of the butterfly dispatch boundary must stay in the matrix, or a
+	// future threshold change would silently leave one branch untested.
+	if !slices.Contains(strides, minHaar1ButterflyStride) || !slices.Contains(strides, minHaar1ButterflyStride-1) {
+		t.Fatalf("stride matrix must straddle minHaar1ButterflyStride=%d", minHaar1ButterflyStride)
+	}
 	n0s := []int{0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 30, 32, 64, 120, 176, 240}
 	for _, stride := range strides {
 		for _, N0 := range n0s {
@@ -103,7 +108,7 @@ func BenchmarkHaar1(b *testing.B) {
 	// Representative (N0, stride) pairs from quant_all_bands haar1(X, N>>k, 1<<k)
 	// and the TF analysis: stride grows and comb count shrinks as k rises.
 	cases := []struct{ N0, stride int }{
-		{960, 1}, {480, 2}, {240, 4}, {120, 8}, {64, 16},
+		{960, 1}, {480, 2}, {240, 4}, {120, 8}, {64, 16}, {32, 32},
 		{176, 1}, {176, 2}, {88, 4},
 		// touch = 100 is not a multiple of the 8-wide SIMD width, so this shape
 		// times the ScaleQ31 scalar remainder that the divisible-by-8 shapes skip.
