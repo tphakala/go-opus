@@ -228,13 +228,15 @@ func denormaliseBands(m *celtMode, X, freq, bandLogE []int32, start, end, M, dow
 			g = 2147483647
 			shift = 0
 		}
-		// Slice freq and X from the same fi so the prover sees equal lengths;
-		// ranging X (read) and indexing freq (write) drops the per-sample checks.
+		// fb and xb are the same [fi:bandEnd] window, so they share a length and
+		// (across denormaliseBands' callers) are either distinct buffers or the
+		// exact same slice, never a shifted overlap. denormaliseGain requants the
+		// whole band in one fused SIMD pass (dst=fb, a=xb, g, preShift=30-normShift,
+		// postShift=shift); preShift is the constant 6 and shift is clamped to
+		// [0,30] above, so both stay inside i32.GainQ31's [0,31] domain.
 		fb := freq[fi:bandEnd]
 		xb := X[fi:bandEnd]
-		for k, xv := range xb {
-			fb[k] = fixedmath.PSHR32(fixedmath.MULT32_32_Q31(fixedmath.SHL32(xv, 30-normShift), g), shift)
-		}
+		denormaliseGain(fb, xb, g, 30-normShift, shift)
 		fi = bandEnd
 	}
 	// celt_assert(start <= end); OPUS_CLEAR(&freq[bound], N-bound)
@@ -1571,7 +1573,10 @@ func QuantAllBandsEncode(start, end int, X, Y []int32, collapseMasks []byte, ban
 
 // DenormaliseBands is the exported seam over denormaliseBands bound to
 // mode48000_960 (celt/celt_decoder.c:453). freq must have length
-// M*shortMdctSize; X and bandLogE cover the bands being synthesized.
+// M*shortMdctSize; X and bandLogE cover the bands being synthesized. freq and X
+// must be distinct buffers or the exact same slice, never partially overlapping
+// views of one array: the requant runs through i32.GainQ31, which allows an
+// exact element-for-element alias but not a shifted overlap.
 func DenormaliseBands(X, freq, bandLogE []int32, start, end, M, downsample, silence int) {
 	denormaliseBands(&mode48000_960, X, freq, bandLogE, start, end, M, downsample, silence)
 }
