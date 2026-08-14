@@ -116,7 +116,7 @@ func BenchmarkHaar1(b *testing.B) {
 		}
 		seed := make([]int32, n)
 		for i := range seed {
-			seed[i] = int32(i*2654435761 + 1)
+			seed[i] = int32(uint32(i)*2654435761 + 1)
 		}
 		b.Run(fmt.Sprintf("scalar/N%d_s%d", c.N0, c.stride), func(b *testing.B) {
 			buf := append([]int32(nil), seed...)
