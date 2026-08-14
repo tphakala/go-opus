@@ -162,16 +162,22 @@ func normaliseBands(m *celtMode, freq, X, bandE []int32, end, C, M int) {
 			shift := 30 - fixedmath.Celt_zlog2(E)
 			E = fixedmath.SHL32(E, shift)
 			g := fixedmath.Celt_rcp_norm32(E)
-			// Slice X and freq to the band range with the same lo/hi so the
-			// prover sees equal lengths; ranging freq (read) and indexing X
-			// (write) drops the per-sample bounds checks.
+			// xb and fb are the same [lo:hi] window of X and freq, so they
+			// share a length and (across normaliseBands' callers, where C marks
+			// both OPUS_RESTRICT) are distinct buffers, never a shifted overlap.
+			// bandGainRequant requants the whole band in one fused SIMD pass
+			// (dst=xb, src=fb, g, preShift=shift, postShift=30-normShift);
+			// postShift is the constant 6 and shift = 30-celt_zlog2(E) is in
+			// [0,30] for every int32 E (celt_zlog2 is 0 for E<=0, else ilog2(E)
+			// in [0,30]), so both stay inside i32.GainQ31's [0,31] domain. C
+			// writes MULT32_32_Q31(g, SHL32(freq[j],shift)); the kernel computes
+			// MULT32_32_Q31(SHL32(src[k],shift), g), identical because the int64
+			// product is commutative.
 			lo := c*N + M*int(eBands[i])
 			hi := c*N + M*int(eBands[i+1])
 			xb := X[lo:hi]
 			fb := freq[lo:hi]
-			for k, fv := range fb {
-				xb[k] = fixedmath.PSHR32(fixedmath.MULT32_32_Q31(g, fixedmath.SHL32(fv, shift)), 30-normShift)
-			}
+			bandGainRequant(xb, fb, g, shift, 30-normShift)
 			i++
 			if i >= end {
 				break
@@ -229,14 +235,14 @@ func denormaliseBands(m *celtMode, X, freq, bandLogE []int32, start, end, M, dow
 			shift = 0
 		}
 		// fb and xb are the same [fi:bandEnd] window, so they share a length and
-		// (across denormaliseBands' callers) are either distinct buffers or the
-		// exact same slice, never a shifted overlap. denormaliseGain requants the
-		// whole band in one fused SIMD pass (dst=fb, a=xb, g, preShift=30-normShift,
+		// (across denormaliseBands' callers, where C marks both OPUS_RESTRICT) are
+		// distinct buffers, never a shifted overlap. bandGainRequant requants the
+		// whole band in one fused SIMD pass (dst=fb, src=xb, g, preShift=30-normShift,
 		// postShift=shift); preShift is the constant 6 and shift is clamped to
 		// [0,30] above, so both stay inside i32.GainQ31's [0,31] domain.
 		fb := freq[fi:bandEnd]
 		xb := X[fi:bandEnd]
-		denormaliseGain(fb, xb, g, 30-normShift, shift)
+		bandGainRequant(fb, xb, g, 30-normShift, shift)
 		fi = bandEnd
 	}
 	// celt_assert(start <= end); OPUS_CLEAR(&freq[bound], N-bound)
@@ -1592,7 +1598,10 @@ func ComputeBandEnergies(X, bandE []int32, end, C, LM int) {
 // NormaliseBands is the exported encode seam over normaliseBands bound to
 // mode48000_960. freq is the MDCT spectrum, bandE the amplitudes from
 // ComputeBandEnergies, and X receives the C*(M*shortMdctSize) unit-energy
-// coefficients. M is 1<<LM.
+// coefficients. M is 1<<LM. freq and X must be distinct buffers or the exact
+// same slice, never partially overlapping views of one array: the requant runs
+// through i32.GainQ31, which allows an exact element-for-element alias but not a
+// shifted overlap.
 func NormaliseBands(freq, X, bandE []int32, end, C, M int) {
 	normaliseBands(&mode48000_960, freq, X, bandE, end, C, M)
 }
