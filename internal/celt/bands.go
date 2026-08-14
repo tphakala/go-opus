@@ -163,16 +163,17 @@ func normaliseBands(m *celtMode, freq, X, bandE []int32, end, C, M int) {
 			E = fixedmath.SHL32(E, shift)
 			g := fixedmath.Celt_rcp_norm32(E)
 			// xb and fb are the same [lo:hi] window of X and freq, so they
-			// share a length and (across normaliseBands' callers, where C marks
-			// both OPUS_RESTRICT) are distinct buffers, never a shifted overlap.
-			// bandGainRequant requants the whole band in one fused SIMD pass
-			// (dst=xb, src=fb, g, preShift=shift, postShift=30-normShift);
-			// postShift is the constant 6 and shift = 30-celt_zlog2(E) is in
-			// [0,30] for every int32 E (celt_zlog2 is 0 for E<=0, else ilog2(E)
-			// in [0,30]), so both stay inside i32.GainQ31's [0,31] domain. C
-			// writes MULT32_32_Q31(g, SHL32(freq[j],shift)); the kernel computes
-			// MULT32_32_Q31(SHL32(src[k],shift), g), identical because the int64
-			// product is commutative.
+			// share a length and (across normaliseBands' callers, whose freq
+			// and X the C source marks OPUS_RESTRICT) are distinct buffers,
+			// never a shifted overlap. bandGainRequant requants the whole band
+			// in one fused SIMD pass (dst=xb, src=fb, g, preShift=shift,
+			// postShift=30-normShift); postShift is the constant 6 and shift =
+			// 30-celt_zlog2(E) is in [0,30] for every int32 E (celt_zlog2 is 0
+			// for E<=0, else ilog2(E) in [0,30]), so both stay inside
+			// i32.GainQ31's [0,31] domain. The C source writes
+			// MULT32_32_Q31(g, SHL32(freq[j],shift)); the kernel computes
+			// MULT32_32_Q31(SHL32(src[k],shift), g), identical because the
+			// int64 product is commutative.
 			lo := c*N + M*int(eBands[i])
 			hi := c*N + M*int(eBands[i+1])
 			xb := X[lo:hi]
@@ -235,11 +236,12 @@ func denormaliseBands(m *celtMode, X, freq, bandLogE []int32, start, end, M, dow
 			shift = 0
 		}
 		// fb and xb are the same [fi:bandEnd] window, so they share a length and
-		// (across denormaliseBands' callers, where C marks both OPUS_RESTRICT) are
-		// distinct buffers, never a shifted overlap. bandGainRequant requants the
-		// whole band in one fused SIMD pass (dst=fb, src=xb, g, preShift=30-normShift,
-		// postShift=shift); preShift is the constant 6 and shift is clamped to
-		// [0,30] above, so both stay inside i32.GainQ31's [0,31] domain.
+		// (across denormaliseBands' callers, whose freq and X the C source marks
+		// OPUS_RESTRICT) are distinct buffers, never a shifted overlap.
+		// bandGainRequant requants the whole band in one fused SIMD pass (dst=fb,
+		// src=xb, g, preShift=30-normShift, postShift=shift); preShift is the
+		// constant 6 and shift is clamped to [0,30] above, so both stay inside
+		// i32.GainQ31's [0,31] domain.
 		fb := freq[fi:bandEnd]
 		xb := X[fi:bandEnd]
 		bandGainRequant(fb, xb, g, 30-normShift, shift)

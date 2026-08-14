@@ -68,9 +68,15 @@ func TestBandGainRequantMatchesScalar(t *testing.T) {
 			for _, preShift := range bandGainShifts {
 				for _, postShift := range bandGainShifts {
 					src := fillRandI32(r, n)
-					// dstLen == n, then n+8 slack to prove the untouched tail.
+					// dstLen == n, then n+8 slack to prove the untouched tail,
+					// then n-1 (a short dst) to prove the min(len(dst),len(src))
+					// write bound: only dstLen elements are written and src past
+					// dstLen is not read into dst.
 					runBandGainRequantPair(t, src, n, g, preShift, postShift)
 					runBandGainRequantPair(t, src, n+8, g, preShift, postShift)
+					if n > 1 {
+						runBandGainRequantPair(t, src, n-1, g, preShift, postShift)
+					}
 				}
 			}
 		}

@@ -34,10 +34,10 @@ import "github.com/tphakala/simd/i32"
 //
 // Aliasing. GainQ31 allows dst to alias src exactly element for element (each
 // lane reads src[k] before its own dst[k] store) but not a shifted overlap. Both
-// callers pass the identical band window of two buffers; C declares freq and X
-// OPUS_RESTRICT in both normalise_bands and denormalise_bands, so real callers
-// never overlap at all, and GainQ31's exact-alias allowance is strictly more
-// permissive than what they need.
+// callers pass the identical band window of two buffers; the C source declares
+// freq and X OPUS_RESTRICT in both normalise_bands and denormalise_bands, so
+// real callers never overlap at all, and GainQ31's exact-alias allowance is
+// strictly more permissive than what they need.
 func bandGainRequant(dst, src []int32, g int32, preShift, postShift int) {
 	i32.GainQ31(dst, src, g, preShift, postShift)
 }
