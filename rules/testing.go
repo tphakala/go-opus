@@ -50,8 +50,11 @@ func BenchmarkLoop(m dsl.Matcher) {
 		`for range $b.N { $*body }`,
 	).
 		Where(m["b"].Type.Is("*testing.B")).
-		Report("use for $b.Loop() { ... } instead of for range $b.N (Go 1.24+)").
-		Suggest("for $b.Loop() { $body }")
+		// No Suggest: the replacement embeds the loop body ($*body), and the
+		// go-ruleguard engine bundled in golangci-lint (v0.4.5) panics rendering a
+		// node slice in a message template (go/printer: unsupported node type
+		// *gogrep.NodeSlice). The Report already states the rewrite.
+		Report("use for $b.Loop() { ... } instead of for range $b.N (Go 1.24+)")
 }
 
 // TestingContext detects context.Background() or context.TODO() in test functions

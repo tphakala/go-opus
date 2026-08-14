@@ -148,8 +148,11 @@ func RangeOverInteger(m dsl.Matcher) {
 			!m["n"].Text.Matches(`.*\.N$`) &&
 				!m["n"].Text.Matches(`\.(NumField|NumMethod|NumIn|NumOut)\(\)$`),
 		).
-		Report("use for $i := range $n instead of for $i := 0; $i < $n; $i++ (Go 1.22+)").
-		Suggest("for $i := range $n { $body }")
+		// No Suggest: the replacement embeds the loop body ($*body), and the
+		// go-ruleguard engine bundled in golangci-lint (v0.4.5) panics rendering a
+		// node slice in a message template (go/printer: unsupported node type
+		// *gogrep.NodeSlice). The Report already states the rewrite.
+		Report("use for $i := range $n instead of for $i := 0; $i < $n; $i++ (Go 1.22+)")
 }
 
 // AppendWithoutValues detects append calls with no values which have no effect.

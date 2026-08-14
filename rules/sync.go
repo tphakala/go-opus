@@ -34,16 +34,22 @@ func WaitGroupGo(m dsl.Matcher) {
 		`$wg.Add(1); go func() { defer $wg.Done(); $*body }()`,
 	).
 		Where(m["wg"].Type.Is("*sync.WaitGroup") || m["wg"].Type.Is("sync.WaitGroup")).
-		Report("use $wg.Go(func() { $body }) instead of manual Add/Done pattern (Go 1.25+)").
-		Suggest("$wg.Go(func() { $body })")
+		// No Suggest: the replacement embeds the goroutine body ($*body), and the
+		// go-ruleguard engine bundled in golangci-lint (v0.4.5) panics rendering a
+		// node slice in a message template (*gogrep.NodeSlice). The Report keeps a
+		// literal "{ ... }" for the same reason.
+		Report("use $wg.Go(func() { ... }) instead of manual Add/Done pattern (Go 1.25+)")
 
 	// Pattern 2: Same but with pointer receiver explicitly
 	m.Match(
 		`$wg.Add(1); go func() { defer $wg.Done(); $*body }()`,
 	).
 		Where(m["wg"].Type.Underlying().Is("sync.WaitGroup")).
-		Report("use $wg.Go(func() { $body }) instead of manual Add/Done pattern (Go 1.25+)").
-		Suggest("$wg.Go(func() { $body })")
+		// No Suggest: the replacement embeds the goroutine body ($*body), and the
+		// go-ruleguard engine bundled in golangci-lint (v0.4.5) panics rendering a
+		// node slice in a message template (*gogrep.NodeSlice). The Report keeps a
+		// literal "{ ... }" for the same reason.
+		Report("use $wg.Go(func() { ... }) instead of manual Add/Done pattern (Go 1.25+)")
 
 	// Pattern 3: When wg is passed by reference to the closure
 	m.Match(
@@ -51,5 +57,7 @@ func WaitGroupGo(m dsl.Matcher) {
 		`$wg.Add(1); go func($param $typ) { defer $param.Done(); $*body }(&$wg)`,
 	).
 		Where(m["wg"].Type.Is("*sync.WaitGroup") || m["wg"].Type.Is("sync.WaitGroup")).
-		Report("use $wg.Go(func() { $body }) instead of manual Add/Done pattern (Go 1.25+)")
+		// A literal "{ ... }" here rather than $body, for the same node-slice
+		// render reason noted on patterns 1 and 2 above.
+		Report("use $wg.Go(func() { ... }) instead of manual Add/Done pattern (Go 1.25+)")
 }
