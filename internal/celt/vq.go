@@ -117,6 +117,61 @@ func expRotation1(X []int32, length, stride int, c, s int16) {
 	}
 }
 
+// expRotation1Stride1 is expRotation1 specialized to stride == 1, the rotation
+// pass that runs for every block on every call. At stride 1 the pair windows
+// overlap so that the forward pass's store to b[i] (X[i+1]) is consumed only as
+// the next iteration's x1 (a[i+1]) and is then overwritten by that iteration's
+// a[i+1] store; the backward pass is the mirror image on a[i]. So the genuine
+// sequential recurrence (the part of the spread rotation issue #44 says can never
+// be vectorized) is carried in a register instead of round-tripping through
+// memory every iteration, and only the surviving store per index is written: a[i]
+// in the forward pass with the single boundary element X[length-1] flushed after
+// it, and b[i] in the backward pass with X[0] flushed after it.
+//
+// Bit-exact against expRotation1 called with stride 1: every computed value,
+// operand, PSHR32 round-half-up at 15, EXTRACT16 narrowing, and the ms = NEG16(s)
+// wrap is textually identical, and the intermediate stores skipped here are
+// exactly the ones expRotation1 overwrites one iteration later, so the final
+// contents of X are the same byte for byte. Guarded on length > 1 to reproduce
+// expRotation1's `length > stride` no-op.
+func expRotation1Stride1(X []int32, length int, c, s int16) {
+	if length <= 1 {
+		return
+	}
+	ms := int16(fixedmath.NEG16(s))
+
+	// Forward pass, i in [0, length-1). a[i]==X[i], b[i]==X[i+1]. x1 carries X[i]
+	// (the value expRotation1 reads as a[i] each iteration); the b[i] result is
+	// held in t and promoted to the next iteration's x1 rather than stored.
+	a := X[: length-1 : length]
+	b := X[1:length]
+	x1 := a[0]
+	for i := range a {
+		x2 := b[i]
+		t := int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x2+int32(s)*x1, 15)))
+		a[i] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x1+int32(ms)*x2, 15)))
+		x1 = t
+	}
+	// X[length-1] is written only by the forward pass (a never reaches it), so
+	// flush the final carry once.
+	b[len(b)-1] = x1
+
+	// Backward pass, i from length-2-1 down to 0 over the shorter prefix. x2
+	// carries X[i+1] (the value expRotation1 reads as b[i] each iteration); the
+	// a[i] result is held in x2 and overwritten next iteration rather than stored.
+	if n2 := length - 2; n2 > 0 {
+		a2, b2 := a[:n2], b[:n2]
+		x2 := b2[n2-1]
+		for i := n2 - 1; i >= 0; i-- {
+			x1 := a2[i]
+			b2[i] = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x2+int32(s)*x1, 15)))
+			x2 = int32(fixedmath.EXTRACT16(fixedmath.PSHR32(int32(c)*x1+int32(ms)*x2, 15)))
+		}
+		// X[0] is written only by the backward pass, so flush its final carry once.
+		a2[0] = x2
+	}
+}
+
 // expRotation applies (dir<0) or undoes (dir>0) the spread rotation over the band
 // X of the given length, split into stride interleaved blocks with K pulses and
 // the given spread. No-op when 2*K>=len or spread==SPREAD_NONE. (vq.c:104)
@@ -161,9 +216,9 @@ func expRotation(X []int32, length, dir, stride, k, spread int) {
 			if stride2 != 0 {
 				expRotation1(block, length, stride2, s, c)
 			}
-			expRotation1(block, length, 1, c, s)
+			expRotation1Stride1(block, length, c, s)
 		} else {
-			expRotation1(block, length, 1, c, int16(fixedmath.NEG16(s)))
+			expRotation1Stride1(block, length, c, int16(fixedmath.NEG16(s)))
 			if stride2 != 0 {
 				expRotation1(block, length, stride2, s, int16(fixedmath.NEG16(c)))
 			}
