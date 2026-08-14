@@ -182,7 +182,7 @@ func BenchmarkDenormaliseGain(b *testing.B) {
 	for _, n := range lengths {
 		seed := make([]int32, n)
 		for i := range seed {
-			seed[i] = int32(i*2654435761 + 1)
+			seed[i] = int32(uint32(i)*2654435761 + 1)
 		}
 		const g = int32(1 << 24)
 		b.Run(fmt.Sprintf("scalar/n%d", n), func(b *testing.B) {
