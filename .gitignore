@@ -29,6 +29,7 @@ coverage.txt
 .idea/
 .vscode/
 .serena/
+.claude/
 
 # Local tool caches
 cache/
