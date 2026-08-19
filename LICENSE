@@ -1,14 +1,9 @@
-go-opus is a native Go port (transliteration) of libopus, and is distributed
-under the same 3-clause BSD license as libopus. It therefore carries the
-upstream Opus copyright alongside the copyright for the Go port.
-
 Copyright (c) 2026 Tomi P. Hakala (go-opus, the Go port)
-
-Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,
-                    Jean-Marc Valin, Timothy B. Terriberry,
-                    CSIRO, Gregory Maxwell, Mark Borgerding,
-                    Erik de Castro Lopo, Mozilla, Amazon
-                    (libopus, the transliteration reference, tag v1.6.1)
+Copyright (c) 2001-2023 Xiph.Org, Skype Limited, Octasic,
+                        Jean-Marc Valin, Timothy B. Terriberry,
+                        CSIRO, Gregory Maxwell, Mark Borgerding,
+                        Erik de Castro Lopo, Mozilla, Amazon
+                        (libopus, the transliteration reference, tag v1.6.1)
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions
