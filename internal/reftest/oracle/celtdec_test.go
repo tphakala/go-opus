@@ -35,7 +35,7 @@ func (g *lcg) next() uint32 {
 	return uint32(g.s >> 32)
 }
 
-func (g *lcg) sym() float64 { return float64(int32(g.next()))/2147483648.0 }
+func (g *lcg) sym() float64 { return float64(int32(g.next())) / 2147483648.0 }
 
 // genTone produces steady sine tones (distinct per channel), which drive the
 // encoder to enable the pitch post-filter.

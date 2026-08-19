@@ -29,10 +29,10 @@ const (
 
 // C bandwidth constants (include/opus_defines.h) for the force-bandwidth script.
 const (
-	oBandwidthNarrowband   = 1101 // OPUS_BANDWIDTH_NARROWBAND
-	oBandwidthWideband     = 1103 // OPUS_BANDWIDTH_WIDEBAND
+	oBandwidthNarrowband    = 1101 // OPUS_BANDWIDTH_NARROWBAND
+	oBandwidthWideband      = 1103 // OPUS_BANDWIDTH_WIDEBAND
 	oBandwidthSuperwideband = 1104 // OPUS_BANDWIDTH_SUPERWIDEBAND
-	oBandwidthFullband     = 1105 // OPUS_BANDWIDTH_FULLBAND
+	oBandwidthFullband      = 1105 // OPUS_BANDWIDTH_FULLBAND
 )
 
 // OpusEncoder is a persistent top-level libopus encoder for one sequence, with

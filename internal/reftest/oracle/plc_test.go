@@ -281,7 +281,7 @@ func TestPLCPitchSearchDifferential(t *testing.T) {
 	g := &lcg{s: 0x17}
 	const len_ = 2048 - 720
 	const maxPitch = 720 - 100
-	xLpLen := len_       // >= len_>>1
+	xLpLen := len_ // >= len_>>1
 	yLen := len_ + maxPitch
 
 	check := func(name string, xLp, y []int16) {
