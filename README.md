@@ -44,8 +44,11 @@ exhaustive or multi-second randomized sequences. The published module itself is
 pure Go with zero cgo.
 
 The internal codec packages (`internal/celt`, `internal/silk`, the range coder,
-and the fixed-point math) are deliberately written in a C-shaped style so they
-stay diffable against upstream libopus; the public API is idiomatic Go.
+and the fixed-point math) carry per-file provenance references to the libopus
+v1.6.1 source (e.g. `// celt/rate.c:249`) and are held **bit-exact** against it
+by the `refc` differential gate, which is the sole correctness contract. They
+are written in idiomatic Go where that does not obscure the mapping back to the
+C; the public API is idiomatic Go throughout.
 
 ## Why fixed-point
 

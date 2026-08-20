@@ -1,19 +1,19 @@
-// Verbatim transliteration of celt/rate.c and the cache-driven helpers of
-// celt/rate.h (libopus v1.6.1, commit 3da9f7a6) for the frozen FIXED_POINT,
-// DISABLE_FLOAT_API, non-CUSTOM_MODES, non-ENABLE_QEXT build: CELT bit
-// allocation. clt_compute_allocation reserves the skip/intensity/dual-stereo
-// bits (exact eighth-bit BITRES arithmetic, exact order), runs a 6-step
-// bisection over the static allocVectors quality curves, then interp_bits2pulses
-// walks bands top-down deciding skips WHILE encoding/decoding the skip flags
-// interleaved with the budget math. init_caps builds the per-band cap[] from the
-// prebuilt cache_caps50 table.
+// Port of celt/rate.c and the cache-driven helpers of celt/rate.h (libopus
+// v1.6.1, commit 3da9f7a6) for the frozen FIXED_POINT, DISABLE_FLOAT_API,
+// non-CUSTOM_MODES, non-ENABLE_QEXT build: CELT bit allocation.
+// clt_compute_allocation reserves the skip/intensity/dual-stereo bits (exact
+// eighth-bit BITRES arithmetic, exact order), runs a 6-step bisection over the
+// static allocVectors quality curves, then interp_bits2pulses walks bands
+// top-down deciding skips WHILE encoding/decoding the skip flags interleaved with
+// the budget math. init_caps builds the per-band cap[] from the prebuilt
+// cache_caps50 table.
 //
-// This is a named verbatim zone (docs/hard-parts.md section 3): NO reasoning, NO
-// restructuring, NO "clean Go rewrite". Every temporary keeps its C name and
-// declaration order; every eighth-bit (BITRES) expression keeps C's exact form
-// and operator precedence. Correctness is proved by the EXHAUSTIVE differential
-// sweep in internal/reftest/oracle (rate_test.go), not by review; the thresh,
-// cap and balance-carry corner cases are unenumerable by inspection.
+// The eighth-bit (BITRES) arithmetic must reproduce C's exact form, operator
+// precedence and evaluation order: correctness is proved by the EXHAUSTIVE
+// differential sweep in internal/reftest/oracle (rate_test.go), not by review,
+// and the thresh, cap and balance-carry corner cases are unenumerable by
+// inspection. Index shape may be idiomatic Go where the gate confirms it (the
+// bounds-check-eliding slice views below are bit-exact); the arithmetic may not.
 //
 // C's single ec_ctx serves both encode and decode; the Go range coder is two
 // distinct types, so interpBits2pulses/cltComputeAllocation take BOTH an
@@ -145,16 +145,27 @@ func interpBits2pulses(m *celtMode, start, end, skip_start int,
 	logM = LM << bitRes
 	lo = 0
 	hi = 1 << allocSteps
+	// Index the per-band allocation arrays through views resliced to their exact
+	// working extent [0,end) so the bounds prover elides the per-band IsInBounds
+	// checks in the bisection and final-walk loops below (j is always < end).
+	// Same backing arrays, same indices, identical eighth-bit arithmetic and
+	// order: bit-exact by construction, gate-verified (rate_test.go decode,
+	// rateenc_test.go encode).
+	b1 := bits1[:end]
+	b2 := bits2[:end]
+	th := thresh[:end]
+	cp := cap[:end]
+	bo := bits[:end]
 	for i = 0; i < allocSteps; i++ {
 		mid := (lo + hi) >> 1
 		psum = 0
 		done = 0
-		for j = end - 1; j >= start; j-- {
-			tmp := bits1[j] + int(int32(mid)*int32(bits2[j])>>allocSteps)
-			if tmp >= thresh[j] || done != 0 {
+		for j := end - 1; j >= start; j-- {
+			tmp := b1[j] + int(int32(mid)*int32(b2[j])>>allocSteps)
+			if tmp >= th[j] || done != 0 {
 				done = 1
 				/* Don't allocate more than we can actually use */
-				psum += int32(fixedmath.IMIN(tmp, cap[j]))
+				psum += int32(fixedmath.IMIN(tmp, cp[j]))
 			} else {
 				if tmp >= alloc_floor {
 					psum += int32(alloc_floor)
@@ -169,9 +180,9 @@ func interpBits2pulses(m *celtMode, start, end, skip_start int,
 	}
 	psum = 0
 	done = 0
-	for j = end - 1; j >= start; j-- {
-		tmp := bits1[j] + int(int32(lo)*int32(bits2[j])>>allocSteps)
-		if tmp < thresh[j] && done == 0 {
+	for j := end - 1; j >= start; j-- {
+		tmp := b1[j] + int(int32(lo)*int32(b2[j])>>allocSteps)
+		if tmp < th[j] && done == 0 {
 			if tmp >= alloc_floor {
 				tmp = alloc_floor
 			} else {
@@ -181,8 +192,8 @@ func interpBits2pulses(m *celtMode, start, end, skip_start int,
 			done = 1
 		}
 		/* Don't allocate more than we can actually use */
-		tmp = fixedmath.IMIN(tmp, cap[j])
-		bits[j] = tmp
+		tmp = fixedmath.IMIN(tmp, cp[j])
+		bo[j] = tmp
 		psum += int32(tmp)
 	}
 
@@ -284,12 +295,15 @@ func interpBits2pulses(m *celtMode, start, end, skip_start int,
 	left = total - psum
 	percoeff = int32(fixedmath.Celt_udiv(uint32(left), uint32(int32(int(m.eBands[codedBands])-int(m.eBands[start])))))
 	left -= int32(int(m.eBands[codedBands])-int(m.eBands[start])) * percoeff
-	for j = start; j < codedBands; j++ {
-		bits[j] += int(percoeff * int32(int(m.eBands[j+1])-int(m.eBands[j])))
+	// eb views eBands over [0,codedBands]; j+1 <= codedBands < len(eb), so the
+	// band-width reads fold check-free (same values, same order).
+	eb := m.eBands[:codedBands+1]
+	for j := start; j < codedBands; j++ {
+		bo[j] += int(percoeff * int32(int(eb[j+1])-int(eb[j])))
 	}
-	for j = start; j < codedBands; j++ {
-		tmp := int(fixedmath.MIN32(left, int32(int(m.eBands[j+1])-int(m.eBands[j]))))
-		bits[j] += tmp
+	for j := start; j < codedBands; j++ {
+		tmp := int(fixedmath.MIN32(left, int32(int(eb[j+1])-int(eb[j]))))
+		bo[j] += tmp
 		left -= int32(tmp)
 	}
 
