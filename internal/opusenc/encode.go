@@ -649,14 +649,27 @@ func (st *Encoder) encodeMultiframe(pcm []int16, frameSize int, data []byte, out
 
 	// :1757-1760. tmp_data holds the concatenated sub-frame payloads; the repacketizer
 	// aliases slices of it (Cat does not copy), and the assembled output goes to the
-	// separate caller buffer data, so the aliasing is safe. Pooled on the Encoder
-	// (grow-if-needed, then re-slice to the exact length) so the multiframe path stays
-	// at 0 allocs/op in steady state, like the single-frame path; it is fully rewritten
-	// from offset 0 each call and nothing aliasing it outlives the call.
-	if cap(st.tmpData) < maxLenSum {
+	// separate caller buffer data, so the aliasing is safe. It is fully rewritten from
+	// offset 0 each call and nothing aliasing it outlives the call, so it is pooled on
+	// the Encoder to keep the multiframe path at 0 allocs/op in steady state.
+	//
+	// maxLenSum tracks repacketize_len, which under VBR is the caller's buffer size, so
+	// RETAINING it unbounded would let one oversized VBR call permanently inflate every
+	// Encoder. Cap the RETAINED buffer at the packet-size ceiling (packetPayloadCap*6,
+	// the same bound as :1221); a call needing more gets a transient buffer that is not
+	// kept. maxLenSum itself is deliberately NOT capped: it feeds curr_max below, which
+	// libopus derives from the uncapped max_len_sum, so shrinking it would diverge.
+	const tmpDataRetainCap = packetPayloadCap * 6 // 7656; every CBR maxLenSum stays under this
+	var tmpData []byte
+	switch {
+	case maxLenSum <= cap(st.tmpData):
+		tmpData = st.tmpData[:maxLenSum]
+	case maxLenSum <= tmpDataRetainCap:
 		st.tmpData = make([]byte, maxLenSum)
+		tmpData = st.tmpData
+	default:
+		tmpData = make([]byte, maxLenSum)
 	}
-	tmpData := st.tmpData[:maxLenSum]
 	var rp packet.Repacketizer
 	rp.Init()
 

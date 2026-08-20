@@ -132,41 +132,47 @@ func TestOpusencMultiframeGate(t *testing.T) {
 func TestOpusencMultiframeLargeBuffer(t *testing.T) {
 	clips := gateCorpus(t)
 	const bigBuf = 10000 // > packet_size_cap*6 (7656)
-	const frameSize = 5760
 
+	// Both 40 ms (nb_frames 2) and 120 ms (nb_frames 6) are covered on purpose: at a
+	// high bitrate the 40 ms case drives cbr_bytes above nb_frames*packetPayloadCap,
+	// which is exactly where a tempting "cap max_len_sum to nb_frames*packetPayloadCap"
+	// optimization would change curr_max and diverge from C. max_len_sum feeds curr_max
+	// and C computes it uncapped, so it must stay uncapped here.
 	maxSeen := 0
-	for _, ch := range []int{1, 2} {
-		clip := firstClip(t, clips, ch)
-		for _, rm := range gateRateModes {
-			ch, rm := ch, rm
-			t.Run(fmt.Sprintf("c%d/%s", ch, rm.name), func(t *testing.T) {
-				cfg := defaultOpusencCfg(ch)
-				cfg.Fs = corpusRate
-				cfg.Bitrate = 512000 // clamps down to the buffer ceiling; drives curr_max high
-				cfg.VBR = rm.vbr
-				cfg.VBRConstraint = rm.vbrConstraint
-				cfg.Complexity = 10
-				pair := newEncPair(t, cfg)
+	for _, frameSize := range []int{1920, 5760} {
+		for _, ch := range []int{1, 2} {
+			clip := firstClip(t, clips, ch)
+			for _, rm := range gateRateModes {
+				ch, rm, frameSize := ch, rm, frameSize
+				t.Run(fmt.Sprintf("fs%d/c%d/%s", frameSize, ch, rm.name), func(t *testing.T) {
+					cfg := defaultOpusencCfg(ch)
+					cfg.Fs = corpusRate
+					cfg.Bitrate = 512000 // clamps down to the buffer ceiling; drives curr_max high
+					cfg.VBR = rm.vbr
+					cfg.VBRConstraint = rm.vbrConstraint
+					cfg.Complexity = 10
+					pair := newEncPair(t, cfg)
 
-				n := clip.countFrames(frameSize)
-				if n == 0 {
-					t.Fatalf("clip %s holds no whole %d-sample frame", clip.name, frameSize)
-				}
-				if n > 3 {
-					n = 3
-				}
-				for i := 0; i < n; i++ {
-					ret, pkt, _ := pair.framePkt(fmt.Sprintf("bigbuf/c%d/%s", ch, rm.name),
-						clip.frameAt(i, frameSize), frameSize, bigBuf)
-					if ret <= 0 {
-						t.Fatalf("frame %d: C encoder returned %d", i, ret)
+					n := clip.countFrames(frameSize)
+					if n == 0 {
+						t.Fatalf("clip %s holds no whole %d-sample frame", clip.name, frameSize)
 					}
-					assertMultiframe(t, "bigbuf", pkt, frameSize/(corpusRate/50), rm.vbr == 0)
-					if len(pkt) > maxSeen {
-						maxSeen = len(pkt)
+					if n > 3 {
+						n = 3
 					}
-				}
-			})
+					label := fmt.Sprintf("bigbuf/fs%d/c%d/%s", frameSize, ch, rm.name)
+					for i := 0; i < n; i++ {
+						ret, pkt, _ := pair.framePkt(label, clip.frameAt(i, frameSize), frameSize, bigBuf)
+						if ret <= 0 {
+							t.Fatalf("frame %d: C encoder returned %d", i, ret)
+						}
+						assertMultiframe(t, label, pkt, frameSize/(corpusRate/50), rm.vbr == 0)
+						if len(pkt) > maxSeen {
+							maxSeen = len(pkt)
+						}
+					}
+				})
+			}
 		}
 	}
 
