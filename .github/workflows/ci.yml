@@ -125,6 +125,35 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+      # Persist the cgo-compiled libopus objects across runs. setup-go's built-in
+      # cache keys on go.sum, which is identical for every job, so the first job to
+      # finish claims that key and the reftest leg's refc cgo objects (built only
+      # here, behind CGO_ENABLED=1 + the refc tag) never get saved, forcing a full
+      # libopus recompile every run. A dedicated key fixes that. Correctness does
+      # not rest on the key: Go's build cache is content-addressed on the exact C
+      # sources, cgo flags AND the C compiler binary, so a stale entry is rehashed
+      # and rebuilt, never linked. The key is still conservative (libopus submodule
+      # commit, the shim sources and cgo CFLAGS, and the cc version) so a submodule
+      # bump, a shim edit, or a runner GCC bump misses cleanly; without the cc
+      # version a compiler bump would let Go rebuild while actions/cache kept the old
+      # key and never re-saved, stranding the job in a permanent recompile. The
+      # restore-keys fall back to a partial cache the rebuild reuses.
+      - name: Resolve reftest cache-key inputs
+        id: cachekey
+        run: |
+          {
+            echo "libopus=$(git -C internal/reftest/libopus rev-parse HEAD)"
+            echo "cc=$("$(go env CC)" -dumpfullversion)"
+            echo "gocache=$(go env GOCACHE)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Cache libopus cgo build objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.cachekey.outputs.gocache }}
+          key: reftest-cgo-${{ runner.os }}-${{ runner.arch }}-go${{ env.GO_VERSION }}-cc${{ steps.cachekey.outputs.cc }}-libopus${{ steps.cachekey.outputs.libopus }}-${{ hashFiles('internal/reftest/oracle/*.c', 'internal/reftest/oracle/*.h', 'internal/reftest/oracle/oracle_cgo.go') }}
+          restore-keys: |
+            reftest-cgo-${{ runner.os }}-${{ runner.arch }}-go${{ env.GO_VERSION }}-cc${{ steps.cachekey.outputs.cc }}-libopus${{ steps.cachekey.outputs.libopus }}-
+            reftest-cgo-${{ runner.os }}-${{ runner.arch }}-go${{ env.GO_VERSION }}-cc${{ steps.cachekey.outputs.cc }}-
       # The vectors unlock the gate's REAL-AUDIO tier (corpus_test.go tier 2 reads
       # testvectorNN.dec as 48 kHz PCM) and the packet-inspection differential's RFC
       # corpus. Both t.Skip cleanly without them, which is precisely the failure mode
