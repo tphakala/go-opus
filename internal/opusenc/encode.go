@@ -100,14 +100,15 @@ package opusenc
 //
 // Any reordering of 3 and 4 diverges on the frame after next.
 //
-// # Deliberately not ported
+// MULTIFRAME (:1698-1838) IS ported, in encodeMultiframe. It fires for
+// frame_size > Fs/50 (> 20 ms) in CELT-only: a 40/60/80/100/120 ms frame is split
+// into 20 ms sub-frames, each encoded through encodeFrameNative with its own byte
+// budget, and reassembled by the repacketizer into a code-1/2/3 packet. Note the
+// degenerate branch at :1340 comes FIRST and handles a starved > 20 ms frame with
+// the same TOC-only packet the C does, so encodeMultiframe only ever sees a
+// non-degenerate long frame.
 //
-// MULTIFRAME (:1698-1838). It only fires for frame_size > Fs/50 (> 20 ms) in
-// CELT-only, and phase 4 tops out at 20 ms. encodeNative REJECTS that case with
-// ErrUnimplemented at exactly the point the C branches into the repacketizer,
-// rather than silently coding a wrong-length frame. Note the degenerate branch
-// at :1340 comes FIRST and does handle > 20 ms frames, so a starved 60 ms frame
-// still produces the same TOC-only packet the C does.
+// # Deliberately not ported
 //
 // DTX (:2564-2576), redundancy / celt_to_silk / to_celt / prefill (they need a
 // mode transition, which a forced-CELT-only encoder can never make), the whole
@@ -123,9 +124,10 @@ import (
 )
 
 // opusUnimplemented is OPUS_UNIMPLEMENTED (include/opus_defines.h:59). This port
-// returns it for the deferred multiframe path (> 20 ms frames) and for the
-// unported OPUS_AUTO mode decision, so a configuration outside the phase-4 scope
-// fails loudly instead of emitting a wrong packet.
+// returns it for the unported OPUS_AUTO mode decision and for the SILK-only
+// multiframe sub-split (encodeMultiframe's dead ModeSilkOnly arm), so a
+// configuration outside the ported scope fails loudly instead of emitting a wrong
+// packet.
 const opusUnimplemented = -5
 
 // packetPayloadCap is the 1276-byte ceiling opus_encode_frame_native puts on a
@@ -263,7 +265,7 @@ func (st *Encoder) Encode(pcm []int16, analysisFrameSize int, data []byte, maxDa
 //	:1541-1581 redundancy / prefill / SILK stereo->mono delay         DEAD (needs a mode transition)
 //	:1675      decide_fec                                             DEAD (returns 0 in CELT-only)
 //	:1678      CELT_SET_LSB_DEPTH                                     LIVE
-//	:1698-1838 multiframe                                             DEFERRED -> opusUnimplemented
+//	:1698-1838 multiframe                                             LIVE     -> encodeMultiframe
 //	:1840      opus_encode_frame_native                               LIVE
 func (st *Encoder) encodeNative(pcm []int16, frameSize int, data []byte, outDataBytes, lsbDepth int) int {
 	st.wit = Witness{CBRBytes: -1}
@@ -324,13 +326,13 @@ func (st *Encoder) encodeNative(pcm []int16, frameSize int, data []byte, outData
 	st.celt.SetLsbDepth(lsbDepth)
 
 	// :1698. The multiframe path. In CELT-only the condition reduces to
-	// frame_size > Fs/50, i.e. anything above 20 ms; a 40/60/80/100/120 ms frame
-	// would be split into 20 ms sub-frames, encoded one at a time through
-	// opus_encode_frame_native and re-assembled by the repacketizer into a code-2
-	// or code-3 packet. That is DEFERRED, and rejected here rather than
-	// mishandled.
+	// frame_size > Fs/50, i.e. anything above 20 ms; a 40/60/80/100/120 ms frame is
+	// split into 20 ms sub-frames, each encoded through encodeFrameNative and
+	// re-assembled by the repacketizer into a code-1/2/3 packet. outDataBytes (the
+	// UNCAPPED caller bound) feeds repacketize_len at :1750/1753, NOT the :1221-capped
+	// maxDataBytes.
 	if (frameSize > int(st.Fs)/50 && st.mode != ModeSilkOnly) || frameSize > 3*int(st.Fs)/50 {
-		return opusUnimplemented
+		return st.encodeMultiframe(pcm, frameSize, data, outDataBytes, d)
 	}
 
 	// :1840. NOTE what is passed as orig_max_data_bytes: the POST-CBR
@@ -601,6 +603,125 @@ func (st *Encoder) encodeFrameNative(pcm []int16, frameSize int, data []byte, or
 		}
 		ret = origMaxDataBytes
 	}
+	return ret
+}
+
+// encodeMultiframe is the opus_encode_native multiframe block (opus_encoder.c:1698-1838)
+// for the frozen forced-CELT-only config: a 40/60/80/100/120 ms frame is split into
+// nb_frames 20 ms sub-frames, each encoded through encodeFrameNative with its own byte
+// budget, and reassembled by the repacketizer into a code-1/2/3 packet.
+//
+// outDataBytes is the UNCAPPED caller buffer bound (opus_encode_native's out_data_bytes
+// parameter, before the :1221 IMIN(1276*6, .) cap). repacketize_len (:1750/1753) is
+// derived from it, NOT from the :1221-capped max_data_bytes, so it is threaded in
+// explicitly. d carries the post-DecideRates budget; st.bitrateBps is already the
+// requantized CBR bitrate (or the resolved VBR bitrate) and must not be recomputed.
+func (st *Encoder) encodeMultiframe(pcm []int16, frameSize int, data []byte, outDataBytes int, d RateDecision) int {
+	// :1713-1723. CELT-only: enc_frame_size is always Fs/50 (20 ms). The SILK-only arm
+	// (40/60 ms sub-frames) is dead because st.mode is never ModeSilkOnly here; guard it
+	// as unported rather than silently mis-splitting.
+	if st.mode == ModeSilkOnly {
+		return opusUnimplemented
+	}
+	encFrameSize := int(st.Fs) / 50
+	// :1725.
+	nbFrames := frameSize / encFrameSize
+
+	// :1740. max_header_bytes: a two-frame packet needs 3 (code 2, one length byte),
+	// otherwise 2 + (nb_frames-1)*2 for the code-3 count byte plus per-frame lengths.
+	maxHeaderBytes := 3
+	if nbFrames != 2 {
+		maxHeaderBytes = 2 + (nbFrames-1)*2
+	}
+
+	// :1749-1754. repacketize_len is the target assembled-packet length. It uses the
+	// UNCAPPED out_data_bytes (the gate uses buffers under the 7656-byte cap, so the
+	// distinction only shows on a caller buffer larger than 6*1276).
+	var repacketizeLen int
+	if st.useVbr != 0 || st.userBitrateBps == OpusBitrateMax {
+		repacketizeLen = outDataBytes
+	} else {
+		// celt_assert(cbr_bytes >= 0) at :1751.
+		repacketizeLen = fixedmath.IMIN(d.CBRBytes, outDataBytes)
+	}
+	// :1755.
+	maxLenSum := nbFrames + repacketizeLen - maxHeaderBytes
+
+	// :1757-1760. tmp_data holds the concatenated sub-frame payloads; the repacketizer
+	// aliases slices of it (Cat does not copy), and the assembled output goes to the
+	// separate caller buffer data, so the aliasing is safe. It is fully rewritten from
+	// offset 0 each call and nothing aliasing it outlives the call, so it is pooled on
+	// the Encoder to keep the multiframe path at 0 allocs/op in steady state.
+	//
+	// maxLenSum tracks repacketize_len, which under VBR is the caller's buffer size, so
+	// RETAINING it unbounded would let one oversized VBR call permanently inflate every
+	// Encoder. Cap the RETAINED buffer at the packet-size ceiling (packetPayloadCap*6,
+	// the same bound as :1221); a call needing more gets a transient buffer that is not
+	// kept. maxLenSum itself is deliberately NOT capped: it feeds curr_max below, which
+	// libopus derives from the uncapped max_len_sum, so shrinking it would diverge.
+	const tmpDataRetainCap = packetPayloadCap * 6 // 7656; every CBR maxLenSum stays under this
+	var tmpData []byte
+	switch {
+	case maxLenSum <= cap(st.tmpData):
+		tmpData = st.tmpData[:maxLenSum]
+	case maxLenSum <= tmpDataRetainCap:
+		st.tmpData = make([]byte, maxLenSum)
+		tmpData = st.tmpData
+	default:
+		tmpData = make([]byte, maxLenSum)
+	}
+	var rp packet.Repacketizer
+	rp.Init()
+
+	// :1763-1767. bak_to_mono == 0 in CELT-only (silk_mode.toMono is 0), so the else arm
+	// runs: prev_channels = stream_channels. encodeFrameNative also sets this per frame;
+	// the pre-loop assignment is kept for faithfulness.
+	st.prevChannels = st.streamChannels
+
+	totSize := 0
+	// :1769.
+	for i := 0; i < nbFrames; i++ {
+		// :1778. nonfinal_frame is written every iteration; it is read only on the SILK
+		// path (dead output here) and is excluded from the differential state compare.
+		st.nonfinalFrame = b2i(i < nbFrames-1)
+
+		// :1785. bitrate_to_bits uses enc_frame_size (the 20 ms sub-frame), NOT the full
+		// frame_size, which is exactly why the single-frame cbr_bytes derivation does not
+		// carry over. Integer /8 and /nbFrames truncate as in C.
+		currMax := fixedmath.IMIN(
+			int(bitrateToBits(st.bitrateBps, st.Fs, int32(encFrameSize)))/8,
+			maxLenSum/nbFrames)
+		// :1795.
+		currMax = fixedmath.IMIN(maxLenSum-totSize, currMax)
+
+		// :1804. Each sub-frame reuses encodeFrameNative with orig_max_data_bytes =
+		// currMax. Under CBR that function pads its own output up to currMax; under VBR
+		// the sub-frame is its natural length.
+		off := i * st.channels * encFrameSize
+		tmpLen := st.encodeFrameNative(pcm[off:], encFrameSize, tmpData[totSize:], currMax, d.EquivRate)
+		if tmpLen < 0 {
+			// :1814.
+			return opusInternalError
+		}
+		// :1818. tmp_len == 1 -> dtx_count++, but DTX is off so dtx_count stays 0.
+
+		// :1821. Cat the just-written sub-frame (aliasing tmpData[totSize:totSize+tmpLen]).
+		if err := rp.Cat(tmpData[totSize : totSize+tmpLen]); err != nil {
+			return opusInternalError
+		}
+		// :1828.
+		totSize += tmpLen
+	}
+
+	// :1831. pad = !use_vbr && (dtx_count != nb_frames); dtx_count is 0 and nb_frames
+	// >= 2, so this reduces to use_vbr == 0. The output is capped at repacketize_len.
+	pad := st.useVbr == 0
+	ret, err := rp.OutRangePadded(0, nbFrames, data, repacketizeLen, pad)
+	if err != nil {
+		// :1832.
+		return opusInternalError
+	}
+	// :1836 silk_mode.toMono restore is a no-op in CELT-only. :1838.
 	return ret
 }
 

@@ -18,8 +18,8 @@
 // (celt_encoder.c:255), which zero-stuffs the input up to 48 kHz. Everything at
 // this layer is expressed at Fs (encoder_buffer, delay_compensation, the frame-size
 // domain Fs/400..Fs/50, the Nyquist bandwidth clamps at :1643-1650) and CELT
-// converts once, at celt_encode_with_ec:1837. Frame durations above 20 ms need the
-// multiframe repacketizer and are rejected with OPUS_UNIMPLEMENTED.
+// converts once, at celt_encode_with_ec:1837. Frame durations above 20 ms are
+// coded through the multiframe repacketizer (opus_encode_native:1698).
 //
 // The build config is FIXED_POINT + DISABLE_FLOAT_API with no QEXT/RES24/DRED, so
 // opus_res is opus_int16 and the API input is int16 throughout. Consequently the
@@ -44,10 +44,6 @@
 //   - decide_fec (returns 0 at :943), compute_redundancy_bytes,
 //     compute_silk_rate_for_hybrid.
 //   - DTX (deferred).
-//   - The multiframe / repacketizer path (:1698-1838). It only triggers when
-//     frame_size > Fs/50 (more than 20 ms), and the phase-4 gate tops out at
-//     20 ms, so the single-frame CELT-only path never reaches it. Omitted
-//     deliberately, not by oversight.
 //
 // # Executed but output-dead
 //

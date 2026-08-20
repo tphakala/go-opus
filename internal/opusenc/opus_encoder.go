@@ -170,6 +170,14 @@ type Encoder struct {
 	// the rest of the Encoder.
 	pcmBuf []int16
 
+	// tmpData is the pooled stand-in for opus_encode_native's ALLOC(tmp_data, ...)
+	// stack buffer (:1757), used only on the multiframe (40-120 ms) path to hold the
+	// concatenated sub-frame payloads. NOT state: encodeMultiframe rewrites it from
+	// offset 0 every call and the repacketizer's frame slices into it do not outlive
+	// the call. Pooling it keeps the multiframe path at 0 allocs/op, matching the
+	// single-frame path. Not safe for concurrent use, like the rest of the Encoder.
+	tmpData []byte
+
 	// wit records which branches the last EncodeRaw took. It is NOT encoder state:
 	// nothing reads it, it is not reset by OPUS_RESET_STATE, and it has no C
 	// counterpart. It exists so the differential test can prove its sweep is not

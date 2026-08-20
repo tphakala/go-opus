@@ -82,8 +82,10 @@ const benchRate = 48000
 // built up front: generating it inside the loop would measure math.Sin.
 const benchFrames = 32
 
-// benchDurations are the four frame durations this release codes, named by the
-// divisor that turns a sample rate into a frame length.
+// benchDurations are frame durations this release codes, named by the divisor that
+// turns a sample rate into a frame length. 40 ms exercises the multiframe path (two
+// 20 ms sub-frames reassembled by the repacketizer), so the 0-allocs/op invariant is
+// enforced there too.
 var benchDurations = []struct {
 	name string
 	div  int // frameSize = SampleRate / div
@@ -92,6 +94,7 @@ var benchDurations = []struct {
 	{"5ms", 200},
 	{"10ms", 100},
 	{"20ms", 50},
+	{"40ms", 25}, // multiframe
 }
 
 // benchPCM builds benchFrames frames of the same deterministic, non-degenerate signal

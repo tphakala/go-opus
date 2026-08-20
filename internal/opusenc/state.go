@@ -40,8 +40,8 @@ import (
 //
 // Also absent, and correctly so, because they are not cross-frame state on this
 // path: silk_mode.stereoWidth_Q14 (recomputed from equiv_rate every frame at
-// :2320-2327 before any read), nonfinal_frame (written only inside the deferred
-// multiframe path), and silk_bw_switch / nb_no_activity_ms_Q1 (SILK/DTX only,
+// :2320-2327 before any read), nonfinal_frame (written only inside the multiframe
+// path, and read only on the SILK path), and silk_bw_switch / nb_no_activity_ms_Q1 (SILK/DTX only,
 // never written in CELT-only).
 type State struct {
 	StreamChannels       int32

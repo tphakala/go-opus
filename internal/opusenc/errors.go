@@ -13,13 +13,12 @@ var (
 	ErrBufferTooSmall = errors.New("opusenc: buffer too small")
 	// ErrInternal maps OPUS_INTERNAL_ERROR.
 	ErrInternal = errors.New("opusenc: internal error")
-	// ErrUnimplemented maps OPUS_UNIMPLEMENTED. This port returns it for the two
-	// configurations phase 4 deliberately defers rather than mishandles: frames
-	// longer than 20 ms (which libopus splits across the repacketizer at
-	// opus_encoder.c:1698) and the OPUS_AUTO mode decision (:1473, which needs
-	// compute_stereo_width). libopus itself SUPPORTS both; returning an error here
-	// is a divergence, and it is on purpose, because the alternative is a silently
-	// wrong packet.
+	// ErrUnimplemented maps OPUS_UNIMPLEMENTED. This port returns it for the
+	// OPUS_AUTO mode decision (:1473, which needs compute_stereo_width) and for the
+	// SILK-only multiframe sub-split (40/60 ms sub-frames), neither of which is
+	// ported. libopus itself SUPPORTS both; returning an error here is a deliberate
+	// divergence, because the alternative is a silently wrong packet. (Frames longer
+	// than 20 ms in CELT-only ARE coded, through encodeMultiframe.)
 	ErrUnimplemented = errors.New("opusenc: unimplemented in this build")
 )
 
