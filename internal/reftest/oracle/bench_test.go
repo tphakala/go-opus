@@ -63,6 +63,7 @@ var benchDurations = []struct {
 	{"5ms", 200},
 	{"10ms", 100},
 	{"20ms", 50},
+	{"40ms", 25}, // multiframe: 2x 20 ms sub-frames, byte-exact vs C
 }
 
 // benchBitrate is the rate both encoders are asked for. opus/bench_test.go uses the

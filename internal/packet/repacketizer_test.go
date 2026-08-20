@@ -308,3 +308,90 @@ func TestRepacketizerCatInvalid(t *testing.T) {
 		t.Errorf("Cat(truncated code3) err = nil want error")
 	}
 }
+
+// TestOutRangePaddedBounds checks the maxlen contract of the exported wrapper the
+// Opus encoder drives (opus_encoder.c:1831): maxlen must be within [0, len(data)].
+func TestOutRangePaddedBounds(t *testing.T) {
+	rp := catAll(t, []byte{0x00, 1, 2}, []byte{0x00, 3, 4})
+	buf := make([]byte, 20)
+	for _, maxlen := range []int{-1, 21, 100} {
+		if _, err := rp.OutRangePadded(0, rp.nbFrames, buf, maxlen, false); !errors.Is(err, ErrBadArg) {
+			t.Errorf("OutRangePadded(maxlen=%d) err = %v, want ErrBadArg", maxlen, err)
+		}
+	}
+}
+
+// TestOutRangePaddedCBRPromotesCode3 pins the behaviour the multiframe CBR path
+// relies on: with pad set and the assembled frames shorter than maxlen, a two-frame
+// packet is promoted to code 3 to carry the padding, the return value is maxlen, and
+// it still parses back as the two original frames.
+func TestOutRangePaddedCBRPromotesCode3(t *testing.T) {
+	rp := catAll(t, []byte{0x00, 1, 2}, []byte{0x00, 3, 4}) // two equal frames -> code 1 unpadded
+	buf := make([]byte, 20)
+	const maxlen = 12
+	n, err := rp.OutRangePadded(0, rp.nbFrames, buf, maxlen, true)
+	if err != nil {
+		t.Fatalf("OutRangePadded pad: %v", err)
+	}
+	if n != maxlen {
+		t.Fatalf("padded length = %d, want %d", n, maxlen)
+	}
+	if code := buf[0] & 0x3; code != 3 {
+		t.Errorf("TOC code = %d, want 3 (padding promotes the two-frame packet)", code)
+	}
+	p, err := Parse(buf[:n])
+	if err != nil {
+		t.Fatalf("Parse padded: %v", err)
+	}
+	if !framesEqual(p.Frames, [][]byte{{1, 2}, {3, 4}}) {
+		t.Errorf("frames = %v, want [[1 2] [3 4]]", p.Frames)
+	}
+	if len(p.Padding) == 0 {
+		t.Error("expected non-empty padding")
+	}
+}
+
+// TestOutRangePaddedUnpaddedNatural confirms that without pad the wrapper returns the
+// natural assembled length (the VBR multiframe case), even when maxlen leaves slack.
+func TestOutRangePaddedUnpaddedNatural(t *testing.T) {
+	rp := catAll(t, []byte{0x00, 1, 2}, []byte{0x00, 3, 4}) // code 1: 1 TOC + 4 payload = 5 bytes
+	buf := make([]byte, 20)
+	n, err := rp.OutRangePadded(0, rp.nbFrames, buf, 20, false)
+	if err != nil {
+		t.Fatalf("OutRangePadded: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("unpadded length = %d, want 5", n)
+	}
+	if code := buf[0] & 0x3; code != 1 {
+		t.Errorf("TOC code = %d, want 1 (two equal frames, no padding)", code)
+	}
+}
+
+// TestOutRangePaddedSixFrames covers the 120 ms boundary: six 20 ms sub-frames
+// assemble as a single code-3 packet that parses back to six frames.
+func TestOutRangePaddedSixFrames(t *testing.T) {
+	pkts := make([][]byte, 0, 6)
+	for i := range 6 {
+		pkts = append(pkts, []byte{0x00, byte(i), byte(i + 1)})
+	}
+	rp := catAll(t, pkts...)
+	if rp.nbFrames != 6 {
+		t.Fatalf("nbFrames = %d, want 6", rp.nbFrames)
+	}
+	buf := make([]byte, 64)
+	n, err := rp.OutRangePadded(0, rp.nbFrames, buf, len(buf), false)
+	if err != nil {
+		t.Fatalf("OutRangePadded: %v", err)
+	}
+	if code := buf[0] & 0x3; code != 3 {
+		t.Errorf("TOC code = %d, want 3 (six frames)", code)
+	}
+	p, err := Parse(buf[:n])
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(p.Frames) != 6 {
+		t.Errorf("parsed %d frames, want 6", len(p.Frames))
+	}
+}

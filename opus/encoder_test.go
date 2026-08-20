@@ -263,17 +263,16 @@ func TestEncodeFrameDurationDomain(t *testing.T) {
 					}
 				}
 
-				// 40, 60, 80, 100 and 120 ms are legal Opus durations that this
-				// release does not code. They must be REFUSED, not mis-coded.
+				// 40, 60, 80, 100 and 120 ms are coded as multiframe packets: the
+				// encoder splits them into 20 ms sub-frames and repacketizes.
 				for _, n := range []int{fs / 25, 3 * fs / 50, 4 * fs / 50, 5 * fs / 50, 6 * fs / 50} {
-					_, err := e.Encode(encTestPCM(n, ch, fs, 0), buf)
-					if !errors.Is(err, ErrUnsupported) {
-						t.Errorf("Encode(%d samples/channel, > 20 ms): error %v, want ErrUnsupported",
-							n, err)
+					got, err := e.Encode(encTestPCM(n, ch, fs, 0), buf)
+					if err != nil {
+						t.Errorf("Encode(%d samples/channel, multiframe): %v", n, err)
+						continue
 					}
-					if errors.Is(err, ErrBadArg) {
-						t.Errorf("Encode(%d samples/channel): error matches ErrBadArg; a legal-but-"+
-							"unimplemented duration is ErrUnsupported, not ErrBadArg", n)
+					if got <= 0 {
+						t.Errorf("Encode(%d samples/channel, multiframe) returned %d bytes", n, got)
 					}
 				}
 
@@ -634,7 +633,6 @@ func TestEncoderFinalRangeZeroedOnError(t *testing.T) {
 		buf  []byte
 	}{
 		{"bad frame size", make([]int16, 961), buf},
-		{"unsupported duration", make([]int16, 1920), buf},
 		{"empty buffer", pcm, nil},
 		{"empty pcm", nil, buf},
 	} {

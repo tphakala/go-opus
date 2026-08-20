@@ -46,29 +46,33 @@ func (rp *Repacketizer) catImpl(data []byte, selfDelimited bool) error {
 		return ErrInvalidPacket
 	}
 
-	currNbFrames, err := CountFrames(data)
-	if err != nil {
+	// Parse the frame boundaries directly into rp.frames, allocation-free. The
+	// general parse() allocates a fresh Packet.Frames slice per call; Cat is on the
+	// encoder's 0-allocs/op multiframe path (opusenc.encodeMultiframe calls it once
+	// per sub-frame), so it parses in place instead. This single run also subsumes
+	// the separate CountFrames pass the previous body did before parsing.
+	p := parser{data: data}
+	if err := p.run(selfDelimited); err != nil {
 		return err
 	}
-	if currNbFrames < 1 {
+	if p.count < 1 {
 		return ErrInvalidPacket
 	}
 	// Enforce the 120 ms (960 samples at 8 kHz) maximum across all frames.
-	if (currNbFrames+rp.nbFrames)*rp.framesize > 960 {
+	if (p.count+rp.nbFrames)*rp.framesize > 960 {
 		return ErrInvalidPacket
 	}
-
-	pkt, err := parse(data, selfDelimited)
-	if err != nil {
+	if rp.nbFrames+p.count > MaxFrames {
+		return ErrInvalidPacket
+	}
+	// pkt is a stack-local view; its Frames alias rp.frames[nbFrames:], so fillPacket
+	// writes the sub-frame boundaries straight into rp's storage with no allocation.
+	var pkt Packet
+	pkt.Frames = rp.frames[rp.nbFrames : rp.nbFrames+p.count]
+	if err := p.fillPacket(data, &pkt); err != nil {
 		return err
 	}
-	if rp.nbFrames+len(pkt.Frames) > MaxFrames {
-		return ErrInvalidPacket
-	}
-	for _, f := range pkt.Frames {
-		rp.frames[rp.nbFrames] = f
-		rp.nbFrames++
-	}
+	rp.nbFrames += p.count
 	return nil
 }
 
@@ -166,6 +170,22 @@ func (rp *Repacketizer) outRangeImpl(begin, end int, data []byte, selfDelimited,
 		}
 	}
 	return totSize, nil
+}
+
+// OutRangePadded assembles frames [begin, end) into data with an EXPLICIT maxlen and
+// the encoder's pad flag, mirroring opus_repacketizer_out_range_impl (called from
+// opus_encoder.c:1831 to assemble a multiframe packet). The exported OutRange / Out
+// derive maxlen from len(data) and never pad; the Opus encoder needs both a maxlen
+// that may be shorter than the caller buffer (repacketize_len) and the pad flag.
+//
+// maxlen must be in [0, len(data)]. Under pad the assembled packet is zero-filled to
+// maxlen (as a code-3 packet) and the return value is maxlen; otherwise the return is
+// the natural assembled length. selfDelimited framing is not used by the encoder.
+func (rp *Repacketizer) OutRangePadded(begin, end int, data []byte, maxlen int, pad bool) (int, error) {
+	if maxlen < 0 || maxlen > len(data) {
+		return 0, ErrBadArg
+	}
+	return rp.outRangeImpl(begin, end, data[:maxlen], false, pad)
 }
 
 // writeHeader writes the TOC byte plus any count byte, padding descriptor, and

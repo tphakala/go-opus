@@ -14,11 +14,10 @@ import (
 // this" and "this build cannot do it yet" are different facts, and only the
 // second one can change without a format change.
 //
-// It is returned for exactly two things in v1: EncoderConfig.DTX (discontinuous
-// transmission is deferred), and a frame longer than 20 ms handed to
-// Encoder.Encode (libopus splits those into 20 ms sub-frames and reassembles them
-// with the repacketizer at opus_encoder.c:1698; that path is deferred). Neither is
-// silently accepted.
+// It is returned for exactly one thing in v1: EncoderConfig.DTX (discontinuous
+// transmission is deferred). It is never silently accepted. Frames longer than
+// 20 ms are NOT unsupported: they are coded as multiframe packets (opus_encoder.c
+// splits them into 20 ms sub-frames and reassembles them with the repacketizer).
 var ErrUnsupported = errors.New("opus: unsupported configuration")
 
 const (
@@ -194,20 +193,21 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 // packet length in bytes; buf[:n] is the packet. It mirrors opus_encode.
 //
 // len(pcm) must be samplesPerChannel*Channels, and samplesPerChannel must be one
-// of the four durations this release codes: 2.5, 5, 10 or 20 ms, i.e. SampleRate
-// divided by 400, 200, 100 or 50. Any other length returns ErrBadArg, except the
-// longer durations Opus itself defines (40 ms and up), which return ErrUnsupported
-// because libopus codes them by splitting into 20 ms sub-frames and repacketizing,
-// and that path is deferred. The frame duration may change from call to call.
+// of the Opus frame durations: 2.5, 5, 10, 20, 40, 60, 80, 100 or 120 ms, i.e.
+// SampleRate divided by 400, 200, 100, 50, 25, or the 3/4/5/6 x Fs/50 multiples.
+// The 40 ms and longer durations are coded as multiframe packets (libopus splits
+// them into 20 ms sub-frames and repacketizes). Any other length returns ErrBadArg.
+// The frame duration may change from call to call.
 //
 // buf is caller-provided, so a steady-state encode allocates nothing. Unlike a
 // decoder, the encoder ADAPTS to the buffer it is given: if buf cannot hold the
 // packet the bitrate asks for, libopus lowers the rate to fit rather than failing
 // (opus_encoder.c:745), so a short buffer costs quality and does not return an
 // error. The one fatal case is a buffer with no room at all, which returns
-// ErrBufferTooSmall. 1276 bytes holds any VBR packet this encoder produces; hard
-// CBR at a very high bitrate can ask for more, and then it pads up to whatever buf
-// allows.
+// ErrBufferTooSmall. 1276 bytes holds any single-frame (2.5 to 20 ms) VBR packet;
+// a multiframe 40 to 120 ms VBR packet concatenates up to six sub-frames and can
+// need up to 6x that, and hard CBR at a very high bitrate can ask for more, and
+// then it pads up to whatever buf allows.
 func (e *Encoder) Encode(pcm []int16, buf []byte) (int, error) {
 	// opus_encode_native zeroes st->rangeFinal BEFORE its rejection rules
 	// (opus_encoder.c:1223), so in libopus a rejected call leaves OPUS_GET_FINAL_RANGE
@@ -237,24 +237,23 @@ func (e *Encoder) Encode(pcm []int16, buf []byte) (int, error) {
 	return n, nil
 }
 
-// checkFrameSize applies the v1 frame-duration domain to a per-channel sample
-// count, splitting the two rejections libopus itself distinguishes: a length that
-// is not an Opus frame duration at all (frame_size_select returns -1 at
-// opus_encoder.c:827, which opus_encode_native turns into OPUS_BAD_ARG) versus a
-// legal duration this release does not code (OPUS_UNIMPLEMENTED).
+// checkFrameSize applies the Opus frame-duration domain to a per-channel sample
+// count. All nine legal durations (2.5 to 120 ms) are coded; the 40 ms and longer
+// ones go through the multiframe path. A length that is not an Opus frame duration
+// at all (frame_size_select returns -1 at opus_encoder.c:827, which
+// opus_encode_native turns into OPUS_BAD_ARG) is rejected with ErrBadArg.
 func (e *Encoder) checkFrameSize(frameSize int) error {
 	fs := e.sampleRate
 	switch frameSize {
-	case fs / 400, fs / 200, fs / 100, fs / 50: // 2.5, 5, 10, 20 ms
+	case fs / 400, fs / 200, fs / 100, fs / 50, // 2.5, 5, 10, 20 ms
+		fs / 25, 3 * fs / 50, 4 * fs / 50, 5 * fs / 50, 6 * fs / 50: // 40, 60, 80, 100, 120 ms
+		// The 40..120 ms frames are coded as multiframe packets: the encoder splits
+		// them into 20 ms sub-frames and reassembles with the repacketizer.
 		return nil
-	case fs / 25, 3 * fs / 50, 4 * fs / 50, 5 * fs / 50, 6 * fs / 50: // 40, 60, 80, 100, 120 ms
-		return fmt.Errorf("%w: a %d-sample frame is longer than 20 ms; this release codes only "+
-			"2.5, 5, 10 and 20 ms frames (%d, %d, %d or %d samples per channel at %d Hz)",
-			ErrUnsupported, frameSize, fs/400, fs/200, fs/100, fs/50, fs)
 	default:
-		return fmt.Errorf("%w: a %d-sample frame is not an Opus frame duration; want %d, %d, %d "+
-			"or %d samples per channel (2.5, 5, 10 or 20 ms at %d Hz)",
-			ErrBadArg, frameSize, fs/400, fs/200, fs/100, fs/50, fs)
+		return fmt.Errorf("%w: a %d-sample frame is not an Opus frame duration; want 2.5, 5, "+
+			"10, 20, 40, 60, 80, 100 or 120 ms (%d to %d samples per channel at %d Hz)",
+			ErrBadArg, frameSize, fs/400, 6*fs/50, fs)
 	}
 }
 

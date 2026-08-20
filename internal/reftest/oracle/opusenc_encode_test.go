@@ -903,24 +903,18 @@ func TestOpusencEncodeMixedFrameSizes(t *testing.T) {
 	}
 }
 
-// TestOpusencEncodeMultiframeIsRejected pins the ONE place this port DELIBERATELY
-// DIVERGES from libopus, so the divergence is a tested contract rather than a
-// silent one.
+// TestOpusencEncodeMultiframe checks the multiframe path (opus_encoder.c:1698-1838)
+// byte-for-byte against libopus.
 //
 // A frame longer than 20 ms that is NOT starved enough to take the degenerate
-// branch reaches opus_encoder.c:1698, where libopus splits it into 20 ms
-// sub-frames, encodes each through opus_encode_frame_native and re-assembles them
-// with the repacketizer into a code-2 or code-3 packet. That path is deferred; the
-// Go encoder returns OPUS_UNIMPLEMENTED (-5) at exactly that line instead of
-// emitting a wrong-length packet.
+// branch reaches :1698, where libopus splits it into 20 ms sub-frames, encodes each
+// through opus_encode_frame_native and re-assembles them with the repacketizer into
+// a code-1/2/3 packet. The Go encoder ports the same path (encodeMultiframe).
 //
-// The assertion is two-sided ON PURPOSE: C must SUCCEED (proving the frame really
-// is on the multiframe path and this test is not just re-testing the degenerate
-// branch) and Go must return exactly -5. When the multiframe path lands, this test
-// is what flips to a normal frame() comparison.
-func TestOpusencEncodeMultiframeIsRejected(t *testing.T) {
-	const opusUnimplemented = -5
-
+// The assertion is two-sided ON PURPOSE: C must SUCCEED (proving the frame really is
+// on the multiframe path and this test is not just re-testing the degenerate branch)
+// and Go must reproduce its packet exactly.
+func TestOpusencEncodeMultiframe(t *testing.T) {
 	// Every legal frame size above 20 ms at 48 kHz.
 	for _, frameSize := range []int{1920, 2880, 3840, 4800, 5760} {
 		for _, channels := range []int{1, 2} {
@@ -936,7 +930,7 @@ func TestOpusencEncodeMultiframeIsRejected(t *testing.T) {
 				g := goEncoderMatchingCfg(t, cfg)
 
 				pcm := testPCM(frameSize, channels, 1)
-				cRet, _, _ := ch.Encode(pcm, frameSize, 1500)
+				cRet, cPkt, _ := ch.Encode(pcm, frameSize, 1500)
 				if cRet <= 0 {
 					t.Fatalf("%s: C returned %d; this frame did not reach the multiframe "+
 						"path, so the test is vacuous", name, cRet)
@@ -944,9 +938,15 @@ func TestOpusencEncodeMultiframeIsRejected(t *testing.T) {
 
 				gBuf := make([]byte, 1501)
 				gRet := g.EncodeRaw(pcm, frameSize, gBuf, 1500)
-				if gRet != opusUnimplemented {
-					t.Fatalf("%s: Go returned %d, want OPUS_UNIMPLEMENTED (%d). C returned "+
-						"%d (a real multiframe packet).", name, gRet, opusUnimplemented, cRet)
+				if gRet != cRet {
+					t.Fatalf("%s: return value: Go = %d, C = %d (a real multiframe packet)",
+						name, gRet, cRet)
+				}
+				for i := range cPkt {
+					if gBuf[i] != cPkt[i] {
+						t.Fatalf("%s: packet byte %d of %d differs: Go = 0x%02x, C = 0x%02x",
+							name, i, len(cPkt), gBuf[i], cPkt[i])
+					}
 				}
 			})
 		}

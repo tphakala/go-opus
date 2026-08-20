@@ -319,16 +319,14 @@ func TestOpusencEncodeSampleRateMixedFrameSizes(t *testing.T) {
 // 8 kHz, and frame_size_select (:827) must reject it with exactly the code the C
 // returns. This is the rejection surface the public API's validation sits on.
 //
-// It also pins the > 20 ms frames, where this port DELIBERATELY diverges: libopus
-// splits them with the repacketizer (:1698) and go-opus returns OPUS_UNIMPLEMENTED.
-// The guard is `frame_size > st->Fs/50`, so it has to move with the rate too.
+// It also pins the > 20 ms frames, which both libopus and this port code by splitting
+// into 20 ms sub-frames and reassembling with the repacketizer (:1698); the assembled
+// packet is byte-compared against C. The split guard is `frame_size > st->Fs/50`, so
+// it has to move with the rate too.
 func TestOpusencEncodeSampleRateFrameDomain(t *testing.T) {
-	const (
-		opusBadArg        = -1
-		opusUnimplemented = -5
-	)
+	const opusBadArg = -1
 
-	var sawBadArg, sawUnimplemented, sawOK bool
+	var sawBadArg, sawMultiframe, sawOK bool
 
 	for _, fs := range encoderRates {
 		// Every legal phase-4 duration, plus the illegal neighbours.
@@ -349,8 +347,8 @@ func TestOpusencEncodeSampleRateFrameDomain(t *testing.T) {
 			{480, "a 48 kHz 10 ms frame, offered at every rate"},
 			{120, "a 48 kHz 2.5 ms frame, offered at every rate"},
 		}
-		// The multiframe durations (40/60/80/100/120 ms), which C codes and this
-		// port rejects at :1698.
+		// The multiframe durations (40/60/80/100/120 ms), which C and this port both
+		// code at :1698 by splitting into 20 ms sub-frames.
 		for _, mult := range []int{2, 3, 4, 5, 6} {
 			cases = append(cases, tc{mult * fs / 50, fmt.Sprintf("%d x 20 ms: multiframe", mult)})
 		}
@@ -381,14 +379,6 @@ func TestOpusencEncodeSampleRateFrameDomain(t *testing.T) {
 				gRet := g.EncodeRaw(pcm, c.frameSize, gBuf, 1500)
 
 				if gRet != cRet {
-					// The ONE deliberate divergence: a frame LONGER than 20 ms at
-					// this rate that is not starved enough to be degenerate reaches
-					// the multiframe split at :1698, which C codes and this port
-					// defers. Anything else is a real failure.
-					if c.frameSize > fs/50 && cRet > 0 && gRet == opusUnimplemented {
-						sawUnimplemented = true
-						return
-					}
 					t.Fatalf("%s (%s): return value: Go = %d, C = %d", name, c.why, gRet, cRet)
 				}
 				switch {
@@ -396,6 +386,11 @@ func TestOpusencEncodeSampleRateFrameDomain(t *testing.T) {
 					sawBadArg = true
 				case cRet > 0:
 					sawOK = true
+					// A frame longer than 20 ms that is not starved reaches the
+					// multiframe split at :1698, which both C and this port now code.
+					if c.frameSize > fs/50 {
+						sawMultiframe = true
+					}
 					for i := range cPkt {
 						if gBuf[i] != cPkt[i] {
 							t.Fatalf("%s (%s): packet byte %d of %d: Go = 0x%02x, C = 0x%02x",
@@ -412,8 +407,8 @@ func TestOpusencEncodeSampleRateFrameDomain(t *testing.T) {
 		t.Fatal("non-vacuity: no legal frame size was ever coded")
 	case !sawBadArg:
 		t.Fatal("non-vacuity: no illegal frame size was ever REJECTED with OPUS_BAD_ARG")
-	case !sawUnimplemented:
-		t.Fatal("non-vacuity: the deferred multiframe path was never reached")
+	case !sawMultiframe:
+		t.Fatal("non-vacuity: the multiframe path (> 20 ms) was never coded and matched")
 	}
 }
 
