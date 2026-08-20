@@ -213,26 +213,29 @@ func kfBfly2(fout []kissFFTCpx, m, N int) {
 	tw := int16(fixedmath.QCONST32(0.7071067812, coefShift-1))
 	pos := 0
 	for i := 0; i < N; i++ {
-		// Fout2 = Fout + 4.
+		// The radix-2 group is the fixed 8-element window fout[pos:pos+8]. Slicing
+		// it once per block lets the constant-index accesses below drop their
+		// per-element bounds checks (Fout2 = Fout + 4).
+		w := fout[pos : pos+8 : pos+8]
 		var t kissFFTCpx
-		t = fout[pos+4]
-		fout[pos+4] = cSub(fout[pos+0], t)
-		fout[pos+0] = cAdd(fout[pos+0], t)
+		t = w[4]
+		w[4] = cSub(w[0], t)
+		w[0] = cAdd(w[0], t)
 
-		t.r = sMul(fixedmath.ADD32_ovflw(fout[pos+5].r, fout[pos+5].i), tw)
-		t.i = sMul(fixedmath.SUB32_ovflw(fout[pos+5].i, fout[pos+5].r), tw)
-		fout[pos+5] = cSub(fout[pos+1], t)
-		fout[pos+1] = cAdd(fout[pos+1], t)
+		t.r = sMul(fixedmath.ADD32_ovflw(w[5].r, w[5].i), tw)
+		t.i = sMul(fixedmath.SUB32_ovflw(w[5].i, w[5].r), tw)
+		w[5] = cSub(w[1], t)
+		w[1] = cAdd(w[1], t)
 
-		t.r = fout[pos+6].i
-		t.i = fixedmath.NEG32_ovflw(fout[pos+6].r)
-		fout[pos+6] = cSub(fout[pos+2], t)
-		fout[pos+2] = cAdd(fout[pos+2], t)
+		t.r = w[6].i
+		t.i = fixedmath.NEG32_ovflw(w[6].r)
+		w[6] = cSub(w[2], t)
+		w[2] = cAdd(w[2], t)
 
-		t.r = sMul(fixedmath.SUB32_ovflw(fout[pos+7].i, fout[pos+7].r), tw)
-		t.i = sMul(fixedmath.NEG32_ovflw(fixedmath.ADD32_ovflw(fout[pos+7].i, fout[pos+7].r)), tw)
-		fout[pos+7] = cSub(fout[pos+3], t)
-		fout[pos+3] = cAdd(fout[pos+3], t)
+		t.r = sMul(fixedmath.SUB32_ovflw(w[7].i, w[7].r), tw)
+		t.i = sMul(fixedmath.NEG32_ovflw(fixedmath.ADD32_ovflw(w[7].i, w[7].r)), tw)
+		w[7] = cSub(w[3], t)
+		w[3] = cAdd(w[3], t)
 		pos += 8
 	}
 }
@@ -245,48 +248,57 @@ func kfBfly4(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
 		// Degenerate case where all the twiddles are 1.
 		pos := 0
 		for i := 0; i < N; i++ {
+			// The block is the fixed 4-element window fout[pos:pos+4]; slicing it
+			// drops the constant-index bounds checks below.
+			w := fout[pos : pos+4 : pos+4]
 			var scratch0, scratch1 kissFFTCpx
-			scratch0 = cSub(fout[pos+0], fout[pos+2])
-			fout[pos+0] = cAdd(fout[pos+0], fout[pos+2])
-			scratch1 = cAdd(fout[pos+1], fout[pos+3])
-			fout[pos+2] = cSub(fout[pos+0], scratch1)
-			fout[pos+0] = cAdd(fout[pos+0], scratch1)
-			scratch1 = cSub(fout[pos+1], fout[pos+3])
+			scratch0 = cSub(w[0], w[2])
+			w[0] = cAdd(w[0], w[2])
+			scratch1 = cAdd(w[1], w[3])
+			w[2] = cSub(w[0], scratch1)
+			w[0] = cAdd(w[0], scratch1)
+			scratch1 = cSub(w[1], w[3])
 
-			fout[pos+1].r = fixedmath.ADD32_ovflw(scratch0.r, scratch1.i)
-			fout[pos+1].i = fixedmath.SUB32_ovflw(scratch0.i, scratch1.r)
-			fout[pos+3].r = fixedmath.SUB32_ovflw(scratch0.r, scratch1.i)
-			fout[pos+3].i = fixedmath.ADD32_ovflw(scratch0.i, scratch1.r)
+			w[1].r = fixedmath.ADD32_ovflw(scratch0.r, scratch1.i)
+			w[1].i = fixedmath.SUB32_ovflw(scratch0.i, scratch1.r)
+			w[3].r = fixedmath.SUB32_ovflw(scratch0.r, scratch1.i)
+			w[3].i = fixedmath.ADD32_ovflw(scratch0.i, scratch1.r)
 			pos += 4
 		}
 	} else {
-		m2 := 2 * m
-		m3 := 3 * m
+		tw := st.twiddles
 		for i := 0; i < N; i++ {
 			pos := i * mm
+			// The four radix-4 groups are the contiguous length-m windows at
+			// pos, pos+m, pos+2m, pos+3m. Slicing them (with the pos+m+m form so
+			// the prover keeps a known length m) drops the per-element fout bounds
+			// checks in the j-loop; the strided twiddle gathers keep theirs.
+			f0 := fout[pos : pos+m : pos+m]
+			fm := fout[pos+m : pos+m+m : pos+m+m]
+			fm2 := fout[pos+m+m : pos+m+m+m : pos+m+m+m]
+			fm3 := fout[pos+m+m+m : pos+m+m+m+m : pos+m+m+m+m]
 			tw1, tw2, tw3 := 0, 0, 0
 			// m is guaranteed to be a multiple of 4.
-			for j := 0; j < m; j++ {
+			for j := range f0 {
 				var scratch [6]kissFFTCpx
-				scratch[0] = cMul(fout[pos+m], st.twiddles[tw1])
-				scratch[1] = cMul(fout[pos+m2], st.twiddles[tw2])
-				scratch[2] = cMul(fout[pos+m3], st.twiddles[tw3])
+				scratch[0] = cMul(fm[j], tw[tw1])
+				scratch[1] = cMul(fm2[j], tw[tw2])
+				scratch[2] = cMul(fm3[j], tw[tw3])
 
-				scratch[5] = cSub(fout[pos], scratch[1])
-				fout[pos] = cAdd(fout[pos], scratch[1])
+				scratch[5] = cSub(f0[j], scratch[1])
+				f0[j] = cAdd(f0[j], scratch[1])
 				scratch[3] = cAdd(scratch[0], scratch[2])
 				scratch[4] = cSub(scratch[0], scratch[2])
-				fout[pos+m2] = cSub(fout[pos], scratch[3])
+				fm2[j] = cSub(f0[j], scratch[3])
 				tw1 += fstride
 				tw2 += fstride * 2
 				tw3 += fstride * 3
-				fout[pos] = cAdd(fout[pos], scratch[3])
+				f0[j] = cAdd(f0[j], scratch[3])
 
-				fout[pos+m].r = fixedmath.ADD32_ovflw(scratch[5].r, scratch[4].i)
-				fout[pos+m].i = fixedmath.SUB32_ovflw(scratch[5].i, scratch[4].r)
-				fout[pos+m3].r = fixedmath.SUB32_ovflw(scratch[5].r, scratch[4].i)
-				fout[pos+m3].i = fixedmath.ADD32_ovflw(scratch[5].i, scratch[4].r)
-				pos++
+				fm[j].r = fixedmath.ADD32_ovflw(scratch[5].r, scratch[4].i)
+				fm[j].i = fixedmath.SUB32_ovflw(scratch[5].i, scratch[4].r)
+				fm3[j].r = fixedmath.SUB32_ovflw(scratch[5].r, scratch[4].i)
+				fm3[j].i = fixedmath.ADD32_ovflw(scratch[5].i, scratch[4].r)
 			}
 		}
 	}
@@ -307,15 +319,22 @@ func kfBfly3(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm, stage i
 }
 
 func kfBfly3Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm int) {
-	m2 := 2 * m
 	epi3i := int16(-fixedmath.QCONST32(0.86602540, coefShift-1))
+	tw := st.twiddles
 	for i := 0; i < N; i++ {
 		pos := i * mm
+		b2 := pos + 2*m
+		// Contiguous length-m windows at pos, pos+m, pos+2m; indexing them by k
+		// drops the per-element fout bounds checks (the strided twiddle gathers
+		// keep theirs).
+		f0 := fout[pos : pos+m : pos+m]
+		fm := fout[pos+m : pos+m+m : pos+m+m]
+		fm2 := fout[b2 : b2+m : b2+m]
 		tw1, tw2 := 0, 0
-		for k := 0; k < m; k++ {
+		for k := range f0 {
 			var scratch [5]kissFFTCpx
-			scratch[1] = cMul(fout[pos+m], st.twiddles[tw1])
-			scratch[2] = cMul(fout[pos+m2], st.twiddles[tw2])
+			scratch[1] = cMul(fm[k], tw[tw1])
+			scratch[2] = cMul(fm2[k], tw[tw2])
 
 			scratch[3] = cAdd(scratch[1], scratch[2])
 			scratch[0] = cSub(scratch[1], scratch[2])
@@ -323,19 +342,18 @@ func kfBfly3Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm in
 			tw2 += fstride * 2
 
 			// HALF_OF(x) = x>>1.
-			fout[pos+m].r = fixedmath.SUB32_ovflw(fout[pos].r, scratch[3].r>>1)
-			fout[pos+m].i = fixedmath.SUB32_ovflw(fout[pos].i, scratch[3].i>>1)
+			fm[k].r = fixedmath.SUB32_ovflw(f0[k].r, scratch[3].r>>1)
+			fm[k].i = fixedmath.SUB32_ovflw(f0[k].i, scratch[3].i>>1)
 
 			scratch[0] = cMulByScalar(scratch[0], epi3i)
 
-			fout[pos] = cAdd(fout[pos], scratch[3])
+			f0[k] = cAdd(f0[k], scratch[3])
 
-			fout[pos+m2].r = fixedmath.ADD32_ovflw(fout[pos+m].r, scratch[0].i)
-			fout[pos+m2].i = fixedmath.SUB32_ovflw(fout[pos+m].i, scratch[0].r)
+			fm2[k].r = fixedmath.ADD32_ovflw(fm[k].r, scratch[0].i)
+			fm2[k].i = fixedmath.SUB32_ovflw(fm[k].i, scratch[0].r)
 
-			fout[pos+m].r = fixedmath.SUB32_ovflw(fout[pos+m].r, scratch[0].i)
-			fout[pos+m].i = fixedmath.ADD32_ovflw(fout[pos+m].i, scratch[0].r)
-			pos++
+			fm[k].r = fixedmath.SUB32_ovflw(fm[k].r, scratch[0].i)
+			fm[k].i = fixedmath.ADD32_ovflw(fm[k].i, scratch[0].r)
 		}
 	}
 }
@@ -350,7 +368,6 @@ func kfBfly3Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm in
 // runs for this stage (see buildPackedTwiddles); the caller supplies them so the
 // core stays a pure kernel with no plan lookup.
 func kfBfly3Cint(fout []kissFFTCpx, m, N, mm int, tw1p, tw2p []int16) {
-	m2 := 2 * m
 	epi3i := int16(-fixedmath.QCONST32(0.86602540, coefShift-1))
 
 	var s1a, s2a, s3a, s0a [maxFFTRun]kissFFTCpx
@@ -363,27 +380,34 @@ func kfBfly3Cint(fout []kissFFTCpx, m, N, mm int, tw1p, tw2p []int16) {
 
 	for i := 0; i < N; i++ {
 		pos := i * mm
-		foutM := cpxAsInt32(fout[pos+m : pos+m+m])    // scratch[1] source
-		foutM2 := cpxAsInt32(fout[pos+m2 : pos+m2+m]) // scratch[2] source
+		// The three radix-3 groups are the contiguous length-m windows
+		// fout[pos:pos+m], fout[pos+m:pos+2m], fout[pos+2m:pos+3m]. Slicing them
+		// to a known length m up front lets the combine loop index each by k with
+		// no per-element bounds check (the same idiom that already keeps s3[k]/
+		// s0[k] check-free); fm/fm2 double as the C_MUL int32 sources.
+		f0 := fout[pos : pos+m : pos+m]
+		fm := fout[pos+m : pos+m+m : pos+m+m]
+		fm2 := fout[pos+m+m : pos+m+m+m : pos+m+m+m]
+		foutM := cpxAsInt32(fm)   // scratch[1] source
+		foutM2 := cpxAsInt32(fm2) // scratch[2] source
 
 		cint.Mul(s1i, foutM, tw1p)  // scratch[1] = C_MUL(fout[pos+m], tw1)
-		cint.Mul(s2i, foutM2, tw2p) // scratch[2] = C_MUL(fout[pos+m2], tw2)
+		cint.Mul(s2i, foutM2, tw2p) // scratch[2] = C_MUL(fout[pos+2m], tw2)
 		cint.Add(s3i, s1i, s2i)     // scratch[3] = scratch[1] + scratch[2]
 		cint.Sub(s0i, s1i, s2i)     // scratch[0] = scratch[1] - scratch[2]
 		cint.MulByScalar(s0i, epi3i)
 
-		for k := 0; k < m; k++ {
-			p := pos + k
+		for k := range f0 {
 			// HALF_OF(x) = x>>1 (arithmetic). Computed from the pre-add fout[pos].
-			fmr := fixedmath.SUB32_ovflw(fout[p].r, s3[k].r>>1)
-			fmi := fixedmath.SUB32_ovflw(fout[p].i, s3[k].i>>1)
+			fmr := fixedmath.SUB32_ovflw(f0[k].r, s3[k].r>>1)
+			fmi := fixedmath.SUB32_ovflw(f0[k].i, s3[k].i>>1)
 
-			fout[p] = cAdd(fout[p], s3[k])
+			f0[k] = cAdd(f0[k], s3[k])
 
-			fout[pos+m2+k].r = fixedmath.ADD32_ovflw(fmr, s0[k].i)
-			fout[pos+m2+k].i = fixedmath.SUB32_ovflw(fmi, s0[k].r)
-			fout[pos+m+k].r = fixedmath.SUB32_ovflw(fmr, s0[k].i)
-			fout[pos+m+k].i = fixedmath.ADD32_ovflw(fmi, s0[k].r)
+			fm2[k].r = fixedmath.ADD32_ovflw(fmr, s0[k].i)
+			fm2[k].i = fixedmath.SUB32_ovflw(fmi, s0[k].r)
+			fm[k].r = fixedmath.SUB32_ovflw(fmr, s0[k].i)
+			fm[k].i = fixedmath.ADD32_ovflw(fmi, s0[k].r)
 		}
 	}
 }
@@ -421,27 +445,34 @@ func kfBfly5Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm in
 	ya, yb := bfly5Consts()
 	tw := st.twiddles
 	for i := 0; i < N; i++ {
-		f0 := i * mm
-		f1 := f0 + m
-		f2 := f0 + 2*m
-		f3 := f0 + 3*m
-		f4 := f0 + 4*m
-		for u := 0; u < m; u++ {
+		b0 := i * mm
+		b1 := b0 + m
+		b2 := b0 + 2*m
+		b3 := b0 + 3*m
+		b4 := b0 + 4*m
+		// Five contiguous length-m windows at b0..b4; indexing them by u drops the
+		// per-element fout bounds checks (the strided tw gathers keep theirs).
+		w0 := fout[b0 : b0+m : b0+m]
+		w1 := fout[b1 : b1+m : b1+m]
+		w2 := fout[b2 : b2+m : b2+m]
+		w3 := fout[b3 : b3+m : b3+m]
+		w4 := fout[b4 : b4+m : b4+m]
+		for u := range w0 {
 			var scratch [13]kissFFTCpx
-			scratch[0] = fout[f0]
+			scratch[0] = w0[u]
 
-			scratch[1] = cMul(fout[f1], tw[u*fstride])
-			scratch[2] = cMul(fout[f2], tw[2*u*fstride])
-			scratch[3] = cMul(fout[f3], tw[3*u*fstride])
-			scratch[4] = cMul(fout[f4], tw[4*u*fstride])
+			scratch[1] = cMul(w1[u], tw[u*fstride])
+			scratch[2] = cMul(w2[u], tw[2*u*fstride])
+			scratch[3] = cMul(w3[u], tw[3*u*fstride])
+			scratch[4] = cMul(w4[u], tw[4*u*fstride])
 
 			scratch[7] = cAdd(scratch[1], scratch[4])
 			scratch[10] = cSub(scratch[1], scratch[4])
 			scratch[8] = cAdd(scratch[2], scratch[3])
 			scratch[9] = cSub(scratch[2], scratch[3])
 
-			fout[f0].r = fixedmath.ADD32_ovflw(fout[f0].r, fixedmath.ADD32_ovflw(scratch[7].r, scratch[8].r))
-			fout[f0].i = fixedmath.ADD32_ovflw(fout[f0].i, fixedmath.ADD32_ovflw(scratch[7].i, scratch[8].i))
+			w0[u].r = fixedmath.ADD32_ovflw(w0[u].r, fixedmath.ADD32_ovflw(scratch[7].r, scratch[8].r))
+			w0[u].i = fixedmath.ADD32_ovflw(w0[u].i, fixedmath.ADD32_ovflw(scratch[7].i, scratch[8].i))
 
 			scratch[5].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(sMul(scratch[7].r, ya.r), sMul(scratch[8].r, yb.r)))
 			scratch[5].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(sMul(scratch[7].i, ya.r), sMul(scratch[8].i, yb.r)))
@@ -449,22 +480,16 @@ func kfBfly5Scalar(fout []kissFFTCpx, fstride int, st *kissFFTState, m, N, mm in
 			scratch[6].r = fixedmath.ADD32_ovflw(sMul(scratch[10].i, ya.i), sMul(scratch[9].i, yb.i))
 			scratch[6].i = fixedmath.NEG32_ovflw(fixedmath.ADD32_ovflw(sMul(scratch[10].r, ya.i), sMul(scratch[9].r, yb.i)))
 
-			fout[f1] = cSub(scratch[5], scratch[6])
-			fout[f4] = cAdd(scratch[5], scratch[6])
+			w1[u] = cSub(scratch[5], scratch[6])
+			w4[u] = cAdd(scratch[5], scratch[6])
 
 			scratch[11].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(sMul(scratch[7].r, yb.r), sMul(scratch[8].r, ya.r)))
 			scratch[11].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(sMul(scratch[7].i, yb.r), sMul(scratch[8].i, ya.r)))
 			scratch[12].r = fixedmath.SUB32_ovflw(sMul(scratch[9].i, ya.i), sMul(scratch[10].i, yb.i))
 			scratch[12].i = fixedmath.SUB32_ovflw(sMul(scratch[10].r, yb.i), sMul(scratch[9].r, ya.i))
 
-			fout[f2] = cAdd(scratch[11], scratch[12])
-			fout[f3] = cSub(scratch[11], scratch[12])
-
-			f0++
-			f1++
-			f2++
-			f3++
-			f4++
+			w2[u] = cAdd(scratch[11], scratch[12])
+			w3[u] = cSub(scratch[11], scratch[12])
 		}
 	}
 }
@@ -492,20 +517,29 @@ func kfBfly5Cint(fout []kissFFTCpx, m, N, mm int, tw1p, tw2p, tw3p, tw4p []int16
 	s4i := cpxAsInt32(s4)
 
 	for i := 0; i < N; i++ {
-		f0 := i * mm
-		f1 := f0 + m
-		f2 := f0 + 2*m
-		f3 := f0 + 3*m
-		f4 := f0 + 4*m
+		b0 := i * mm
+		b1 := b0 + m
+		b2 := b0 + 2*m
+		b3 := b0 + 3*m
+		b4 := b0 + 4*m
 
-		cint.Mul(s1i, cpxAsInt32(fout[f1:f1+m]), tw1p)
-		cint.Mul(s2i, cpxAsInt32(fout[f2:f2+m]), tw2p)
-		cint.Mul(s3i, cpxAsInt32(fout[f3:f3+m]), tw3p)
-		cint.Mul(s4i, cpxAsInt32(fout[f4:f4+m]), tw4p)
+		// The five radix-5 groups are the contiguous length-m windows starting at
+		// b0..b4. Slicing them to a known length m lets the combine loop index each
+		// by u with no per-element bounds check; w1..w4 double as the C_MUL sources.
+		w0 := fout[b0 : b0+m : b0+m]
+		w1 := fout[b1 : b1+m : b1+m]
+		w2 := fout[b2 : b2+m : b2+m]
+		w3 := fout[b3 : b3+m : b3+m]
+		w4 := fout[b4 : b4+m : b4+m]
 
-		for u := 0; u < m; u++ {
+		cint.Mul(s1i, cpxAsInt32(w1), tw1p)
+		cint.Mul(s2i, cpxAsInt32(w2), tw2p)
+		cint.Mul(s3i, cpxAsInt32(w3), tw3p)
+		cint.Mul(s4i, cpxAsInt32(w4), tw4p)
+
+		for u := range w0 {
 			var scratch [13]kissFFTCpx
-			scratch[0] = fout[f0+u]
+			scratch[0] = w0[u]
 			scratch[1] = s1[u]
 			scratch[2] = s2[u]
 			scratch[3] = s3[u]
@@ -516,8 +550,8 @@ func kfBfly5Cint(fout []kissFFTCpx, m, N, mm int, tw1p, tw2p, tw3p, tw4p []int16
 			scratch[8] = cAdd(scratch[2], scratch[3])
 			scratch[9] = cSub(scratch[2], scratch[3])
 
-			fout[f0+u].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(scratch[7].r, scratch[8].r))
-			fout[f0+u].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(scratch[7].i, scratch[8].i))
+			w0[u].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(scratch[7].r, scratch[8].r))
+			w0[u].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(scratch[7].i, scratch[8].i))
 
 			scratch[5].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(sMul(scratch[7].r, ya.r), sMul(scratch[8].r, yb.r)))
 			scratch[5].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(sMul(scratch[7].i, ya.r), sMul(scratch[8].i, yb.r)))
@@ -525,16 +559,16 @@ func kfBfly5Cint(fout []kissFFTCpx, m, N, mm int, tw1p, tw2p, tw3p, tw4p []int16
 			scratch[6].r = fixedmath.ADD32_ovflw(sMul(scratch[10].i, ya.i), sMul(scratch[9].i, yb.i))
 			scratch[6].i = fixedmath.NEG32_ovflw(fixedmath.ADD32_ovflw(sMul(scratch[10].r, ya.i), sMul(scratch[9].r, yb.i)))
 
-			fout[f1+u] = cSub(scratch[5], scratch[6])
-			fout[f4+u] = cAdd(scratch[5], scratch[6])
+			w1[u] = cSub(scratch[5], scratch[6])
+			w4[u] = cAdd(scratch[5], scratch[6])
 
 			scratch[11].r = fixedmath.ADD32_ovflw(scratch[0].r, fixedmath.ADD32_ovflw(sMul(scratch[7].r, yb.r), sMul(scratch[8].r, ya.r)))
 			scratch[11].i = fixedmath.ADD32_ovflw(scratch[0].i, fixedmath.ADD32_ovflw(sMul(scratch[7].i, yb.r), sMul(scratch[8].i, ya.r)))
 			scratch[12].r = fixedmath.SUB32_ovflw(sMul(scratch[9].i, ya.i), sMul(scratch[10].i, yb.i))
 			scratch[12].i = fixedmath.SUB32_ovflw(sMul(scratch[10].r, yb.i), sMul(scratch[9].r, ya.i))
 
-			fout[f2+u] = cAdd(scratch[11], scratch[12])
-			fout[f3+u] = cSub(scratch[11], scratch[12])
+			w2[u] = cAdd(scratch[11], scratch[12])
+			w3[u] = cSub(scratch[11], scratch[12])
 		}
 	}
 }
