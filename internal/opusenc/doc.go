@@ -1,9 +1,8 @@
-// Package opusenc is the verbatim transliteration of libopus src/opus_encoder.c
-// (v1.6.1): the top-level Opus encoder that wraps the CELT (and, later, SILK)
-// core so it emits a real Opus packet, TOC byte plus payload. It mirrors
-// internal/opusdec on the encode side and is a C-shaped package (C names, control
-// flow and comments preserved; the quality metric is diffability against the
-// pinned libopus).
+// Package opusenc is a Go port of libopus src/opus_encoder.c (v1.6.1): the
+// top-level Opus encoder that wraps the CELT (and, later, SILK) core so it emits
+// a real Opus packet, TOC byte plus payload. It mirrors internal/opusdec on the
+// encode side, preserves C names and provenance references to the pinned libopus
+// source, and is held bit-exact against it by the refc differential gate.
 //
 // # Frozen phase-4 configuration
 //

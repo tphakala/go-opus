@@ -1,9 +1,9 @@
-// Package opusdec is the verbatim transliteration of libopus src/opus_decoder.c
-// (v1.6.1): the top-level Opus decoder that unifies the CELT and SILK decoders
-// behind the mode-transition and redundancy state machine (RFC 6716, the "hard
-// 20%"). It is a C-shaped package (C names, control flow and comments preserved;
-// quality metric is diffability against the pinned libopus) and is a named
-// verbatim zone per docs/decoder-architecture.md section 1.
+// Package opusdec is a Go port of libopus src/opus_decoder.c (v1.6.1): the
+// top-level Opus decoder that unifies the CELT and SILK decoders behind the
+// mode-transition and redundancy state machine (RFC 6716, the "hard 20%"). It
+// preserves C names and provenance references to the pinned libopus source and
+// is held bit-exact against it by the refc differential gate; bit-exactness of
+// the output is the sole correctness contract.
 //
 // The frozen build config is FIXED_POINT + DISABLE_FLOAT_API with no
 // QEXT/RES24/DRED/DEEP_PLC/OSCE, so opus_res is opus_int16: the API output is

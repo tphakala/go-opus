@@ -13,8 +13,8 @@ import (
 
 // This is the Checkpoint 6 ENCODE-direction differential harness for the CELT bit
 // allocation (internal/celt rate.go: ComputeAllocation / interpBits2pulses on the
-// encode=1 path). rate.go is already ported both directions (a named Layer C
-// verbatim zone); this file VERIFIES the encode branches (the ec_enc writes at
+// encode=1 path). rate.go is already ported both directions (Layer C); this file
+// VERIFIES the encode branches (the ec_enc writes at
 // rate.go:213/233 skip flags, :262 intensity, :275 dual-stereo) are bit-exact
 // against the pinned libopus clt_compute_allocation driven with encode=1.
 //

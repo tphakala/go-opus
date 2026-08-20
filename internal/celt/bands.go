@@ -1,11 +1,10 @@
-// Verbatim transliteration of celt/bands.c (libopus v1.6.1, commit 3da9f7a6)
-// for the frozen FIXED_POINT + DISABLE_FLOAT_API, non-CUSTOM_MODES,
-// non-ENABLE_QEXT build: the CELT residual (PVQ) band quantizer, BOTH the DECODE
-// and ENCODE directions. This is a named verbatim zone (docs/hard-parts.md
-// section 2, the quant_all_bands machinery): every temporary keeps its C name
-// and declaration order and every fixed-point expression keeps C's exact form;
-// correctness is proved by the differential sweeps in internal/reftest/oracle
-// (bands_test.go decode, bandsenc_test.go encode), not by review.
+// Port of celt/bands.c (libopus v1.6.1, commit 3da9f7a6) for the frozen
+// FIXED_POINT + DISABLE_FLOAT_API, non-CUSTOM_MODES, non-ENABLE_QEXT build: the
+// CELT residual (PVQ) band quantizer, BOTH the DECODE and ENCODE directions.
+// Every fixed-point expression must reproduce C's exact form and evaluation
+// order; correctness is proved by the differential sweeps in
+// internal/reftest/oracle (bands_test.go decode, bandsenc_test.go encode), not
+// by review. Index shape may be idiomatic Go where the gate confirms it.
 //
 // On DECODE, resynth = !encode is always 1, so the synthesis-side band code
 // (folding, the LCG noise fill, stereo_merge, renormalise) always runs. On
@@ -974,27 +973,28 @@ func quantPartition(ctx *bandCtx, X []int32, N, b, B int, lowband []int32, LM in
 				cmMask := uint32(1<<B) - 1
 				fill &= int(cmMask)
 				if fill == 0 {
-					for j := 0; j < N; j++ {
-						X[j] = 0
-					}
+					clear(X[:N])
 				} else {
 					if lowband == nil {
 						// Noise.
-						for j := 0; j < N; j++ {
+						xs := X[:N]
+						for j := range xs {
 							ctx.seed = celtLcgRand(ctx.seed)
-							X[j] = fixedmath.SHL32(int32(ctx.seed)>>20, normShift-14)
+							xs[j] = fixedmath.SHL32(int32(ctx.seed)>>20, normShift-14)
 						}
 						cm = cmMask
 					} else {
 						// Folded spectrum.
-						for j := 0; j < N; j++ {
+						xs := X[:N]
+						lb := lowband[:N]
+						for j := range xs {
 							ctx.seed = celtLcgRand(ctx.seed)
 							// About 48 dB below the "normal" folding level.
 							tmp := fixedmath.QCONST16(1.0/256, normShift-4)
 							if ctx.seed&0x8000 == 0 {
 								tmp = -tmp
 							}
-							X[j] = lowband[j] + int32(tmp)
+							xs[j] = lb[j] + int32(tmp)
 						}
 						cm = uint32(fill)
 					}
