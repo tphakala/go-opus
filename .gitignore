@@ -40,3 +40,4 @@ cache/
 # NOTE: docs/ is intentionally tracked in the Forgejo repo (it is the normative
 # plan). Before the GitHub publish after the phase 2 gate, docs/ is excluded
 # from the public mirror, mirroring go-flac.
+docs/

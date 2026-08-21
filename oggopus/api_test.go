@@ -20,6 +20,13 @@ func TestConfigValidate(t *testing.T) {
 			t.Fatalf("rate %d rejected: %v", r, err)
 		}
 	}
+	// Zero and every enumerated frame duration are accepted; zero means the default.
+	for _, d := range []int{0, 20, 40, 60, 80, 100, 120} {
+		c := Config{SampleRate: 48000, Channels: 1, FrameDurationMS: d}
+		if err := c.validate(); err != nil {
+			t.Fatalf("frame duration %d ms rejected: %v", d, err)
+		}
+	}
 	bad := []Config{
 		{SampleRate: 44100, Channels: 2},
 		{SampleRate: 0, Channels: 2},
@@ -28,6 +35,12 @@ func TestConfigValidate(t *testing.T) {
 		{SampleRate: 48000, Channels: 2, Bitrate: -1},
 		{SampleRate: 48000, Channels: 2, Complexity: 11},
 		{SampleRate: 48000, Channels: 2, Complexity: -1},
+		{SampleRate: 48000, Channels: 2, FrameDurationMS: 5},   // sub-20 ms, excluded
+		{SampleRate: 48000, Channels: 2, FrameDurationMS: 10},  // sub-20 ms, excluded
+		{SampleRate: 48000, Channels: 2, FrameDurationMS: 19},  // not a frame duration
+		{SampleRate: 48000, Channels: 2, FrameDurationMS: 25},  // not a frame duration
+		{SampleRate: 48000, Channels: 2, FrameDurationMS: 140}, // above 120 ms
+		{SampleRate: 48000, Channels: 2, FrameDurationMS: -20}, // negative
 	}
 	for i := range bad {
 		if err := bad[i].validate(); !errors.Is(err, ErrInvalidConfig) {

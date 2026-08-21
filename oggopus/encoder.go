@@ -11,12 +11,6 @@ import (
 // Encoder implements io.WriteCloser, byte-for-byte the go-flac pcm.Encoder shape.
 var _ io.WriteCloser = (*Encoder)(nil)
 
-// frameDurationMS is the fixed internal frame duration. 20 ms is the opusenc
-// default and the best quality/overhead balance for a file encoder; it is an
-// unexported constant with no Config field, exactly as go-flac fixes its
-// 4096-sample block size internally (see docs/api-design.md resolved question 2).
-const frameDurationMS = 20
-
 // sampleRate48k is the fixed Opus coding/granule rate, the same rate the
 // decoder's exported OutputSampleRate names for consumers. Tying the two
 // together keeps the internal coding rate and the public output rate from
@@ -43,7 +37,7 @@ type Encoder struct {
 	enc frameEncoder     // nil only on a zero value or after a failed reset
 	cw  *containerWriter // created once the codec pre-skip is known
 
-	frameLen   int     // input samples per channel per frame (SampleRate/50)
+	frameLen   int     // input samples per channel per frame (SampleRate * effective FrameDurationMS / 1000)
 	frameBytes int     // bytes in one full frame (frameLen * channels * 2)
 	frame      []int16 // reusable scratch for one deinterleaved frame
 	carry      []byte  // buffered PCM bytes not yet a full frame (bounded to one frame)
@@ -102,7 +96,7 @@ func (e *Encoder) reset(w io.Writer, cfg *Config) error {
 	}
 	e.w = w
 	e.cfg = *cfg
-	e.frameLen = cfg.SampleRate / (1000 / frameDurationMS)
+	e.frameLen = cfg.SampleRate * cfg.frameDurationMS() / 1000
 	e.frameBytes = e.frameLen * cfg.Channels * 2
 	if cap(e.frame) >= e.frameLen*cfg.Channels {
 		e.frame = e.frame[:0]
@@ -256,18 +250,20 @@ func (e *Encoder) Close() error {
 	// samples, and set the granule position of the last page to (length +
 	// delay_samples + extra_samples)". The granule this stream is about to claim is
 	// preSkip + src48k, and section 4.5 makes an end-of-stream granule that exceeds
-	// the samples actually coded INVALID. Coding only ceil(src48k/960) frames leaves
-	// coded48k - src48k anywhere in [0, 959], so whenever that gap is smaller than
-	// the pre-skip the stream would claim samples it never coded: that is every
-	// length with src48k mod 960 == 0 or in [649, 959], about a third of them, and
-	// it is why a 960-sample input used to claim granule 1272 over 960 coded
-	// samples.
+	// the samples actually coded INVALID. Let F be the frame length in 48 kHz
+	// samples (960 at the default 20 ms, up to 5760 at 120 ms). Coding only
+	// ceil(src48k/F) frames leaves coded48k - src48k anywhere in [0, F-1], so
+	// whenever that gap is smaller than the pre-skip the stream would claim samples
+	// it never coded: it is why, at 20 ms, a 960-sample input used to claim granule
+	// 1272 over 960 coded samples.
 	//
 	// Emit silent frames until the coded audio covers the granule. The gap is under
-	// 960 and one frame adds 960, so this runs at most once; the loop states the
-	// invariant instead of relying on that arithmetic. The samples are pure padding:
-	// the decoder needs them to reconstruct the tail of the real audio, and the
-	// end-trimmed granule then discards them.
+	// F and one frame adds F, so this runs at most once; the loop states the
+	// invariant instead of relying on that arithmetic. F is at least 960 (every
+	// allowed duration is a multiple of 20 ms) and the pre-skip is 312, so a single
+	// silence frame always closes the gap regardless of frame duration. The samples
+	// are pure padding: the decoder needs them to reconstruct the tail of the real
+	// audio, and the end-trimmed granule then discards them.
 	//
 	// A stream with no audio at all still needs one audio page. RFC 7845 does not
 	// forbid a header-only stream, but libavformat will not open one: ffmpeg exits
