@@ -283,6 +283,36 @@ func (st *Encoder) encodeNative(pcm []int16, frameSize int, data []byte, outData
 	// down to 8, so this is a real IMIN, not a formality.
 	lsbDepth = fixedmath.IMIN(lsbDepth, st.lsbDepth)
 
+	// :1246. is_digital_silence on the FULL frame. Formerly DEAD; DTX makes it
+	// live. In the multiframe path it is recomputed per 20 ms sub-frame (:1802),
+	// but this full-frame value is what silk_mode.useDTX (below) is derived from.
+	isSilence := isDigitalSilence(pcm, frameSize, st.channels)
+
+	// :1275 `if (!is_silence) st->voice_ratio = -1` is NOT ported: DecideRates
+	// re-pins voice_ratio to -1 at :1307 unconditionally, so the write is dead.
+
+	// :1310-1318. Track the peak signal energy, on the FULL frame, ONCE per
+	// opus_encode call, BEFORE the degenerate return (:320) and the multiframe
+	// split. The `#ifndef DISABLE_FLOAT_API` guard around the outer `if` is
+	// compiled out, so the block runs whenever the frame is not silent.
+	// QCONST16(0.999f, 15) == 32735. peakSignalEnergy is output-dead for the DTX
+	// decision in this config (which fires only on exact silence, where the
+	// energy path is bypassed); it is tracked and compared for state-hash
+	// defense-in-depth. See dtx.go.
+	if !isSilence {
+		st.peakSignalEnergy = fixedmath.MAX32(
+			fixedmath.MULT16_32_Q15(32735, st.peakSignalEnergy),
+			computeFrameEnergy(pcm, frameSize, st.channels))
+	}
+
+	// :1461-1463 (DISABLE_FLOAT_API branch). silk_mode.useDTX = use_dtx &&
+	// !is_silence, set on the FULL frame before mode selection and NOT recomputed
+	// per sub-frame. The :2565 DTX guard reads this, which is why the guard
+	// reduces to `use_dtx && is_silence` (see dtx.go). Logically this sits inside
+	// the decision chain (:1325-1685 -> DecideRates), but DecideRates never reads
+	// it (its only live reader is the DTX guard), so it is hoisted here.
+	st.silkMode.useDTX = st.useDtx != 0 && !isSilence
+
 	// The CBR witness values have to be derived HERE, from the pre-:1331 bitrate:
 	// once DecideRates has requantized st.bitrateBps to the rounded byte budget,
 	// every one of these predicates reads back as an identity and proves nothing.
@@ -337,8 +367,9 @@ func (st *Encoder) encodeNative(pcm []int16, frameSize int, data []byte, outData
 
 	// :1840. NOTE what is passed as orig_max_data_bytes: the POST-CBR
 	// max_data_bytes, which is what ec_enc_init is sized from and what
-	// opus_packet_pad pads up to.
-	return st.encodeFrameNative(pcm, frameSize, data, d.MaxDataBytes, d.EquivRate)
+	// opus_packet_pad pads up to. is_silence (the full-frame value) is threaded in
+	// exactly as the C passes it at :1847.
+	return st.encodeFrameNative(pcm, frameSize, data, d.MaxDataBytes, d.EquivRate, isSilence)
 }
 
 // encodeFrameNative is opus_encode_frame_native (opus_encoder.c:1855, static) for
@@ -350,7 +381,7 @@ func (st *Encoder) encodeNative(pcm []int16, frameSize int, data []byte, outData
 //	:1893      max_data_bytes = IMIN(orig_max_data_bytes, 1276)       LIVE
 //	:1894      st->rangeFinal = 0                                     LIVE
 //	:1902-1907 curr_bandwidth, delay_compensation, total_buffer       LIVE
-//	:1911-1930 the activity / VAD decision                            DEAD (DTX only)
+//	:1911-1930 the activity / VAD decision                            LIVE (DTX): activity from is_silence; energy branch dead
 //	:1933-1940 silk_bw_switch                                         DEAD (SILK only)
 //	:1944-1957 redundancy                                             DEAD (CELT-only forces it off at :1945)
 //	:1960      bits_target                                            DEAD (read only at :2051, inside the SILK block)
@@ -378,13 +409,13 @@ func (st *Encoder) encodeNative(pcm []int16, frameSize int, data []byte, outData
 //	:2514-2545 the SILK->CELT redundancy frame                        DEAD
 //	:2549-2553 the TOC byte                                           LIVE
 //	:2555-2562 the epilogue (prev_mode, prev_channels, first, ...)    LIVE
-//	:2564-2576 the DTX decision                                       DEAD (use_dtx == 0 -> the else at :2574)
+//	:2564-2576 the DTX decision                                       LIVE (fires only on exact digital silence)
 //	:2578-2589 the ec_tell bust check                                 LIVE but PROVABLY UNREACHABLE (asserted)
 //	:2590-2599 the SILK-only trailing-zero strip                      DEAD
 //	:2601-2654 ret, apply_padding, opus_packet_pad                    LIVE
 //
 //nolint:gocyclo // Verbatim transliteration of a single C function; splitting it would break the 1:1 mapping the differential oracle depends on.
-func (st *Encoder) encodeFrameNative(pcm []int16, frameSize int, data []byte, origMaxDataBytes int, equivRate int32) int {
+func (st *Encoder) encodeFrameNative(pcm []int16, frameSize int, data []byte, origMaxDataBytes int, equivRate int32, isSilence bool) int {
 	// :1893. A single coded frame can never exceed 1275 payload bytes, whatever
 	// the CBR target says. When origMaxDataBytes is bigger, the difference is made
 	// up by opus_packet_pad at :2648, and ONLY then does it do real work.
@@ -410,10 +441,9 @@ func (st *Encoder) encodeFrameNative(pcm []int16, frameSize int, data []byte, or
 	// :1909 frame_rate: its only consumer is compute_redundancy_bytes (:1949),
 	// which redundancy == 0 makes unreachable. Not computed.
 	//
-	// :1911-1930 activity: consumed only by decide_dtx_mode (:2567), which
-	// `st->use_dtx` gates off. Not computed. See the State doc: this is why
-	// peak_signal_energy is excluded from the state comparison, and why enabling
-	// DTX must revisit that.
+	// :1911-1930 activity: consumed only by decide_dtx_mode (:2567). It is now
+	// computed just before the DTX decision below, from is_silence (the energy
+	// branch is dead in this config). See dtx.go.
 	//
 	// :1877, :1944-1945. MODE_CELT_ONLY forces redundancy off no matter what
 	// opus_encode_native decided, so redundancy_bytes is 0 for the whole function
@@ -571,9 +601,36 @@ func (st *Encoder) encodeFrameNative(pcm []int16, frameSize int, data []byte, or
 	st.prevFramesize = frameSize
 	st.first = 0
 
-	// :2564-2576. st->use_dtx is 0, so the else at :2574 runs:
-	// st->nb_no_activity_ms_Q1 = 0 (a field this port does not carry, because it
-	// is never made non-zero). DTX is deferred.
+	// :1911-1930. The activity / VAD decision. In this config the DTX guard below
+	// reduces to `use_dtx && is_silence` (see dtx.go), so the only value of
+	// activity that can reach decide_dtx_mode is 0. The energy-based branch
+	// (:1917-1930) is therefore DEAD and is not computed; activity is derived from
+	// is_silence alone.
+	activity := -1 // VAD_NO_DECISION
+	if isSilence {
+		// :1913. activity = !is_silence.
+		activity = 0
+	}
+
+	// :2564-2576. The generalized-DTX decision. st.silkMode.useDTX was set on the
+	// FULL frame in encodeNative (:1463) and is NOT recomputed per sub-frame, so in
+	// the multiframe path this guard still uses the full-frame is_silence. When it
+	// fires, the frame is exact digital silence, activity is 0, and the packet is a
+	// 1-byte TOC. This runs AFTER celt.EncodeWithEC and the epilogue (so CELT state
+	// has advanced) and BEFORE the CBR padding, exactly as C does, so a DTX frame is
+	// 1 byte even under CBR.
+	if st.useDtx != 0 && !st.silkMode.useDTX {
+		// :2567. frame_size_ms_Q1 = 2*1000*frame_size/Fs (a 20 ms sub-frame -> 40).
+		if decideDTXMode(activity, &st.nbNoActivityMsQ1, 2*1000*frameSize/int(st.Fs)) {
+			// :2566-2570.
+			st.rangeFinal = 0
+			data[0] = GenTOC(st.mode, int(st.Fs)/frameSize, currBandwidth, st.streamChannels)
+			return 1
+		}
+	} else {
+		// :2574.
+		st.nbNoActivityMsQ1 = 0
+	}
 
 	// :2578-2589. Ported, and asserted never to fire: ec_tell() cannot exceed
 	// 8*(max_data_bytes-1) == 8*nb_compr_bytes, because CELT was handed exactly
@@ -679,6 +736,9 @@ func (st *Encoder) encodeMultiframe(pcm []int16, frameSize int, data []byte, out
 	st.prevChannels = st.streamChannels
 
 	totSize := 0
+	// :1727. dtx_count counts sub-frames that came back as a 1-byte DTX packet; it
+	// gates the CBR padding at :1831.
+	dtxCount := 0
 	// :1769.
 	for i := 0; i < nbFrames; i++ {
 		// :1778. nonfinal_frame is written every iteration; it is read only on the SILK
@@ -694,16 +754,24 @@ func (st *Encoder) encodeMultiframe(pcm []int16, frameSize int, data []byte, out
 		// :1795.
 		currMax = fixedmath.IMIN(maxLenSum-totSize, currMax)
 
+		// :1802. is_silence is RECOMPUTED per 20 ms sub-frame (unlike the full-frame
+		// value that fixed silk_mode.useDTX at :1463). See dtx.go for why the guard
+		// still reduces to exact silence.
+		off := i * st.channels * encFrameSize
+		subSilence := isDigitalSilence(pcm[off:], encFrameSize, st.channels)
+
 		// :1804. Each sub-frame reuses encodeFrameNative with orig_max_data_bytes =
 		// currMax. Under CBR that function pads its own output up to currMax; under VBR
 		// the sub-frame is its natural length.
-		off := i * st.channels * encFrameSize
-		tmpLen := st.encodeFrameNative(pcm[off:], encFrameSize, tmpData[totSize:], currMax, d.EquivRate)
+		tmpLen := st.encodeFrameNative(pcm[off:], encFrameSize, tmpData[totSize:], currMax, d.EquivRate, subSilence)
 		if tmpLen < 0 {
 			// :1814.
 			return opusInternalError
 		}
-		// :1818. tmp_len == 1 -> dtx_count++, but DTX is off so dtx_count stays 0.
+		// :1817-1818. A 1-byte sub-frame is a DTX'd (TOC-only) frame.
+		if tmpLen == 1 {
+			dtxCount++
+		}
 
 		// :1821. Cat the just-written sub-frame (aliasing tmpData[totSize:totSize+tmpLen]).
 		if err := rp.Cat(tmpData[totSize : totSize+tmpLen]); err != nil {
@@ -713,9 +781,10 @@ func (st *Encoder) encodeMultiframe(pcm []int16, frameSize int, data []byte, out
 		totSize += tmpLen
 	}
 
-	// :1831. pad = !use_vbr && (dtx_count != nb_frames); dtx_count is 0 and nb_frames
-	// >= 2, so this reduces to use_vbr == 0. The output is capped at repacketize_len.
-	pad := st.useVbr == 0
+	// :1831. pad = !use_vbr && (dtx_count != nb_frames). A CBR packet whose every
+	// sub-frame was DTX'd (dtx_count == nb_frames) is left unpadded; otherwise the
+	// output is padded and capped at repacketize_len.
+	pad := st.useVbr == 0 && dtxCount != nbFrames
 	ret, err := rp.OutRangePadded(0, nbFrames, data, repacketizeLen, pad)
 	if err != nil {
 		// :1832.

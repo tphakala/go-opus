@@ -66,9 +66,11 @@ type Config struct {
 	// quality/overhead balance for a general file encoder.
 	FrameDurationMS int
 
-	// DTX requests discontinuous transmission. It is NOT IMPLEMENTED: setting it
-	// makes NewEncoder return opus.ErrUnsupported rather than quietly encoding
-	// without it. The zero value (false) is off.
+	// DTX requests discontinuous transmission. When enabled, long runs of exact
+	// digital silence are coded as 1-byte TOC-only packets past a ~200 ms onset,
+	// shrinking silent stretches; the granulepos and duration stay correct across
+	// the gaps, so a decoder reconstructs full-length audio. The zero value
+	// (false) is off. See opus.EncoderConfig.DTX.
 	DTX bool
 
 	// Vendor overrides the OpusTags vendor string; zero value uses

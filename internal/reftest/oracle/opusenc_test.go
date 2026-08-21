@@ -113,6 +113,8 @@ func compareState(t *testing.T, where string, got opusenc.State, want cOpusencSt
 		{"auto_bandwidth", int64(got.AutoBandwidth), int64(want.AutoBandwidth)},
 		{"first", int64(got.First), int64(want.First)},
 		{"bitrate_bps", int64(got.BitrateBps), int64(want.BitrateBps)},
+		{"nb_no_activity_ms_Q1", int64(got.NbNoActivityMsQ1), int64(want.NbNoActivityMsQ1)},
+		{"peak_signal_energy", int64(got.PeakSignalEnergy), int64(want.PeakSignalEnergy)},
 		{"rangeFinal", int64(got.RangeFinal), int64(want.RangeFinal)},
 	}
 	for _, f := range fields {

@@ -16,33 +16,40 @@ import (
 //
 //	StreamChannels, HybridStereoWidthQ14, VariableHPSmth2Q15, PrevHBGain,
 //	HPMem[4], Mode, PrevMode, PrevChannels, PrevFramesize, Bandwidth,
-//	AutoBandwidth, First, BitrateBps, RangeFinal, DelayBuffer[encoderBuffer*channels]
+//	AutoBandwidth, First, BitrateBps, NbNoActivityMsQ1, PeakSignalEnergy,
+//	RangeFinal, DelayBuffer[encoderBuffer*channels]
 //
-// # Two fields are DELIBERATELY EXCLUDED
+// # NbNoActivityMsQ1 and PeakSignalEnergy (added when DTX landed)
+//
+// Both are cross-frame OpusEncoder fields that generalized DTX reaches:
+//
+//   - nb_no_activity_ms_Q1 is LIVE: it is the consecutive-silence counter
+//     decide_dtx_mode (opus_encoder.c:1115) advances, and it directly gates
+//     whether a frame is dropped to a 1-byte DTX packet.
+//   - peak_signal_energy is mutated at :1317 but is OUTPUT-DEAD for the DTX
+//     DECISION in this config: the guard at :2565 reduces to `use_dtx &&
+//     is_silence` (see dtx.go), so DTX fires only on exact digital silence, where
+//     the energy path that reads peak is bypassed. It is nonetheless computed
+//     always-on and compared, for state-hash defense-in-depth (it is written in
+//     encodeNative, one of the functions DTX modifies, so a divergence must fail
+//     the gate rather than silently pass) and SILK-forward-compatibility.
+//
+// # width_mem STAYS DELIBERATELY EXCLUDED (and this asymmetry is intentional)
 //
 // st->width_mem (the StereoWidthState that compute_stereo_width mutates at
-// opus_encoder.c:1322) and st->peak_signal_energy (mutated at :1317) are EXECUTED
-// but OUTPUT-DEAD in the frozen forced-CELT-only configuration:
-//
-//   - stereo_width, the return value that width_mem accumulates into, is consumed
-//     only inside the user_forced_mode == OPUS_AUTO mode-decision block. With
-//     OPUS_SET_FORCE_MODE(MODE_CELT_ONLY) that block is never entered, so no
-//     packet byte can depend on width_mem.
-//   - peak_signal_energy is consumed only by DTX, which is deferred.
-//
-// This port therefore does not compute either one (stereo_width is pinned to 0),
-// and comparing them against the oracle would compare a value the port provably
-// does not need. That is a deliberate, bounded decision, not an oversight.
-//
-// IT MUST BE REVISITED WHEN DTX LANDS: enabling DTX makes peak_signal_energy LIVE
-// (it gates the digital-silence / no-activity decision), at which point the field
-// must be computed, added here, and added to the shim's dump in the same position.
+// opus_encoder.c:1322) is EXECUTED but OUTPUT-DEAD: stereo_width, the value it
+// accumulates into, is consumed only inside the user_forced_mode == OPUS_AUTO
+// mode-decision block, which OPUS_SET_FORCE_MODE(MODE_CELT_ONLY) never enters and
+// which stays unreachable without SILK. This port pins stereo_width to 0 and does
+// not compute or compare width_mem. Do NOT "fix" the asymmetry with
+// peak_signal_energy: peak is written in encodeNative, a function DTX modifies,
+// width_mem is not, so peak is compared and width_mem is not.
 //
 // Also absent, and correctly so, because they are not cross-frame state on this
 // path: silk_mode.stereoWidth_Q14 (recomputed from equiv_rate every frame at
 // :2320-2327 before any read), nonfinal_frame (written only inside the multiframe
-// path, and read only on the SILK path), and silk_bw_switch / nb_no_activity_ms_Q1 (SILK/DTX only,
-// never written in CELT-only).
+// path, and read only on the SILK path), and silk_bw_switch (SILK only, never
+// written in CELT-only).
 type State struct {
 	StreamChannels       int32
 	HybridStereoWidthQ14 int32
@@ -57,7 +64,14 @@ type State struct {
 	AutoBandwidth        int32
 	First                int32
 	BitrateBps           int32
-	RangeFinal           uint32
+	// NbNoActivityMsQ1 and PeakSignalEnergy mirror the C struct positions (they
+	// follow width_mem / detected_bandwidth and precede nonfinal_frame / rangeFinal).
+	// NbNoActivityMsQ1 is the LIVE generalized-DTX silence counter; PeakSignalEnergy
+	// is output-dead for the DTX decision in this config but is carried and compared
+	// for state-hash defense-in-depth. See the doc above and dtx.go.
+	NbNoActivityMsQ1 int32
+	PeakSignalEnergy int32
+	RangeFinal       uint32
 	// DelayBuffer is the VALID prefix of st->delay_buffer: encoder_buffer*channels
 	// samples. The C declares opus_res[MAX_ENCODER_BUFFER*2] but shortens the
 	// allocation by MAX_ENCODER_BUFFER*sizeof(opus_res) for mono (:235), so only
@@ -82,6 +96,8 @@ func (st *Encoder) State() State {
 		AutoBandwidth:        int32(st.autoBandwidth),
 		First:                int32(st.first),
 		BitrateBps:           st.bitrateBps,
+		NbNoActivityMsQ1:     int32(st.nbNoActivityMsQ1),
+		PeakSignalEnergy:     st.peakSignalEnergy,
 		RangeFinal:           st.rangeFinal,
 	}
 	s.DelayBuffer = make([]int16, len(st.delayBuffer))
@@ -117,6 +133,8 @@ func (s State) Hash() uint64 {
 	put(uint32(s.AutoBandwidth))
 	put(uint32(s.First))
 	put(uint32(s.BitrateBps))
+	put(uint32(s.NbNoActivityMsQ1))
+	put(uint32(s.PeakSignalEnergy))
 	put(s.RangeFinal)
 	for _, v := range s.DelayBuffer {
 		put(uint32(int32(v)))

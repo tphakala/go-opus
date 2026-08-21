@@ -119,10 +119,10 @@ var newFrameEncoder = func(cfg Config) (frameEncoder, error) {
 	})
 	if err != nil {
 		// Config.validate has already rejected a bad rate, channel count, bitrate
-		// or complexity with ErrInvalidConfig, so what reaches here is the one
-		// config oggopus accepts but the codec does not implement: DTX. That
-		// surfaces as opus.ErrUnsupported, which errors.Is still finds through the
-		// wrap, rather than being silently ignored.
+		// or complexity with ErrInvalidConfig, and every field oggopus exposes
+		// (including DTX) is now implemented, so reaching here means an unexpected
+		// codec error. It is wrapped rather than swallowed; errors.Is still finds
+		// the underlying opus sentinel through the wrap.
 		return nil, fmt.Errorf("oggopus: building the opus encoder: %w", err)
 	}
 	return &opusFrameEncoder{

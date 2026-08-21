@@ -153,12 +153,24 @@ type Encoder struct {
 	silkBwSwitch         int
 	first                int
 	energyMasking        []int32 // celt_glog*, nil on the single-stream path
-	nonfinalFrame        int
-	rangeFinal           uint32
-	delayBuffer          []int16 // opus_res[encoder_buffer*channels]
+	// nbNoActivityMsQ1 (nb_no_activity_ms_Q1) and peakSignalEnergy
+	// (peak_signal_energy) sit here to mirror the C struct order (they follow
+	// width_mem / detected_bandwidth and precede nonfinal_frame). Both are cleared
+	// by OPUS_RESET_STATE. nbNoActivityMsQ1 is the LIVE consecutive-silence counter
+	// generalized DTX advances; peakSignalEnergy is tracked for state-hash
+	// defense-in-depth (it is output-dead for the DTX decision in this config; see
+	// dtx.go and the State doc).
+	nbNoActivityMsQ1 int
+	peakSignalEnergy int32 // opus_val32
+	nonfinalFrame    int
+	rangeFinal       uint32
+	delayBuffer      []int16 // opus_res[encoder_buffer*channels]
 
-	// DELIBERATELY ABSENT: width_mem (StereoWidthState) and peak_signal_energy.
-	// See the State doc.
+	// DELIBERATELY ABSENT: width_mem (StereoWidthState). Its only consumer is the
+	// OPUS_AUTO mode decision, which forced CELT-only never enters and which stays
+	// unreachable without SILK, so it is output-dead AND excluded. peak_signal_energy
+	// used to share this exclusion; it is now carried (above) and compared, because
+	// DTX brings it into the function this port modifies. See the State doc.
 
 	celt *celt.Encoder
 
@@ -270,6 +282,8 @@ func (st *Encoder) resetRegion() {
 	st.silkBwSwitch = 0
 	st.first = 0
 	st.energyMasking = nil
+	st.nbNoActivityMsQ1 = 0
+	st.peakSignalEnergy = 0
 	st.nonfinalFrame = 0
 	st.rangeFinal = 0
 	for i := range st.delayBuffer {

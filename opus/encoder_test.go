@@ -223,18 +223,58 @@ func TestNewEncoderBitrateDomain(t *testing.T) {
 	}
 }
 
-// TestNewEncoderRejectsDTX pins the deferral. DTX is NOT implemented; the config
-// field exists because the design names it, and asking for it must fail loudly
-// rather than produce a stream that is silently not using DTX.
-func TestNewEncoderRejectsDTX(t *testing.T) {
-	_, err := NewEncoder(EncoderConfig{SampleRate: 48000, Channels: 1, DTX: true})
-	if !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("NewEncoder(DTX=true): error %v, want ErrUnsupported", err)
+// TestNewEncoderAcceptsDTX pins that DTX is implemented: the config is accepted
+// (it used to return ErrUnsupported), a long run of digital silence is coded as
+// 1-byte TOC-only packets once the ~200 ms onset threshold passes, and with DTX
+// off the identical silence never produces a 1-byte packet. The bit-exact vs-C
+// behaviour is covered by the refc differential gate; this pins the public
+// contract.
+func TestNewEncoderAcceptsDTX(t *testing.T) {
+	e, err := NewEncoder(EncoderConfig{SampleRate: 48000, Channels: 1, DTX: true})
+	if err != nil {
+		t.Fatalf("NewEncoder(DTX=true): %v", err)
 	}
-	// ErrUnsupported is its own sentinel and is deliberately NOT ErrBadArg: the
-	// configuration is legal Opus, this build just cannot do it.
-	if errors.Is(err, ErrBadArg) {
-		t.Errorf("NewEncoder(DTX=true): error also matches ErrBadArg; the two must stay distinct")
+	const frame = 960 // 20 ms at 48 kHz
+	silence := make([]int16, frame)
+	buf := make([]byte, 1276)
+
+	short := 0
+	firstShort := -1
+	for i := range 40 {
+		n, err := e.Encode(silence, buf)
+		if err != nil {
+			t.Fatalf("frame %d: Encode: %v", i, err)
+		}
+		if n == 1 {
+			short++
+			if firstShort < 0 {
+				firstShort = i
+			}
+		}
+	}
+	if short == 0 {
+		t.Fatalf("DTX on: no 1-byte packets across 40 silent frames; DTX never fired")
+	}
+	// DTX cannot start before NB_SPEECH_FRAMES_BEFORE_DTX (10) x 20 ms of silence
+	// have accumulated, so the first DTX frame is the 11th silent frame (index 10).
+	if firstShort < 10 {
+		t.Errorf("first DTX packet at frame %d, want >= 10 (~200 ms onset)", firstShort)
+	}
+
+	// Negative control: with DTX off the identical silence never yields a 1-byte
+	// packet (a silent CELT frame is at least 2 bytes; here it is 3).
+	e2, err := NewEncoder(EncoderConfig{SampleRate: 48000, Channels: 1})
+	if err != nil {
+		t.Fatalf("NewEncoder(DTX=false): %v", err)
+	}
+	for i := range 40 {
+		n, err := e2.Encode(silence, buf)
+		if err != nil {
+			t.Fatalf("frame %d: Encode(DTX off): %v", i, err)
+		}
+		if n == 1 {
+			t.Fatalf("DTX off: frame %d produced a 1-byte packet; DTX leaked", i)
+		}
 	}
 }
 

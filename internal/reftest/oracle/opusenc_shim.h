@@ -172,19 +172,23 @@ typedef struct {
  * Everything here lives at or after OPUS_ENCODER_RESET_START (opus_encoder.c:111),
  * i.e. it is exactly what OPUS_RESET_STATE clears.
  *
+ * INCLUDED for DTX: nb_no_activity_ms_Q1 (LIVE, the generalized-DTX silence
+ * counter) and peak_signal_energy (output-dead for the DTX decision, which fires
+ * only on exact silence, but compared for state-hash defense-in-depth). See the
+ * Go State doc and dtx.go for the full reasoning.
+ *
  * DELIBERATELY EXCLUDED: st->width_mem (StereoWidthState, mutated by
- * compute_stereo_width at :1322) and st->peak_signal_energy (mutated at :1317).
- * Both are EXECUTED but OUTPUT-DEAD in the frozen forced-CELT-only config:
- * stereo_width is consumed only inside the user_forced_mode==OPUS_AUTO mode
- * decision, and peak_signal_energy is consumed only by DTX. The Go port omits
- * both computations, so comparing them would compare a value the port provably
- * does not need. Enabling DTX makes peak_signal_energy LIVE and this exclusion
- * must be revisited then.
+ * compute_stereo_width at :1322) is EXECUTED but OUTPUT-DEAD: stereo_width is
+ * consumed only inside the user_forced_mode==OPUS_AUTO mode decision, which forced
+ * CELT-only never enters and which stays unreachable without SILK. The Go port
+ * pins stereo_width to 0 and does not compare width_mem. Do NOT re-exclude
+ * peak_signal_energy to match: peak lives inside the function DTX modifies,
+ * width_mem does not.
  *
  * Also excluded, and not state: silk_mode.stereoWidth_Q14 (recomputed from
  * equiv_rate every frame at :2320-2327 before any read), nonfinal_frame (only set
- * inside the deferred multiframe path), silk_bw_switch and nb_no_activity_ms_Q1
- * (SILK/DTX only, never written in CELT-only).
+ * inside the multiframe path), silk_bw_switch (SILK only, never written in
+ * CELT-only).
  */
 typedef struct {
     int32_t  stream_channels;
@@ -200,6 +204,11 @@ typedef struct {
     int32_t  auto_bandwidth;
     int32_t  first;
     int32_t  bitrate_bps;
+    /* nb_no_activity_ms_Q1 (LIVE: the generalized-DTX silence counter) and
+       peak_signal_energy (output-dead for the DTX decision but compared for
+       state-hash defense-in-depth; see the Go State doc and dtx.go). */
+    int32_t  nb_no_activity_ms_Q1;
+    int32_t  peak_signal_energy;
     uint32_t rangeFinal;
     /* delay_len = encoder_buffer*channels: the VALID prefix of delay_buffer. The
        C allocation is shortened by MAX_ENCODER_BUFFER*sizeof(opus_res) for mono
@@ -299,6 +308,8 @@ static void oracle_topenc_get_state(oracle_topenc_h *h, oracle_topenc_state *s)
    s->auto_bandwidth = st->auto_bandwidth;
    s->first          = st->first;
    s->bitrate_bps    = st->bitrate_bps;
+   s->nb_no_activity_ms_Q1 = st->nb_no_activity_ms_Q1;
+   s->peak_signal_energy   = (int32_t)st->peak_signal_energy;
    s->rangeFinal     = st->rangeFinal;
 
    n = st->encoder_buffer * st->channels;
