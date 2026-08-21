@@ -23,15 +23,22 @@ byte-identical to libopus.
   libopus exactly. This covers CELT, SILK, and hybrid modes, mode switching and
   redundancy (including the SILK/CELT crossovers), packet-loss concealment, and
   inband FEC/LBRR.
-- **Encoder: complete (CELT-only).** The fixed-point encoder produces whole Opus
-  packets that are byte-identical to the C reference. Its gate ran 10.3 million
-  frame pairs, every frame of a 52-clip corpus across 16 to 128 kbps, CBR/VBR and
-  constrained VBR, complexity 0 to 10, and 2.5/5/10/20 ms frames: 417 MB of packet
-  bytes, all byte-identical, with the range state matching on every frame. Encoded
-  packets also decode identically through the Go and the C decoder. Sample rates 8,
-  12, 16, 24 and 48 kHz are all bit-exact, mono and stereo. SILK and hybrid
-  encoding are not implemented, so the encoder is CELT-only; the decoder handles
-  all three modes.
+- **Encoder: complete, CELT-only by design.** The fixed-point encoder produces
+  whole Opus packets that are byte-identical to the C reference. Its gate ran 10.3
+  million frame pairs, every frame of a 52-clip corpus across 16 to 128 kbps,
+  CBR/VBR and constrained VBR, complexity 0 to 10, and 2.5/5/10/20 ms frames: 417
+  MB of packet bytes, all byte-identical, with the range state matching on every
+  frame. Encoded packets also decode identically through the Go and the C decoder.
+  Sample rates 8, 12, 16, 24 and 48 kHz are all bit-exact, mono and stereo.
+
+  CELT is the only encoder mode go-opus currently plans to support. SILK-only and
+  hybrid encoding are not on the roadmap for now, so the encoder always emits
+  CELT-only packets: valid, spec-compliant Opus that any Opus decoder plays back,
+  well suited to music and general fullband audio, and the natural fit for a
+  fixed-point, bit-exact port. It is not the mode libopus would pick for
+  low-bitrate speech (it would choose SILK or hybrid there). The decoder is not
+  limited this way: it handles all three modes, so go-opus decodes any Opus stream
+  regardless of how it was encoded.
 
 ## Approach
 
@@ -63,8 +70,11 @@ pipelines need. Quality is that of the fixed-point reference (both libopus build
 are RFC-conformant and perceptually equivalent); go-opus reproduces it exactly.
 Fixed-point is also SIMD-friendly: the integer multiply-accumulate kernels map
 straight onto SSE and NEON, and because integer SIMD is exact, accelerated
-kernels can stay bit-exact against the same test suites (planned for a later
-phase, behind the scalar function signatures).
+kernels stay bit-exact against the same test suites. The hot pitch, FFT, haar1
+and band-gain kernels are already backed by the cgo-free github.com/tphakala/simd
+library (assembly plus a pure-Go fallback), verified against the scalar reference
+on every build; further Opus-specific kernels are planned behind the same scalar
+function signatures.
 
 ## Performance
 

@@ -8,7 +8,8 @@
 // recorded in the bitstream, the bit-exactness check the RFC conformance suite
 // relies on.
 //
-// Phase 2 decodes CELT-only streams; it is extended to full RFC 6716 in phase 3.
+// It decodes the full RFC 6716 stream: CELT-only, SILK-only and hybrid packets,
+// mode transitions, redundancy, PLC and FEC all through opus.Decoder.
 package main
 
 import (

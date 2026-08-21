@@ -38,9 +38,11 @@ const (
 // value is documented, so a literal with only SampleRate and Channels set is a
 // complete, valid configuration.
 //
-// v1 fixes the internals this struct does not expose: OPUS_APPLICATION_AUDIO,
-// OPUS_SET_FORCE_MODE(MODE_CELT_ONLY), automatic (Nyquist-limited) bandwidth, and
-// int16 PCM. They become options only if a later phase adds SILK.
+// The encoder is CELT-only, the only mode go-opus currently plans to support, so
+// this struct deliberately does not expose the internals that mode fixes:
+// OPUS_APPLICATION_AUDIO, OPUS_SET_FORCE_MODE(MODE_CELT_ONLY), automatic
+// (Nyquist-limited) bandwidth, and int16 PCM. They would become options only if
+// SILK encoding were ever added.
 type EncoderConfig struct {
 	// SampleRate is the input sample rate in Hz: 8000, 12000, 16000, 24000, or
 	// 48000. Required; there is no zero default. Every one of the five is coded
@@ -110,9 +112,10 @@ type Encoder struct {
 // the OPUS_SET_* ctls cfg names. An invalid field returns ErrBadArg.
 //
 // The encoder is created with OPUS_APPLICATION_AUDIO and
-// OPUS_SET_FORCE_MODE(MODE_CELT_ONLY), which is the v1 scope and is not
-// configurable. Every other ctl is left at its opus_encoder_init default except
-// the four cfg sets: bitrate, complexity, VBR and the VBR constraint.
+// OPUS_SET_FORCE_MODE(MODE_CELT_ONLY), which is the only encoder mode go-opus
+// currently supports and is not configurable. Every other ctl is left at its
+// opus_encoder_init default except the four cfg sets: bitrate, complexity, VBR
+// and the VBR constraint.
 func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 	switch cfg.SampleRate {
 	case 8000, 12000, 16000, 24000, 48000:
