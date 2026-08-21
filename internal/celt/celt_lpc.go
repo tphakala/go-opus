@@ -47,12 +47,21 @@ func sround16(x int32, a int) int16 {
 // celtMaxabs16 is celt_maxabs16 (mathops.h:86): max |x[i]| as opus_val32.
 func celtMaxabs16(x []int16, len_ int) int32 {
 	var maxval, minval int16
-	for i := 0; i < len_; i++ {
-		if x[i] > maxval {
-			maxval = x[i]
+	// Bound the window against len(x), the same bound the original per-sample x[i]
+	// enforced, then range over it so the reduction is check-free. The guard keeps
+	// a mis-sized caller panicking deterministically rather than letting the
+	// two-index reslice widen silently into spare capacity (x[:len_] bounds against
+	// cap, not len). One check per call replaces one per element; the arithmetic is
+	// untouched, so the result stays bit-identical.
+	if len_ < 0 || len_ > len(x) {
+		panic("celt: celtMaxabs16: len_ out of range")
+	}
+	for _, v := range x[:len_] {
+		if v > maxval {
+			maxval = v
 		}
-		if x[i] < minval {
-			minval = x[i]
+		if v < minval {
+			minval = v
 		}
 	}
 	return fixedmath.MAX32(fixedmath.EXTEND32(maxval), -fixedmath.EXTEND32(minval))
@@ -67,8 +76,16 @@ func celtMaxabs16(x []int16, len_ int) int32 {
 // scaled by C == stream_channels, not CC == channels.
 func celtMaxabsRes(x []int16, xOff, len_ int) int32 {
 	var maxval, minval int16
-	for i := 0; i < len_; i++ {
-		v := x[xOff+i]
+	// Bound the [xOff, xOff+len_) window against len(x), the same bound the original
+	// per-sample x[xOff+i] enforced, then range over it check-free. The guard keeps
+	// a mis-sized caller panicking deterministically rather than letting the
+	// two-index reslice widen silently into spare capacity (it bounds against cap,
+	// not len). One check per call replaces one per element; the arithmetic is
+	// untouched, so the result stays bit-identical.
+	if xOff < 0 || len_ < 0 || xOff+len_ > len(x) {
+		panic("celt: celtMaxabsRes: window exceeds operand length")
+	}
+	for _, v := range x[xOff : xOff+len_] {
 		if v > maxval {
 			maxval = v
 		}
@@ -82,8 +99,17 @@ func celtMaxabsRes(x []int16, xOff, len_ int) int32 {
 // celtMaxabs32 is celt_maxabs32 (mathops.h:122): max |x[i]| for opus_val32 input.
 func celtMaxabs32(x []int32, xOff, len_ int) int32 {
 	var maxval, minval int32
-	for i := 0; i < len_; i++ {
-		v := x[xOff+i]
+	// Bound the [xOff, xOff+len_) window against len(x), the same bound the original
+	// per-sample x[xOff+i] enforced, then range over it so the reduction is
+	// check-free (xOff+i is otherwise not provably in range). The guard keeps a
+	// mis-sized caller panicking deterministically rather than letting the two-index
+	// reslice widen silently into spare capacity (it bounds against cap, not len).
+	// len_==0 yields an empty window and the original zero result. The arithmetic is
+	// unchanged, so the result stays bit-identical.
+	if xOff < 0 || len_ < 0 || xOff+len_ > len(x) {
+		panic("celt: celtMaxabs32: window exceeds operand length")
+	}
+	for _, v := range x[xOff : xOff+len_] {
 		if v > maxval {
 			maxval = v
 		}

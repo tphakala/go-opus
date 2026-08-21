@@ -101,6 +101,44 @@ jobs:
           files: coverage.out
           fail_ci_if_error: false
 
+  # Forced pure-Go SIMD fallback (#38). The pitch (i16), haar1/band-gain (i32),
+  # and FFT butterfly (cint) kernels are backed by tphakala/simd, which runs
+  # hand-written NEON/SSE2/AVX2 on the arm64/amd64 CI hosts and a pure-Go
+  # fallback on every other GOARCH (riscv64, ppc64le, s390x, loong64, wasm). The
+  # `test` job therefore only ever exercises the assembly; the Go fallback's
+  # bit-exactness on those arches would otherwise rest solely on the simd
+  # library's own suite, not go-opus's differential gate. SIMD_DISABLE=all makes
+  # the simd cpu package clear every detected feature at init, so every dispatch
+  # falls to the exact Go functions the exotic arches run, letting the existing
+  # differential suites (pitch/haar1/band-gain/FFT-cint) cover the fallback on a
+  # native amd64 runner. -count=1 is mandatory: the outcome depends on an env var
+  # the go test cache does not track, so a cached SIMD result would defeat the
+  # leg. TestSIMDFallbackForced asserts the features really were cleared, so a
+  # green run that quietly kept running SIMD fails instead of passing hollow.
+  forcego:
+    name: Test (forced Go SIMD fallback)
+    runs-on: ubuntu-latest
+    env:
+      SIMD_DISABLE: all
+      GOOPUS_ASSERT_SIMD_DISABLED: '1'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Download dependencies
+        run: go mod download
+      # Full sweep (no -short): the exhaustive length 0..600 differential walk is
+      # the only place the fallback's scalar tail epilogue is checked at every
+      # remainder class, and it is the whole point of this leg, so it runs in full
+      # on every trigger. It is a single pure-Go package, so the cost is small.
+      - name: Run the celt differential suite against the forced Go fallback
+        run: go test -count=1 -timeout 20m ./internal/celt/...
+
   # Differential round-trip against the pinned libopus oracle (FIXED_POINT +
   # DISABLE_FLOAT_API). The cgo harness compiles the vendored libopus sources
   # directly, so only a C compiler is needed (no autotools). This job carries the
