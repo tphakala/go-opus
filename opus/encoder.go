@@ -14,10 +14,12 @@ import (
 // this" and "this build cannot do it yet" are different facts, and only the
 // second one can change without a format change.
 //
-// It is returned for exactly one thing in v1: EncoderConfig.DTX (discontinuous
-// transmission is deferred). It is never silently accepted. Frames longer than
-// 20 ms are NOT unsupported: they are coded as multiframe packets (opus_encoder.c
-// splits them into 20 ms sub-frames and reassembles them with the repacketizer).
+// No EncoderConfig field returns it in v1 (DTX is now implemented). It remains
+// the sentinel for any format-legal but not-yet-built configuration the internal
+// layer reports as OPUS_UNIMPLEMENTED, so callers can keep distinguishing "this
+// build cannot do it yet" from ErrBadArg. Frames longer than 20 ms are NOT
+// unsupported: they are coded as multiframe packets (opus_encoder.c splits them
+// into 20 ms sub-frames and reassembles them with the repacketizer).
 var ErrUnsupported = errors.New("opus: unsupported configuration")
 
 const (
@@ -74,12 +76,16 @@ type EncoderConfig struct {
 	// library default, which is 10. Values outside 0..10 are rejected.
 	Complexity int
 
-	// DTX requests discontinuous transmission (OPUS_SET_DTX).
+	// DTX requests discontinuous transmission (OPUS_SET_DTX). The zero value
+	// (false) leaves it off.
 	//
-	// IT IS NOT IMPLEMENTED. Setting it returns ErrUnsupported from NewEncoder
-	// rather than being quietly ignored, because a caller who asked for DTX and
-	// silently did not get it would ship a stream that is merely larger than they
-	// budgeted for, with nothing to show them why.
+	// When enabled, a run of digital-silence frames (exactly zero PCM) past a
+	// ~200 ms threshold is coded as 1-byte TOC-only packets instead of full
+	// frames, and Encode returns length 1 for those frames (see Encode). This is
+	// generalized DTX in the forced-CELT-only config: it triggers only on EXACT
+	// digital silence, not on quiet-but-nonzero audio. A decoder fills the gap
+	// with comfort noise / PLC. It is a bitrate saving on silent stretches, not a
+	// quality setting.
 	DTX bool
 }
 
@@ -101,8 +107,7 @@ type Encoder struct {
 }
 
 // NewEncoder returns an Encoder for cfg, mirroring opus_encoder_create followed by
-// the OPUS_SET_* ctls cfg names. An invalid field returns ErrBadArg; a valid but
-// unimplemented one (DTX) returns ErrUnsupported.
+// the OPUS_SET_* ctls cfg names. An invalid field returns ErrBadArg.
 //
 // The encoder is created with OPUS_APPLICATION_AUDIO and
 // OPUS_SET_FORCE_MODE(MODE_CELT_ONLY), which is the v1 scope and is not
@@ -125,9 +130,6 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 	if cfg.Complexity < 0 || cfg.Complexity > maxComplexity {
 		return nil, fmt.Errorf("%w: complexity %d (want 1..%d, or 0 for the default %d)",
 			ErrBadArg, cfg.Complexity, maxComplexity, defaultComplexity)
-	}
-	if cfg.DTX {
-		return nil, fmt.Errorf("%w: DTX is not implemented in this release", ErrUnsupported)
 	}
 
 	enc := opusenc.NewEncoder(int32(cfg.SampleRate), cfg.Channels, opusenc.ApplicationAudio)
@@ -168,8 +170,12 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 	if cfg.ConstrainedVBR {
 		vbrConstraint = 1
 	}
+	dtx := 0
+	if cfg.DTX {
+		dtx = 1
+	}
 
-	// None of these five can fail on a config that passed the checks above, but an
+	// None of these can fail on a config that passed the checks above, but an
 	// unchecked ctl is how a silently misconfigured encoder happens, so they are
 	// checked. errors.Join keeps errors.Is working through mapEncErr.
 	if err := errors.Join(
@@ -178,6 +184,7 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 		enc.SetComplexity(complexity),
 		enc.SetVBR(vbr),
 		enc.SetVBRConstraint(vbrConstraint),
+		enc.SetDTX(dtx),
 	); err != nil {
 		return nil, mapEncErr(err)
 	}
@@ -191,6 +198,11 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 
 // Encode encodes exactly one frame of interleaved PCM into buf and returns the
 // packet length in bytes; buf[:n] is the packet. It mirrors opus_encode.
+//
+// With EncoderConfig.DTX set, a frame inside a long run of exact digital silence
+// is coded as a 1-byte TOC-only packet and Encode returns 1. That is a valid
+// packet: a container (see oggopus) writes it like any other and the decoder
+// reconstructs the gap. Without DTX, n is always at least 2.
 //
 // len(pcm) must be samplesPerChannel*Channels, and samplesPerChannel must be one
 // of the Opus frame durations: 2.5, 5, 10, 20, 40, 60, 80, 100 or 120 ms, i.e.

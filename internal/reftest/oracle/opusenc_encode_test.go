@@ -73,6 +73,8 @@ func cStateToGo(cs cOpusencState) opusenc.State {
 		AutoBandwidth:        cs.AutoBandwidth,
 		First:                cs.First,
 		BitrateBps:           cs.BitrateBps,
+		NbNoActivityMsQ1:     cs.NbNoActivityMsQ1,
+		PeakSignalEnergy:     cs.PeakSignalEnergy,
 		RangeFinal:           cs.RangeFinal,
 	}
 	s.DelayBuffer = append([]int16(nil), cs.DelayBuffer...)

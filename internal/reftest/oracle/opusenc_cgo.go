@@ -123,9 +123,9 @@ func (c cOpusencCfg) toC() C.oracle_topenc_cfg {
 
 // cOpusencState is the field-level cross-frame OpusEncoder state dump, in the
 // CANONICAL ORDER shared with opusenc_shim.h's oracle_topenc_state and the Go
-// internal/opusenc State(). width_mem and peak_signal_energy are deliberately
-// excluded (executed but output-dead in the frozen forced-CELT-only config); see
-// the header for the full reasoning.
+// internal/opusenc State(). nb_no_activity_ms_Q1 and peak_signal_energy are
+// included (DTX); width_mem stays excluded (output-dead in the frozen
+// forced-CELT-only config). See the header for the full reasoning.
 type cOpusencState struct {
 	StreamChannels       int32
 	HybridStereoWidthQ14 int32
@@ -140,6 +140,8 @@ type cOpusencState struct {
 	AutoBandwidth        int32
 	First                int32
 	BitrateBps           int32
+	NbNoActivityMsQ1     int32
+	PeakSignalEnergy     int32
 	RangeFinal           uint32
 	DelayBuffer          []int16
 }
@@ -158,6 +160,8 @@ func stateFromC(s *C.oracle_topenc_state) cOpusencState {
 		AutoBandwidth:        int32(s.auto_bandwidth),
 		First:                int32(s.first),
 		BitrateBps:           int32(s.bitrate_bps),
+		NbNoActivityMsQ1:     int32(s.nb_no_activity_ms_Q1),
+		PeakSignalEnergy:     int32(s.peak_signal_energy),
 		RangeFinal:           uint32(s.rangeFinal),
 	}
 	for i := range out.HPMem {

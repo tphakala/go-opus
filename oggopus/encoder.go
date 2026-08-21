@@ -50,9 +50,8 @@ type Encoder struct {
 // NewEncoder validates cfg, builds the codec, and returns an Encoder writing to
 // w, having already emitted the OpusHead and OpusTags header pages. It does not
 // require an io.WriteSeeker. A config error (bad sample rate, channel count,
-// bitrate or complexity) returns ErrInvalidConfig; a config the codec does not
-// implement (DTX) returns opus.ErrUnsupported. Both come back immediately, before
-// a byte is written.
+// bitrate or complexity) returns ErrInvalidConfig, immediately, before a byte is
+// written.
 func NewEncoder(w io.Writer, cfg Config) (*Encoder, error) { //nolint:gocritic // Config passed by value to match the go-flac-aligned public API (docs/api-design.md)
 	e := &Encoder{}
 	if err := e.reset(w, &cfg); err != nil {

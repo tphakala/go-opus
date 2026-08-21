@@ -452,6 +452,77 @@ func TestOggOpusExternalValidatesRealAudio(t *testing.T) {
 	}
 }
 
+// TestOggOpusDTXRoundTrip proves the container accounting stays correct across
+// DTX gaps: a signal with long stretches of EXACT digital silence, encoded with
+// DTX on, carries 1-byte TOC-only packets where the silence is dropped, and a
+// third-party demuxer (ffmpeg/ogginfo) plus our own decoder must still reconstruct
+// the full input length. The granule is derived from the input PCM length, not the
+// packet bytes, so a DTX'd packet advances it by a whole frame; this is the proof
+// of that. Swept over the frame durations so the multiframe DTX assembly is
+// validated by ffmpeg too.
+func TestOggOpusDTXRoundTrip(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not available; skipping DTX container validation")
+	}
+	// 2 s of alternating 400 ms tone / 400 ms exact-silence blocks. Each silence
+	// block is well past the ~200 ms DTX onset, so the stream carries real DTX
+	// packets across which the duration must still add up.
+	const rate = 48000
+	const block = rate * 4 / 10 // 400 ms
+	var pcm []int16
+	for b := range 5 {
+		if b%2 == 0 {
+			pcm = append(pcm, tone(block, 1, 440, rate)...)
+		} else {
+			pcm = append(pcm, make([]int16, block)...) // exact digital silence -> DTX
+		}
+	}
+	n := len(pcm) // mono: samples per channel
+
+	for _, dur := range []int{20, 40, 60, 120} {
+		t.Run(fmt.Sprintf("%dms", dur), func(t *testing.T) {
+			stream := encodeOgg(t, Config{
+				SampleRate:      rate,
+				Channels:        1,
+				Bitrate:         64000,
+				FrameDurationMS: dur,
+				DTX:             true,
+			}, pcm)
+			t.Logf("encoded %d samples (with silence gaps) at %d ms DTX to %d bytes", n, dur, len(stream))
+
+			validateWithFFmpeg(t, stream)
+			validateWithOgginfo(t, stream)
+			validateWithOpusdec(t, stream)
+
+			got, _ := decodeOgg(t, stream)
+			if len(got) != n {
+				t.Fatalf("DTX round-trip: decoded %d samples per channel, want %d "+
+					"(granule drifted across DTX gaps)", len(got), n)
+			}
+
+			// Non-vacuity: the decoded-length and ffmpeg checks above pass even if DTX
+			// were dropped before the frame encoder (normal silent packets decode to
+			// the same length). Prove DTX actually propagated to the container by
+			// finding a 1-byte TOC-only packet in the Ogg stream. Only single-frame
+			// (20 ms) packets can be 1 byte; a fully-DTX multiframe packet repacketizes
+			// its 1-byte sub-frames into a several-byte code-1/2/3 packet, so this check
+			// is meaningful only at 20 ms.
+			if dur == 20 {
+				_, pkts := readContainer(t, bytes.NewReader(stream))
+				dtx := 0
+				for _, p := range pkts {
+					if len(p) == 1 {
+						dtx++
+					}
+				}
+				if dtx == 0 {
+					t.Fatalf("no 1-byte DTX packet in the Ogg stream; DTX did not reach the container")
+				}
+			}
+		})
+	}
+}
+
 // sweep generates a log sine sweep from 20 Hz to 20 kHz, the broadband signal that
 // exercises every CELT band.
 func sweep(n, channels, rate int) []int16 {

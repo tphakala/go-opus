@@ -127,10 +127,11 @@ func TestEncoderSeamWired(t *testing.T) {
 	if _, err := NewEncoder(&buf, Config{SampleRate: 44100, Channels: 2}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("NewEncoder bad config: got %v, want ErrInvalidConfig", err)
 	}
-	// DTX passes Config.validate but the codec does not implement it, so it must
-	// surface as opus.ErrUnsupported rather than being silently dropped.
-	if _, err := NewEncoder(&buf, Config{SampleRate: 48000, Channels: 1, DTX: true}); !errors.Is(err, opus.ErrUnsupported) {
-		t.Fatalf("NewEncoder DTX: got %v, want opus.ErrUnsupported", err)
+	// DTX is implemented: NewEncoder with it set must succeed (it used to return
+	// opus.ErrUnsupported). The bit-exact DTX behaviour is covered by the codec's
+	// differential gate and the ffmpeg Ogg round-trip; here we only pin acceptance.
+	if _, err := NewEncoder(&buf, Config{SampleRate: 48000, Channels: 1, DTX: true}); err != nil {
+		t.Fatalf("NewEncoder DTX: got %v, want success", err)
 	}
 }
 
