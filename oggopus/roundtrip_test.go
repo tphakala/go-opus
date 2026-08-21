@@ -499,6 +499,26 @@ func TestOggOpusDTXRoundTrip(t *testing.T) {
 				t.Fatalf("DTX round-trip: decoded %d samples per channel, want %d "+
 					"(granule drifted across DTX gaps)", len(got), n)
 			}
+
+			// Non-vacuity: the decoded-length and ffmpeg checks above pass even if DTX
+			// were dropped before the frame encoder (normal silent packets decode to
+			// the same length). Prove DTX actually propagated to the container by
+			// finding a 1-byte TOC-only packet in the Ogg stream. Only single-frame
+			// (20 ms) packets can be 1 byte; a fully-DTX multiframe packet repacketizes
+			// its 1-byte sub-frames into a several-byte code-1/2/3 packet, so this check
+			// is meaningful only at 20 ms.
+			if dur == 20 {
+				_, pkts := readContainer(t, bytes.NewReader(stream))
+				dtx := 0
+				for _, p := range pkts {
+					if len(p) == 1 {
+						dtx++
+					}
+				}
+				if dtx == 0 {
+					t.Fatalf("no 1-byte DTX packet in the Ogg stream; DTX did not reach the container")
+				}
+			}
 		})
 	}
 }
