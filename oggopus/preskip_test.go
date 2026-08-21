@@ -254,7 +254,7 @@ func TestOggOpusGranuleRFC7845(t *testing.T) {
 						len(pkts), naturalFrames)
 				}
 
-				checkPageGranules(t, cr, len(pkts))
+				checkPageGranules(t, cr, len(pkts), frame48k)
 
 				// The decoded stream must be exactly as long as the input.
 				got, info := decodeOgg(t, stream)
@@ -315,7 +315,7 @@ func TestOggOpusGranuleRFC7845AllRates(t *testing.T) {
 					t.Fatalf("at %d Hz, n=%d (r=%d, overshoot %d coded samples): padded=%v, want %v",
 						rate, n, r, overshoot, gotPad, wantPad)
 				}
-				checkPageGranules(t, cr, len(pkts))
+				checkPageGranules(t, cr, len(pkts), frame48k)
 
 				got, _ := decodeOgg(t, stream)
 				if int64(len(got)) != n48 {
@@ -331,7 +331,7 @@ func TestOggOpusGranuleRFC7845AllRates(t *testing.T) {
 // invariants: header pages carry granule 0, audio granules never regress, no page
 // claims more samples than the packets that have completed by then could hold, and
 // the last page is flagged end-of-stream.
-func checkPageGranules(t *testing.T, cr *containerReader, audioPackets int) {
+func checkPageGranules(t *testing.T, cr *containerReader, audioPackets, frameLen48k int) {
 	t.Helper()
 	if len(cr.pages) < 3 {
 		t.Fatalf("expected at least 3 pages (OpusHead, OpusTags, audio), got %d", len(cr.pages))
@@ -352,7 +352,7 @@ func checkPageGranules(t *testing.T, cr *containerReader, audioPackets int) {
 		if pg.granule == granuleNone {
 			continue // no packet completed here; the page carries no granule
 		}
-		avail := int64(cumPkts-2) * frame48k // minus the two header packets
+		avail := int64(cumPkts-2) * int64(frameLen48k) // minus the two header packets
 		if pg.granule > avail {
 			t.Fatalf("page %d granule %d exceeds the %d samples coded by the %d audio packets "+
 				"completed through it (RFC 7845 section 4.5)", i, pg.granule, avail, cumPkts-2)

@@ -33,6 +33,19 @@ const (
 // rejected rather than clamped (unlike go-flac, which accepts a wide range).
 var validSampleRates = [...]int{8000, 12000, 16000, 24000, 48000}
 
+// defaultFrameDurationMS is the frame duration Config.FrameDurationMS's zero
+// value selects, and validFrameDurationsMS enumerates the durations the encoder
+// accepts. The set is restricted to multiples of 20 ms: every allowed
+// rate/duration pair yields an integer samples-per-frame (rates are multiples
+// of 4000, durations of 20, so SampleRate*ms/1000 is exact), and each frame
+// stays at least 960 samples at 48 kHz, which the Close end-padding relies on
+// (see encoder.go). The shorter 2.5, 5 and 10 ms Opus durations are deliberately
+// omitted: 2.5 ms is fractional and does not fit an integer-ms field, and the
+// sub-20 ms durations only add container overhead for a file encoder.
+const defaultFrameDurationMS = 20
+
+var validFrameDurationsMS = [...]int{20, 40, 60, 80, 100, 120}
+
 // Config configures an oggopus Encoder. It is a flat struct mirroring go-flac's
 // pcm.Config convention: no embedding, and every field's zero value is
 // documented so a literal reads cleanly. See docs/api-design.md.
@@ -44,6 +57,14 @@ type Config struct {
 	CBR            bool // zero value (false) means VBR
 	ConstrainedVBR bool // meaningful only when CBR is false
 	Complexity     int  // 1..10; zero selects the library default (10)
+
+	// FrameDurationMS is the Opus frame duration in milliseconds: 20, 40, 60,
+	// 80, 100, or 120. The zero value selects the default (20). A duration above
+	// 20 ms is carried as one longer (multiframe) Opus packet per Ogg packet,
+	// which lowers the per-packet container overhead at the cost of a coarser
+	// end-of-stream trim. 20 ms is the opusenc default and the best
+	// quality/overhead balance for a general file encoder.
+	FrameDurationMS int
 
 	// DTX requests discontinuous transmission. It is NOT IMPLEMENTED: setting it
 	// makes NewEncoder return opus.ErrUnsupported rather than quietly encoding
@@ -76,7 +97,20 @@ func (c *Config) validate() error {
 		return fmt.Errorf("%w: complexity %d (want 1..%d, or 0 for the default %d)",
 			ErrInvalidConfig, c.Complexity, maxComplexity, defaultComplexity)
 	}
+	if c.FrameDurationMS != 0 && !validFrameDuration(c.FrameDurationMS) {
+		return fmt.Errorf("%w: frame duration %d ms (want 20, 40, 60, 80, 100, or 120, or 0 for the default %d)",
+			ErrInvalidConfig, c.FrameDurationMS, defaultFrameDurationMS)
+	}
 	return nil
+}
+
+// frameDurationMS returns the effective frame duration in milliseconds, mapping
+// the zero value to the default so the encoder reads it in one place.
+func (c *Config) frameDurationMS() int {
+	if c.FrameDurationMS == 0 {
+		return defaultFrameDurationMS
+	}
+	return c.FrameDurationMS
 }
 
 // vendorString returns the vendor string to write into OpusTags.
@@ -90,6 +124,15 @@ func (c *Config) vendorString() string {
 func validSampleRate(r int) bool {
 	for _, v := range validSampleRates {
 		if r == v {
+			return true
+		}
+	}
+	return false
+}
+
+func validFrameDuration(ms int) bool {
+	for _, v := range validFrameDurationsMS {
+		if ms == v {
 			return true
 		}
 	}

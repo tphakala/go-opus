@@ -13,8 +13,9 @@ import (
 // below are the only place oggopus depends on the codec, and they depend on it
 // only through the public opus package, never on its internals.
 
-// frameEncoder turns one 20 ms frame of interleaved int16 PCM into one opus
-// packet. It is the minimal surface the container writer needs from the codec.
+// frameEncoder turns one frame of interleaved int16 PCM into one opus packet
+// (a multiframe packet for the 40 ms and longer durations). It is the minimal
+// surface the container writer needs from the codec.
 // The interface is unexported, so the adapter that satisfies it lives inside
 // oggopus and wraps the public opus.Encoder; the container never depends on the
 // opus package's concrete types.
@@ -54,8 +55,9 @@ type frameDecoder interface {
 const maxPacketBytes = 1276 * 6
 
 // maxFrameSamples48k is the longest Opus frame, 120 ms at 48 kHz. The container's
-// own encoder only ever writes 20 ms frames, but the decoder must accept any
-// stream, so its scratch buffer is sized for the format's maximum.
+// own encoder writes frames of the configured duration (20 ms by default, up to
+// 120 ms), and the decoder must accept any stream, so its scratch buffer is sized
+// for the format's maximum.
 const maxFrameSamples48k = 5760
 
 // opusFrameEncoder adapts the public opus.Encoder to the frameEncoder seam.

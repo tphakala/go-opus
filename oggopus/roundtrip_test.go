@@ -3,6 +3,7 @@ package oggopus
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os/exec"
@@ -40,7 +41,7 @@ func TestOggOpusRoundTripAllRates(t *testing.T) {
 				if coded := int64(len(pkts)) * frame48k; cr.finalGranule > coded {
 					t.Fatalf("final granule %d exceeds the %d coded samples", cr.finalGranule, coded)
 				}
-				checkPageGranules(t, cr, len(pkts))
+				checkPageGranules(t, cr, len(pkts), frame48k)
 
 				got, info := decodeOgg(t, stream)
 				if info.Channels != ch {
@@ -59,6 +60,105 @@ func TestOggOpusRoundTripAllRates(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestOggOpusRoundTripAllDurations encodes and decodes at every configurable
+// frame duration (multiframe packets for 40 ms and longer), across a low and a
+// high sample rate and both channel counts. The decoded sample count and the
+// final granule depend only on the input length, not the frame duration, so the
+// sweep proves that changing the duration re-frames the audio without changing
+// what the stream claims or reconstructs. It also independently recomputes the
+// coded-frame count (including the RFC 7845 end-padding frame) and pins it.
+func TestOggOpusRoundTripAllDurations(t *testing.T) {
+	for _, dur := range []int{20, 40, 60, 80, 100, 120} {
+		// 8000 Hz exercises the smallest 48 kHz frame mapping, in particular the
+		// 8000 Hz x 120 ms = 960-sample frame (6*fs/50), the top of the range the
+		// core encoder's checkFrameSize accepts.
+		for _, rate := range []int{8000, 16000, 48000} {
+			for _, ch := range []int{1, 2} {
+				t.Run(durRateChName(dur, rate, ch), func(t *testing.T) {
+					// ~750 ms, deliberately not a whole number of frames at any duration.
+					n := 3*rate/4 + 137
+					pcm := tone(n, ch, 440, rate)
+					stream := encodeOgg(t, Config{SampleRate: rate, Channels: ch, Bitrate: 96000, FrameDurationMS: dur}, pcm)
+
+					cr, pkts := readContainer(t, bytes.NewReader(stream))
+					if int(cr.head.preSkip) != expectedPreSkip {
+						t.Fatalf("pre-skip = %d, want %d", cr.head.preSkip, expectedPreSkip)
+					}
+
+					n48 := n * sampleRate48k / rate
+					if final, want := cr.finalGranule, int64(expectedPreSkip+n48); final != want {
+						t.Fatalf("final granule = %d, want %d", final, want)
+					}
+
+					// Independently derive the coded-frame count. The encoder codes
+					// ceil(n/frameLenInput) natural frames (the last one zero-padded), then
+					// Close adds one silence frame when the overshoot is smaller than the
+					// pre-skip (RFC 7845 section 4.5). frameLen48k is a multiple of 960, so
+					// at most one silence frame is ever needed.
+					frameLenInput := rate * dur / 1000
+					frameLen48k := sampleRate48k * dur / 1000
+					naturalFrames := (n + frameLenInput - 1) / frameLenInput
+					overshoot48k := (naturalFrames*frameLenInput - n) * sampleRate48k / rate
+					wantFrames := naturalFrames
+					if overshoot48k < expectedPreSkip {
+						wantFrames++
+					}
+					if len(pkts) != wantFrames {
+						t.Fatalf("coded %d frames, want %d (natural %d, pad %v)",
+							len(pkts), wantFrames, naturalFrames, overshoot48k < expectedPreSkip)
+					}
+					if coded := int64(len(pkts)) * int64(frameLen48k); cr.finalGranule > coded {
+						t.Fatalf("final granule %d exceeds the %d coded samples", cr.finalGranule, coded)
+					}
+					checkPageGranules(t, cr, len(pkts), frameLen48k)
+
+					got, info := decodeOgg(t, stream)
+					if info.Channels != ch {
+						t.Fatalf("Info.Channels = %d, want %d", info.Channels, ch)
+					}
+					if len(got)/ch != n48 {
+						t.Fatalf("decoded %d samples per channel at 48 kHz, want %d", len(got)/ch, n48)
+					}
+					if e := rms(got); e < 1000 {
+						t.Fatalf("decoded RMS %.1f is implausibly low for a full-scale tone", e)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestOggOpusFrameDurationZeroMeansDefault pins the zero-value rule: an unset
+// FrameDurationMS must produce the byte-identical stream that an explicit 20 ms
+// does, the same way TestComplexityZeroMeansDefault pins Complexity's default.
+func TestOggOpusFrameDurationZeroMeansDefault(t *testing.T) {
+	pcm := tone(48000/4+137, 2, 440, 48000)
+	base := Config{SampleRate: 48000, Channels: 2, Bitrate: 96000}
+
+	// The serial number is random per stream, so compare the audio packets, not the
+	// raw bytes.
+	packetsOf := func(cfg Config) [][]byte {
+		_, pkts := readContainer(t, bytes.NewReader(encodeOgg(t, cfg, pcm)))
+		return pkts
+	}
+	zero := base
+	explicit := base
+	explicit.FrameDurationMS = 20
+	if !packetsEqual(packetsOf(zero), packetsOf(explicit)) {
+		t.Fatalf("zero FrameDurationMS did not encode identically to an explicit 20 ms: " +
+			"the zero value must select the default")
+	}
+	// And the duration really reaches the encoder: 40 ms must re-frame the audio into
+	// fewer, longer packets, or the assertion above would pass vacuously.
+	if long := packetsOf(Config{SampleRate: 48000, Channels: 2, Bitrate: 96000, FrameDurationMS: 40}); len(long) >= len(packetsOf(zero)) {
+		t.Fatalf("40 ms produced %d packets, not fewer than the default 20 ms: the setting is not reaching the encoder", len(long))
+	}
+}
+
+func durRateChName(dur, rate, ch int) string {
+	return fmt.Sprintf("%dms_%s", dur, rateChName(rate, ch))
 }
 
 // tone generates a sine at hz, amplitude ~0.6 full scale, interleaved.
@@ -321,7 +421,10 @@ func TestOggOpusExternalValidation(t *testing.T) {
 
 // TestOggOpusExternalValidatesRealAudio runs a longer, broadband signal past every
 // external tool that happens to be installed, so a structural checker like ogginfo
-// gets a look at the paging too, not just a decoder.
+// gets a look at the paging too, not just a decoder. It sweeps the frame duration:
+// the 40 ms and longer durations exercise the multiframe packet path,
+// and this is the proof that a third-party libopus demuxer accepts those packets
+// and agrees on the stream's duration, not just our own reader.
 func TestOggOpusExternalValidatesRealAudio(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not available; skipping external container validation")
@@ -329,16 +432,20 @@ func TestOggOpusExternalValidatesRealAudio(t *testing.T) {
 	// 2 s of a sweep: many pages, a full segment table, and real coding decisions.
 	const n = 96000
 	pcm := sweep(n, 2, 48000)
-	stream := encodeOgg(t, Config{SampleRate: 48000, Channels: 2, Bitrate: 128000}, pcm)
-	t.Logf("encoded %d samples of stereo sweep to %d bytes of Ogg Opus", n, len(stream))
+	for _, dur := range []int{20, 60, 120} {
+		t.Run(fmt.Sprintf("%dms", dur), func(t *testing.T) {
+			stream := encodeOgg(t, Config{SampleRate: 48000, Channels: 2, Bitrate: 128000, FrameDurationMS: dur}, pcm)
+			t.Logf("encoded %d samples of stereo sweep at %d ms to %d bytes of Ogg Opus", n, dur, len(stream))
 
-	validateWithFFmpeg(t, stream)
-	validateWithOgginfo(t, stream)
-	validateWithOpusdec(t, stream)
+			validateWithFFmpeg(t, stream)
+			validateWithOgginfo(t, stream)
+			validateWithOpusdec(t, stream)
 
-	got, _ := decodeOgg(t, stream)
-	if len(got)/2 != n {
-		t.Fatalf("our decoder returned %d samples per channel, want %d", len(got)/2, n)
+			got, _ := decodeOgg(t, stream)
+			if len(got)/2 != n {
+				t.Fatalf("our decoder returned %d samples per channel, want %d", len(got)/2, n)
+			}
+		})
 	}
 }
 

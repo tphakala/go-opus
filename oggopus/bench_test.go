@@ -39,7 +39,7 @@ import (
 const benchSampleRate = 48000
 
 // benchClipSeconds is the length of the audio a stream-level benchmark op encodes or
-// decodes. One second is 50 frames at the container's fixed 20 ms, enough that the
+// decodes. One second is 50 frames at the default 20 ms, enough that the
 // per-stream setup (the two header pages) is a visible but not dominant share, which
 // is exactly the ratio a short-clip workload sees.
 const benchClipSeconds = 1
@@ -89,7 +89,7 @@ func reportRealtime(b *testing.B, seconds float64) {
 func BenchmarkEncodeFrame(b *testing.B) {
 	for _, ch := range []int{1, 2} {
 		b.Run(fmt.Sprintf("ch%d", ch), func(b *testing.B) {
-			frameLen := benchSampleRate / (1000 / frameDurationMS) // 960 samples
+			frameLen := benchSampleRate * defaultFrameDurationMS / 1000 // 960 samples
 			frameBytes := frameLen * ch * 2
 			audio := benchAudio(ch)
 			nFrames := len(audio) / frameBytes
@@ -109,7 +109,7 @@ func BenchmarkEncodeFrame(b *testing.B) {
 				}
 				i++
 			}
-			reportRealtime(b, float64(frameDurationMS)/1000)
+			reportRealtime(b, float64(defaultFrameDurationMS)/1000)
 		})
 	}
 }
