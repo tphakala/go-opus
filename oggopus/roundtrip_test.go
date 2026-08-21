@@ -432,7 +432,10 @@ func TestOggOpusExternalValidatesRealAudio(t *testing.T) {
 	// 2 s of a sweep: many pages, a full segment table, and real coding decisions.
 	const n = 96000
 	pcm := sweep(n, 2, 48000)
-	for _, dur := range []int{20, 60, 120} {
+	// Sweep every supported duration so all multiframe assemblies are validated by
+	// a third-party demuxer: 40/60/80/100/120 ms produce 2-, 3-, 4-, 5- and 6-frame
+	// Opus packets respectively, and each is a distinct repacketizer code path.
+	for _, dur := range []int{20, 40, 60, 80, 100, 120} {
 		t.Run(fmt.Sprintf("%dms", dur), func(t *testing.T) {
 			stream := encodeOgg(t, Config{SampleRate: 48000, Channels: 2, Bitrate: 128000, FrameDurationMS: dur}, pcm)
 			t.Logf("encoded %d samples of stereo sweep at %d ms to %d bytes of Ogg Opus", n, dur, len(stream))
