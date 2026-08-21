@@ -433,6 +433,12 @@ func transientAnalysis(in []int32, length, C int, tfEstimate *int16, tfChan *int
 	inShift := fixedmath.IMAX(0, fixedmath.Celt_ilog2(1+celtMaxabs32(in, 0, C*length))-14)
 
 	tmp := alloc(&sc.transientTmp, length) // VARDECL(opus_val16, tmp)
+	// Re-establish len(tmp) == length for the bounds-check prover: alloc returns
+	// a slice of length length, but that fact is opaque across the call, so every
+	// unit-stride tmp[i] in the length- and len2-bounded loops below would
+	// otherwise carry a per-sample check. One reslice check here elides those. The
+	// strided forward-pass reads (tmp[2*i]) are not covered; see that loop.
+	tmp = tmp[:length]
 
 	*weakTransient = 0
 	// For lower bitrates, use a more conservative forward masking decay to avoid
@@ -449,8 +455,16 @@ func transientAnalysis(in []int32, length, C int, tfEstimate *int16, tfChan *int
 		mem0 := int32(0)
 		mem1 := int32(0)
 		// High-pass filter: (1 - 2z^-1 + z^-2) / (1 - z^-1 + .5z^-2).
+		// Reslice this channel's window to exactly length so the in reads below are
+		// check-free; the strided base c*length is otherwise opaque to the prover.
+		// The two-step form (skip c*length, then cap to length) is deliberate: the
+		// single expression in[c*length : c*length+length] leaves the length as a
+		// symbolic difference the bounds-check prover will not cancel, so the check
+		// would survive. Taking [:length] off the tail slice gives a 0-based high
+		// index the prover reads as length directly.
+		inc := in[c*length:][:length]
 		for i := 0; i < length; i++ {
-			x := fixedmath.SHR32(in[i+c*length], inShift)
+			x := fixedmath.SHR32(inc[i], inShift)
 			y := fixedmath.ADD32(mem0, x)
 			mem0 = mem1 + y - fixedmath.SHL32(x, 1)
 			mem1 = x - fixedmath.SHR32(y, 1)
@@ -474,7 +488,10 @@ func transientAnalysis(in []int32, length, C int, tfEstimate *int16, tfChan *int
 		mean = 0
 		mem0 = 0
 		// Grouping by two to reduce complexity. Forward pass computes the post-echo
-		// threshold.
+		// threshold. The strided reads tmp[2*i], tmp[2*i+1] keep a per-sample check:
+		// the prover cannot derive 2*i+1 < len(tmp) from i < len2, and a 2*len2 view
+		// does not help (the 2*i index defeats the same induction). Left as-is rather
+		// than restructure the arithmetic. The tmp[i] write is elided by tmp[:length].
 		for i := 0; i < len2; i++ {
 			x2 := fixedmath.PSHR32(fixedmath.MULT16_16(tmp[2*i], tmp[2*i])+
 				fixedmath.MULT16_16(tmp[2*i+1], tmp[2*i+1]), 4)
@@ -485,11 +502,17 @@ func transientAnalysis(in []int32, length, C int, tfEstimate *int16, tfChan *int
 
 		mem0 = 0
 		maxE = 0
+		// The forward pass has written tmp[0:len2]; view that half so the backward
+		// pass reads and writes it check-free (len2 is otherwise not proven <=
+		// len(tmp)). tb aliases tmp, so writes through it are unchanged. The stride-4
+		// harmonic-mean loop below keeps its check: the prover cannot discharge the
+		// +4 induction, and at len2/4 iterations it is not worth restructuring.
+		tb := tmp[:len2]
 		// Backward pass computes the pre-echo threshold. Backward masking 13.9 dB/ms.
 		for i := len2 - 1; i >= 0; i-- {
-			mem0 = mem0 + fixedmath.PSHR32(fixedmath.SHL32(fixedmath.EXTEND32(tmp[i]), 4)-mem0, 3)
-			tmp[i] = fixedmath.EXTRACT16(fixedmath.PSHR32(mem0, 4))
-			maxE = fixedmath.EXTRACT16(fixedmath.MAX16(int32(maxE), int32(tmp[i])))
+			mem0 = mem0 + fixedmath.PSHR32(fixedmath.SHL32(fixedmath.EXTEND32(tb[i]), 4)-mem0, 3)
+			tb[i] = fixedmath.EXTRACT16(fixedmath.PSHR32(mem0, 4))
+			maxE = fixedmath.EXTRACT16(fixedmath.MAX16(int32(maxE), int32(tb[i])))
 		}
 
 		// Ratio of frame energy over harmonic mean of the energy. Frame energy is
@@ -505,7 +528,7 @@ func transientAnalysis(in []int32, length, C int, tfEstimate *int16, tfChan *int
 		for i := 12; i < len2-5; i += 4 {
 			// Do not round to nearest.
 			id := fixedmath.MAX32(0, fixedmath.MIN32(127,
-				fixedmath.MULT16_32_Q15(tmp[i]+1 /*EPSILON*/, norm)))
+				fixedmath.MULT16_32_Q15(tb[i]+1 /*EPSILON*/, norm)))
 			unmask += int32(invTable[id])
 		}
 		// Normalize, compensate for the 1/4th sampling and the factor of 6 in the
