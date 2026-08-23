@@ -73,6 +73,10 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 func (d *Decoder) Reset(r io.Reader) error {
 	d.cr = nil
 	d.dec = nil
+	// Clear info too, so a Reset that fails partway does not leave Info reporting
+	// the previous stream's parameters (init only repopulates it on success). This
+	// matches go-flac and go-aac, whose decoders zero their info up front.
+	d.info = Info{}
 	d.pcm = d.pcm[:0]
 	return d.init(r)
 }

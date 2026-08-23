@@ -122,6 +122,9 @@ func TestDecoderReset(t *testing.T) {
 	if err := d.Reset(nil); err == nil {
 		t.Error("Reset(nil): want error, got nil")
 	}
+	if info := d.Info(); info != (Info{}) {
+		t.Errorf("Info after a failed Reset = %+v, want zero (not the previous stream's metadata)", info)
+	}
 	if _, err := io.Copy(io.Discard, d); err == nil {
 		t.Error("Read after a failed Reset should error, not resume the old stream")
 	}
