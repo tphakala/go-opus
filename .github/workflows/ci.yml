@@ -317,3 +317,37 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go build ./...
+
+  fuzz:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # A short bounded run of each decode-path fuzz target on every build. The
+      # packet and Ogg readers parse untrusted bytes, so this guards against
+      # panics and unbounded allocation on malformed input; a crash a run finds
+      # is committed under testdata/fuzz as a regression seed. The last target
+      # fuzzes a SIMD kernel against its scalar reference. Smoke runs, not a
+      # substitute for a long local fuzz session. The libopus submodule is not
+      # needed: these targets are pure Go, the C reference is build-tagged out.
+      - name: Fuzz Opus packet parser
+        run: go test -run='^$' -fuzz='^FuzzParsePacket$' -fuzztime=20s ./internal/packet
+      - name: Fuzz Opus decode
+        run: go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=20s ./opus
+      - name: Fuzz Ogg page reader
+        run: go test -run='^$' -fuzz='^FuzzReadPage$' -fuzztime=15s ./oggopus
+      - name: Fuzz OpusHead parser
+        run: go test -run='^$' -fuzz='^FuzzParseOpusHead$' -fuzztime=15s ./oggopus
+      - name: Fuzz OpusTags parser
+        run: go test -run='^$' -fuzz='^FuzzParseOpusTags$' -fuzztime=15s ./oggopus
+      - name: Fuzz Ogg container reader
+        run: go test -run='^$' -fuzz='^FuzzContainerReader$' -fuzztime=15s ./oggopus
+      - name: Fuzz xcorr SIMD differential
+        run: go test -run='^$' -fuzz='^FuzzXcorrKernel$' -fuzztime=15s ./internal/celt
