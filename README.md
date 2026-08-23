@@ -4,6 +4,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/tphakala/go-opus.svg)](https://pkg.go.dev/github.com/tphakala/go-opus)
 [![codecov](https://codecov.io/gh/tphakala/go-opus/branch/main/graph/badge.svg)](https://codecov.io/gh/tphakala/go-opus)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/tphakala/go-opus)](go.mod)
+[![Latest tag](https://img.shields.io/github/v/tag/tphakala/go-opus?sort=semver&label=release)](https://github.com/tphakala/go-opus/tags)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/tphakala/go-opus/badge)](https://scorecard.dev/viewer/?uri=github.com/tphakala/go-opus)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 [![Sponsor](https://img.shields.io/github/sponsors/tphakala?logo=githubsponsors&color=ea4aaa&label=Sponsor)](https://github.com/sponsors/tphakala)
@@ -11,6 +12,19 @@
 A native Go implementation of the [Opus](https://opus-codec.org/) audio codec
 (RFC 6716), built as a pure-Go port of [libopus](https://gitlab.xiph.org/xiph/opus).
 No cgo. The one direct runtime dependency is github.com/tphakala/simd (pure Go plus its own assembly, also cgo-free), which backs the hot pitch and FFT kernels; it pulls golang.org/x/sys (indirect, also cgo-free) for CPU-feature detection.
+
+It is the Opus member of a family of pure-Go audio libraries that also covers
+[WAV](https://github.com/tphakala/go-wav),
+[FLAC](https://github.com/tphakala/go-flac),
+[AAC](https://github.com/tphakala/go-aac) and
+[M4A](https://github.com/tphakala/go-m4a), and it presents the same API shape as
+its siblings, so a program that already speaks one of them speaks this one too.
+
+## Install
+
+```
+go get github.com/tphakala/go-opus
+```
 
 ## Status
 
@@ -230,6 +244,14 @@ input, prints both caveats, and skips any comparator that is not installed.
 
 The public API follows the conventions of its sibling project
 [go-flac](https://github.com/tphakala/go-flac).
+
+## Sponsor
+
+go-opus is maintained in my own time. If it is useful to you or your project,
+you can support continued maintenance through GitHub Sponsors; sponsorship is
+entirely optional and never gates any feature.
+
+[![Sponsor on GitHub](https://img.shields.io/github/sponsors/tphakala?logo=githubsponsors&color=ea4aaa&label=Sponsor%20%40tphakala)](https://github.com/sponsors/tphakala)
 
 ## License
 
