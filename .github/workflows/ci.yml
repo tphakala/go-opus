@@ -59,7 +59,7 @@ jobs:
       SHORT_FLAG: ${{ github.event_name == 'pull_request' && '-short' || '' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           # No job here pushes, so the GITHUB_TOKEN has no business sitting in
@@ -67,7 +67,7 @@ jobs:
           # https remote and needs no credential.
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       # The RFC 6716 / RFC 8251 conformance vectors are ~75 MB and are never
@@ -79,7 +79,7 @@ jobs:
       # the cache by construction. fetch-vectors.sh sha256-verifies before extracting
       # and refuses to extract a mismatching archive.
       - name: Cache conformance vectors
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: testdata/vectors/opus_testvectors-rfc8251.tar.gz
           key: opus-vectors-rfc8251-${{ hashFiles('testdata/vectors.sha256') }}
@@ -123,11 +123,11 @@ jobs:
       GOOPUS_ASSERT_SIMD_DISABLED: '1'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Download dependencies
@@ -152,7 +152,7 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           # No job here pushes, so the GITHUB_TOKEN has no business sitting in
@@ -160,7 +160,7 @@ jobs:
           # https remote and needs no credential.
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       # Persist the cgo-compiled libopus objects across runs. setup-go's built-in
@@ -185,7 +185,7 @@ jobs:
             echo "gocache=$(go env GOCACHE)"
           } >> "$GITHUB_OUTPUT"
       - name: Cache libopus cgo build objects
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.cachekey.outputs.gocache }}
           key: reftest-cgo-${{ runner.os }}-${{ runner.arch }}-go${{ env.GO_VERSION }}-cc${{ steps.cachekey.outputs.cc }}-libopus${{ steps.cachekey.outputs.libopus }}-${{ hashFiles('internal/reftest/oracle/*.c', 'internal/reftest/oracle/*.h', 'internal/reftest/oracle/oracle_cgo.go') }}
@@ -197,7 +197,7 @@ jobs:
       # corpus. Both t.Skip cleanly without them, which is precisely the failure mode
       # this step removes: a gate that quietly grades itself on synthetic signal only.
       - name: Cache conformance vectors
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: testdata/vectors/opus_testvectors-rfc8251.tar.gz
           key: opus-vectors-rfc8251-${{ hashFiles('testdata/vectors.sha256') }}
@@ -220,7 +220,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           # No job here pushes, so the GITHUB_TOKEN has no business sitting in
@@ -228,11 +228,11 @@ jobs:
           # https remote and needs no credential.
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Cache conformance vectors
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: testdata/vectors/opus_testvectors-rfc8251.tar.gz
           key: opus-vectors-rfc8251-${{ hashFiles('testdata/vectors.sha256') }}
@@ -251,7 +251,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           # No job here pushes, so the GITHUB_TOKEN has no business sitting in
@@ -259,7 +259,7 @@ jobs:
           # https remote and needs no credential.
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Run golangci-lint
@@ -276,7 +276,7 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           # No job here pushes, so the GITHUB_TOKEN has no business sitting in
@@ -284,7 +284,7 @@ jobs:
           # https remote and needs no credential.
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Run go vet
@@ -301,7 +301,7 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           # No job here pushes, so the GITHUB_TOKEN has no business sitting in
@@ -309,7 +309,7 @@ jobs:
           # https remote and needs no credential.
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Build
@@ -323,11 +323,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       # A short bounded run of each decode-path fuzz target on every build. The
