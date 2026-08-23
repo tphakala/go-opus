@@ -54,33 +54,60 @@ type Decoder struct {
 // returns a Decoder positioned at the first audio packet. Header parsing is
 // real; the PCM output path is stubbed at the codec seam.
 func NewDecoder(r io.Reader) (*Decoder, error) {
+	d := &Decoder{}
+	if err := d.init(r); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// Reset rebinds the Decoder to a new source r, re-parsing its OpusHead and
+// OpusTags headers, so one Decoder can decode many independent streams without
+// re-allocating. It mirrors Encoder.Reset and the sibling pcm.Decoder.Reset in
+// go-wav, go-flac, and go-aac: the pooling path for a "many short clips" workload.
+//
+// The codec and container reader are cleared first, so a Reset that fails partway
+// (a nil source, or headers that will not parse) leaves a Decoder that reports its
+// uninitialized error on the next Read rather than one still bound to the previous
+// stream. The decoded-PCM scratch buffer keeps its capacity for reuse.
+func (d *Decoder) Reset(r io.Reader) error {
+	d.cr = nil
+	d.dec = nil
+	d.pcm = d.pcm[:0]
+	return d.init(r)
+}
+
+// init parses and validates the container headers from r and populates the
+// decoder's per-stream state. It backs both NewDecoder and Reset, so the two agree
+// on header handling and on rejecting a nil source before any read. It does not
+// touch d.pcm, so Reset can retain that buffer's capacity across streams.
+func (d *Decoder) init(r io.Reader) error {
 	// Reject a nil source up front; otherwise the first container read dereferences
 	// a nil io.Reader and panics.
 	if r == nil {
-		return nil, errNilReader
+		return errNilReader
 	}
 	cr, err := newContainerReader(r)
 	if err != nil {
-		return nil, err
-	}
-	d := &Decoder{
-		cr:          cr,
-		limit:       -1,
-		preSkipLeft: int(cr.head.preSkip),
-		info: Info{
-			Channels:         int(cr.head.channels),
-			InputSampleRate:  cr.head.inputSampleRate,
-			OutputSampleRate: OutputSampleRate,
-			PreSkip:          int(cr.head.preSkip),
-			OutputGain:       cr.head.outputGain,
-		},
+		return err
 	}
 	dec, err := newFrameDecoder(cr.head)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	d.cr = cr
 	d.dec = dec
-	return d, nil
+	d.preSkipLeft = int(cr.head.preSkip)
+	d.delivered = 0
+	d.limit = -1
+	d.info = Info{
+		Channels:         int(cr.head.channels),
+		InputSampleRate:  cr.head.inputSampleRate,
+		OutputSampleRate: OutputSampleRate,
+		PreSkip:          int(cr.head.preSkip),
+		OutputGain:       cr.head.outputGain,
+	}
+	return nil
 }
 
 // Info returns the stream parameters parsed from OpusHead.
