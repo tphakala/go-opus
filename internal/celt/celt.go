@@ -131,30 +131,9 @@ func sat16(x int32) int16 {
 	return int16(x)
 }
 
-// combFilterConst is comb_filter_const_c (celt.c:166), the constant-filter
-// portion of the post-filter. y[yb..] and x[xb..] may alias the same slice with
-// the same base (the decoder always applies the filter in place); negative
-// x indices reach back into the decode-memory history. FIXED_POINT bias of -1
-// and SIG_SAT saturation match the C exactly.
-func combFilterConst(y []int32, yb int, x []int32, xb int, T, N int, g10, g11, g12 int16) {
-	x4 := x[xb-T-2]
-	x3 := x[xb-T-1]
-	x2 := x[xb-T]
-	x1 := x[xb-T+1]
-	for i := 0; i < N; i++ {
-		x0 := x[xb+i-T+2]
-		v := x[xb+i] +
-			fixedmath.MULT16_32_Q15(g10, x2) +
-			fixedmath.MULT16_32_Q15(g11, x1+x3) +
-			fixedmath.MULT16_32_Q15(g12, x0+x4)
-		v-- // FIXED_POINT bias (celt.c:184)
-		y[yb+i] = fixedmath.SATURATE(v, sigSat)
-		x4 = x3
-		x3 = x2
-		x2 = x1
-		x1 = x0
-	}
-}
+// combFilterConst (comb_filter_const_c, celt.c:166) lives in comb_simd.go as a
+// SIMD-dispatched kernel; its frozen scalar oracle is combFilterConstGeneric in
+// comb_ref.go. combFilter below calls it unchanged.
 
 // combFilter is comb_filter (celt.c:238) for the non-QEXT (overlap!=240) path.
 // It cross-fades between the old (T0,g0,tapset0) and new (T1,g1,tapset1)
