@@ -351,3 +351,5 @@ jobs:
         run: go test -run='^$' -fuzz='^FuzzContainerReader$' -fuzztime=15s ./oggopus
       - name: Fuzz xcorr SIMD differential
         run: go test -run='^$' -fuzz='^FuzzXcorrKernel$' -fuzztime=15s ./internal/celt
+      - name: Fuzz comb filter SIMD differential
+        run: go test -run='^$' -fuzz='^FuzzCombFilterConst$' -fuzztime=15s ./internal/celt

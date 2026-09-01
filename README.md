@@ -177,8 +177,10 @@ a process-global map; the spreading-decision histogram has a hand-written NEON
 and SSE2 kernel; `haar1` runs through the `simd` `i32` kernels (an in-place Q31
 scale plus a wide-stride butterfly); and the band-gain requant on both paths
 (`normaliseBands` and `denormaliseBands`) goes through the `i32` `GainQ31`
-kernel. So the ones still on the list are the PVQ search, `exp_rotation`, and
-the comb filter.
+kernel; and the post-filter comb (`combFilterConst`) runs as one symmetric Q15
+FIR pass through the `i32` `FIRSymValidQ15` kernel, which folds each mirror tap
+pair before its single truncation exactly as the C does. So the ones still on
+the list are the PVQ search and `exp_rotation`.
 
 Reproduce with:
 
