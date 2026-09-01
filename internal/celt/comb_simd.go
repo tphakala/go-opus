@@ -1,8 +1,9 @@
 package celt
 
 import (
-	"github.com/tphakala/go-opus/internal/fixedmath"
 	"github.com/tphakala/simd/i32"
+
+	"github.com/tphakala/go-opus/internal/fixedmath"
 )
 
 // minCombBlock gates the SIMD comb-filter path. A call is routed to the vector

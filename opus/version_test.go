@@ -9,7 +9,7 @@ import (
 // semverCore is the shape Version must have: MAJOR.MINOR.PATCH with an optional
 // pre-release suffix and no leading "v" (the tag adds that). Build metadata
 // ("+...") is excluded because Go module tags cannot carry it.
-var semverCore = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$`)
+var semverCore = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
 
 // TestVersionIsSemver pins the constant's shape so a "-dev" placeholder, a
 // stray "v", or an empty string cannot ship as the codec version.
