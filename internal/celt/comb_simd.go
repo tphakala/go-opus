@@ -10,14 +10,23 @@ import (
 // output length N reach it; below that the per-block kernel entry cannot beat
 // the register-carrying scalar loop. T is clamped to [combfilterMinperiod,
 // combfilterMaxperiod-2] = [15, 1022] by the callers, so T-2 is in [13, 1020].
-// Tuned by benchstat on amd64 (AVX2) and arm64 (Cortex-A76 NEON); see
-// BenchmarkCombFilterConst in comb_simd_test.go.
+//
+// Tuned by benchstat (BenchmarkCombFilterConst, count 6-8) on amd64 (i7-1260P,
+// AVX2, pinned) and arm64 (Raspberry Pi 5 Cortex-A76, NEON). Below the
+// threshold the two paths are indistinguishable on both; at T=48 (block width
+// 46) the kernel wins 26% on AVX2 and 5% on NEON, and from T=64 up it wins
+// 33-44% on AVX2 and 2-6% on NEON, flattening to break-even on NEON at the
+// widest periods (T>=512). NEON gains are small because its 4-lane 64-bit
+// product kernel is only ~2.4x its own Go fallback, and the scalar tail is a
+// fixed cost per output; AVX2 is 8 lanes wide. The tail's bounds-check-free
+// reslicing is load-bearing for the NEON result: with checked indexing the same
+// rows were 10-20% slower than scalar.
 const minCombBlock = 32
 
-// combTile caps the per-block scratch so acc stays on the stack (2 KB) and
+// combTile caps the per-block scratch so acc stays on the stack (1 KB) and
 // L1-resident. Capping the block below T-2 is always bit-exact: a narrower block
 // only reads further-back, already-finalized history, never a pending sample.
-const combTile = 512
+const combTile = 256
 
 // combPairs is the K=2 mirror-pair layout FIRSymValidQ15 expects: pairs[0] is
 // the +-1 tap (g11), pairs[1] the +-2 tap (g12).
@@ -80,9 +89,15 @@ func combFilterConst(y []int32, yb int, x []int32, xb int, T, N int, g10, g11, g
 		// emits min(len(acc), len(win)-4) = W outputs, one per block sample.
 		win := x[s-T-2 : s-T+2+w : s-T+2+w]
 		i32.FIRSymValidQ15(acc, win, g10, pairs[:])
-		for j := range w {
-			v := acc[j] + x[s+j] - 1
-			y[yb+base+j] = fixedmath.SATURATE(v, sigSat)
+		// Reslice the tail's three views to exactly w so the loop carries no
+		// bounds checks; xs is read before ys is written at the same index,
+		// which keeps the in-place (y aliases x) case exact.
+		ys := y[yb+base : yb+base+w : yb+base+w]
+		xs := x[s : s+w : s+w][:len(ys)]
+		acc = acc[:len(ys)]
+		for j := range ys {
+			v := acc[j] + xs[j] - 1
+			ys[j] = fixedmath.SATURATE(v, sigSat)
 		}
 		base += w
 	}
