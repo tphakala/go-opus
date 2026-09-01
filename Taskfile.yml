@@ -74,3 +74,8 @@ tasks:
       - task: vet
       - task: lint
       - task: test:race
+
+  release:
+    desc: "Cut a release: bump opus.Version, run the release-tag guard, commit and tag (usage: task release VERSION=1.2.0, then git push origin main vX.Y.Z)"
+    cmds:
+      - scripts/release.sh {{.VERSION}}
