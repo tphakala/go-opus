@@ -13,7 +13,8 @@ import (
 // in exact agreement, case for case, with the bash ERE in scripts/release.sh
 // (each written in its own dialect, kept in sync by hand); TestSemverCore exercises
 // this RE2 pattern.
-var semverCore = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$`)
+var semverCore = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)` +
+	`(-(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$`)
 
 // TestSemverCore exercises the shape regexp directly, since in normal use it only
 // ever sees the one correct Version constant. The reject cases pin the rules the
@@ -22,8 +23,24 @@ var semverCore = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-
 // bash ERE in scripts/release.sh must agree case for case; that agreement is kept by
 // hand and is not asserted by any automated test today.
 func TestSemverCore(t *testing.T) {
-	accept := []string{"1.1.0", "1.1.0-rc.1", "10.20.30"}
-	reject := []string{"v1.1.0", "1.1", "", "1.1.0+meta", "01.2.3", "1.1.0-", "1.1.0.0", "1.1.0 "}
+	accept := []string{
+		"1.1.0", "0.0.0", "10.20.30",
+		// A pre-release is a dot-separated list of identifiers, each either a
+		// numeric identifier with no leading zero or one carrying a letter or
+		// hyphen (semver 2.0.0 rule 9).
+		"1.1.0-rc.1", "1.1.0-0", "1.1.0-0a", "1.1.0-alpha-1", "1.1.0-x.7.z.92",
+	}
+	reject := []string{
+		"v1.1.0", "1.1", "", "1.1.0+meta", "1.1.0.0", "1.1.0 ",
+		// Leading zeros in a numeric identifier, in each of the four positions
+		// the pattern repeats the rule, so a copy-paste slip in any one of them
+		// is detectable rather than only the MAJOR position.
+		"01.2.3", "1.02.3", "1.2.03", "1.1.0-01",
+		// Empty pre-release identifiers: trailing, doubled separator, and a lone
+		// dot. Go rejects all three as module versions, and `task release` would
+		// otherwise bump the constant and cut a tag for them.
+		"1.1.0-", "1.1.0-rc..1", "1.1.0-.", "1.1.0-rc.",
+	}
 	for _, s := range accept {
 		if !semverCore.MatchString(s) {
 			t.Errorf("semverCore rejected %q, want accept", s)

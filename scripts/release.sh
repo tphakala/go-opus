@@ -13,10 +13,15 @@ if [[ -z "$version" ]]; then
   exit 2
 fi
 # MAJOR.MINOR.PATCH, each a numeric identifier with no leading zero, plus an
-# optional pre-release suffix and no leading "v". This bash ERE must stay in exact
-# agreement, case for case, with the RE2 semverCore in opus/version_test.go (each
-# in its own dialect); TestSemverCore covers the same table.
-if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+# optional pre-release: a dot-separated list of identifiers, each either numeric
+# with no leading zero or carrying a letter or hyphen (semver 2.0.0 rule 9), and
+# no leading "v". Without the identifier rule this accepted 1.1.0-rc..1, 1.1.0-.
+# and 1.1.0-01, which Go rejects as module versions but which would still have
+# bumped the constant and cut a tag. This bash ERE must stay in exact agreement,
+# case for case, with the RE2 semverCore in opus/version_test.go (each in its own
+# dialect); TestSemverCore exercises the RE2 side of that table, and nothing runs
+# this ERE, so the agreement is kept by hand.
+if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$ ]]; then
   echo "error: '$version' is not MAJOR.MINOR.PATCH[-prerelease] (no leading v, no leading zeros)" >&2
   exit 2
 fi
@@ -61,12 +66,14 @@ log="$(mktemp)"
 # bump is staged, restores opus.go to HEAD on every exit path: a nonzero command, an
 # explicit `exit`, or a signal such as SIGINT (an ERR trap fires only for the first,
 # which is why round 1 left the tree dirty on the gofmt exit and on an interrupt).
-# `committed` flips to 1 right after `git add`; from that point the index holds the
-# bump, so a checkout would reinstate it rather than undo it and the restore stops.
+# `committed` flips to 1 only once the bump is committed (or found already present),
+# so a failing `git commit` still restores. The restore resets the index first,
+# because `git checkout -- <file>` restores from the index, not from HEAD, and would
+# otherwise reinstate a staged bump instead of undoing it.
 # The clean-tree guard above ran first, so HEAD is the exact pre-bump state and the
 # restore can never discard user work.
 committed=0
-trap 'rm -f "$tmp" "$log"; [[ $committed == 1 ]] || git checkout -q -- "$file"' EXIT
+trap 'rm -f "$tmp" "$log"; [[ $committed == 1 ]] || { git reset -q -- "$file"; git checkout -q -- "$file"; }' EXIT
 sed "s/^const Version = \".*\"\$/const Version = \"$version\"/" "$file" > "$tmp"
 # cat, not mv: mktemp creates the temp at 0600, and mv would carry that mode onto
 # opus.go (observed 664 -> 600). Writing through cat keeps $file's existing mode.
@@ -88,7 +95,6 @@ GOOPUS_RELEASE_TAG="$tag" go test -count=1 -v \
 grep -qF -- '--- PASS: TestVersionMatchesReleaseTag (' "$log"
 
 git add "$file"
-committed=1
 if git diff --cached --quiet; then
   # The constant already read $version, so there is nothing to commit. The point
   # of this run is the tag, so tag HEAD anyway instead of dying on git commit's
@@ -97,6 +103,12 @@ if git diff --cached --quiet; then
 else
   git commit --quiet -m "chore: bump version to $version"
 fi
+# Only now is the bump safe from the cleanup trap. Setting this before the commit
+# would disarm the restore while the change was merely STAGED, so a failing commit
+# (a rejecting hook, a full disk) would leave the bump staged with nothing to undo
+# it. A failing git tag below keeps committed=1 deliberately: the commit is real by
+# then, and restoring the file would not unmake it.
+committed=1
 git tag -a "$tag" -m "$tag"
 # --atomic so a rejected main (someone pushed first) also rejects the tag, instead
 # of leaving a published tag whose commit never reached origin/main.
