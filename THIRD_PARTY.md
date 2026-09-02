@@ -39,8 +39,8 @@ is licensed under the same 3-clause BSD license (see LICENSE).
   internal/celt/bandgain_ref.go for the i32 kernels, internal/celt/comb_ref.go
   for the comb filter, the frozen *Scalar butterflies for the FFT) that the
   library results are asserted bit-exact against (internal/celt/pitch_simd_test.go,
-  internal/celt/haar1_simd_test.go, internal/celt/comb_simd_test.go,
-  internal/celt/fft_cint_oracle_test.go).
+  internal/celt/haar1_simd_test.go, internal/celt/bandgain_simd_test.go,
+  internal/celt/comb_simd_test.go, internal/celt/fft_cint_oracle_test.go).
 
 ## Test corpus and conformance vectors
 

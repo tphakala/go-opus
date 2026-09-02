@@ -10,11 +10,14 @@ import (
 
 // combGainTriples covers the (g10, g11, g12) shapes the codec actually produces
 // plus the wrapping edges. The production gains are MULT16_16_P15(g1, combGains
-// row) with g1 the Q15 postfilter gain in [0, 0.75], so all three are positive
-// int16 with a dominant center tap; tapsets 1 and 2 have g12 == 0 (and tapset 2
-// a small g11). The edge triples (Max/MinInt16, single-nonzero, mixed sign)
-// exercise the per-product Q15 truncation and the wrapping pair-adds across the
-// whole int16 gain range, which the production values alone do not reach.
+// row) with g1 the Q15 postfilter gain in [-0.75, 0.75]: the decoder post-filter
+// passes it positive (the positive triples below), while the encoder prefilter
+// (celt_encoder.go) and the decoder PLC fold (celt_decoder.go) negate it. combGains
+// rows are non-negative, so all three gains share g1's sign with a dominant center
+// tap; tapsets 1 and 2 have g12 == 0 (and tapset 2 a small g11). The edge triples
+// (Max/MinInt16, single-nonzero, mixed sign) exercise the per-product Q15
+// truncation, the negative-gain paths, and the wrapping pair-adds across the whole
+// int16 gain range, which the production values alone do not reach.
 var combGainTriples = [][3]int16{
 	{10048, 7112, 4248}, // tapset 0, full gain
 	{15200, 8784, 0},    // tapset 1, full gain
@@ -40,11 +43,16 @@ func combValues(seed uint32) func(i int) int32 {
 	}
 }
 
-// combValuesInBand squeezes combValues into the codec's real dynamic range so
-// v = acc + x - 1 never reaches SATURATE. At full range 65 to 88 percent of
-// outputs clamp, which collapses a genuine per-sample divergence onto an equal
-// clamp value: a one-sample block-width error is invisible at (T=135, N=240)
-// full range and visible in band.
+// combValuesInBand squeezes combValues into the codec's real dynamic range. On the
+// separate-buffer path this provably never reaches SATURATE: >> 6 bounds |x| <=
+// 2^25, so the three MULT16_32_Q15 terms bound |v| = |acc + x - 1| <= 2^25 + 2^25 +
+// 2^26 + 2^26 = 201326592, well under sigSat = 536870911 (adversarial worst measured
+// 201321473). The in-place path re-amplifies through the recurrence, so it does
+// clamp: about 11 percent of in-band outputs against about 75 percent at full range.
+// Clamping collapses a genuine per-sample divergence onto an equal value, so the
+// in-band pass is strictly more sensitive: over the 768 vector cells a one-sample
+// block-width error is caught in 140 cells in band against 108 at full range, and
+// the in-band set is a strict superset.
 func combValuesInBand(seed uint32) func(i int) int32 {
 	base := combValues(seed)
 	return func(i int) int32 { return base(i) >> 6 }
@@ -124,18 +132,22 @@ var combTestPeriods = []int{15, 16, 17, 31, 32, 33, 34, 63, 120, 255, 258, 259, 
 // exercised), and full frame sizes that cross several blocks.
 var combTestLengths = []int{0, 1, 2, 3, 7, 8, 9, 13, 15, 16, 17, 31, 32, 33, 63, 120, 122, 240, 480, 960}
 
-// assertStraddlesCombGate fails unless the periods x lengths matrix sits on both
-// sides of the SIMD dispatch gate and at least one cell reaches the vector path.
-// combFilterConst routes to combFilterConstGeneric (the very code that is the
-// differential oracle) unless both the block width T-2 and the output length N
-// reach minCombBlock, so a matrix with no cell above the gate makes the
-// differential compare the oracle with itself and stay green. Raising minCombBlock
-// to 100000 makes the vector call dead code and leaves this whole file passing;
-// this guard reads the same minCombBlock the dispatcher reads, so it is what turns
-// that red. Modelled on the straddle check in haar1_simd_test.go.
+// assertStraddlesCombGate fails unless the periods x lengths matrix straddles the
+// SIMD dispatch gate: at least one period and one length below it, and at least one
+// of each at or above it. combFilterConst routes to combFilterConstGeneric (the very
+// code that is the differential oracle) unless both the block width T-2 and the
+// output length N reach minCombBlock, so a grid entirely below the gate would make
+// the differential compare the oracle with itself and stay green. This guard reads
+// the same minCombBlock the dispatcher reads, so a retune that raised it (to 100000,
+// say) and demoted every cell into the scalar fallback turns this red. It does not
+// observe an actual kernel call: it only pins that the grid still straddles the gate,
+// not that the vector path ran. One period and one length at or above the gate
+// already imply a cell with T-2 >= minCombBlock and N >= minCombBlock, so the two
+// straddle checks are sufficient and a separate reaches-the-vector check is redundant.
+// Modelled on the straddle check in haar1_simd_test.go.
 func assertStraddlesCombGate(t *testing.T, periods, lengths []int) {
 	t.Helper()
-	var periodBelow, periodAtOrAbove, lengthBelow, lengthAtOrAbove, reachesVector bool
+	var periodBelow, periodAtOrAbove, lengthBelow, lengthAtOrAbove bool
 	for _, T := range periods {
 		if T-2 < minCombBlock {
 			periodBelow = true
@@ -150,24 +162,13 @@ func assertStraddlesCombGate(t *testing.T, periods, lengths []int) {
 			lengthAtOrAbove = true
 		}
 	}
-	for _, T := range periods {
-		for _, N := range lengths {
-			if T-2 >= minCombBlock && N >= minCombBlock {
-				reachesVector = true
-			}
-		}
-	}
 	if !periodBelow || !periodAtOrAbove {
-		t.Fatalf("period matrix must straddle the gate (block width T-2 == minCombBlock = %d): below=%v atOrAbove=%v",
+		t.Fatalf("period matrix must straddle the gate (block width T-2 == minCombBlock = %d): below=%v atOrAbove=%v; if minCombBlock moved, add a grid row on the missing side rather than reverting the constant",
 			minCombBlock, periodBelow, periodAtOrAbove)
 	}
 	if !lengthBelow || !lengthAtOrAbove {
-		t.Fatalf("length matrix must straddle the gate (N == minCombBlock = %d): below=%v atOrAbove=%v",
+		t.Fatalf("length matrix must straddle the gate (N == minCombBlock = %d): below=%v atOrAbove=%v; if minCombBlock moved, add a grid row on the missing side rather than reverting the constant",
 			minCombBlock, lengthBelow, lengthAtOrAbove)
-	}
-	if !reachesVector {
-		t.Fatalf("no (T,N) cell reaches the vector path (T-2 >= %d and N >= %d): the differential would compare the oracle with itself",
-			minCombBlock, minCombBlock)
 	}
 }
 
@@ -228,9 +229,12 @@ func TestCombFilterConstExtremes(t *testing.T) {
 // must change the buffer, and the in-place recurrence must produce a result
 // distinct from the separate-buffer (non-recursive) evaluation, so a SIMD path
 // that ignored the recurrence (or the aliasing) would be caught rather than pass.
-// (T=120, N=480) routes to the vector kernel and spans several blocks, so this
-// controls the SIMD path itself, not the scalar fallback; the opening assertion
-// pins that routing so a future minCombBlock change cannot silently demote it.
+// (T=120, N=480) sits above the dispatch gate and spans several blocks, so on the
+// current threshold it exercises the vector kernel rather than the scalar fallback.
+// The opening assertion pins that (T,N) stays above the gate so a future
+// minCombBlock change cannot silently demote it. This pins the routing, not an
+// actual kernel call: it reads the same minCombBlock the dispatcher reads and does
+// not observe that the vector path ran.
 func TestCombFilterConstNotVacuous(t *testing.T) {
 	const T, N = 120, 480
 	if T-2 < minCombBlock || N < minCombBlock {
@@ -308,9 +312,10 @@ func BenchmarkCombFilterConst(b *testing.B) {
 	// (T, N) grid over the real decode/prefilter shapes. combFilterConst gets
 	// N = frame - shortMdctSize with overlap == 0: N=120 (5 ms), 360 (10 ms) and
 	// 840 (20 ms), at pitch period T (commonly 60-512, up to the clamped max
-	// combMaxT=1022). The decoder makes two calls per channel per frame, one at
-	// N=120 (steady state, postfilter unchanged) and one at N=840, so both N are
-	// measured on the vector path, not only the long one.
+	// combMaxT=1022). The decoder makes two calls per channel per frame at 5 ms and
+	// longer, one at N=120 (steady state, postfilter unchanged) and one at N=840,
+	// with the second gated on LM != 0, so a 2.5 ms frame (LM == 0) makes only the
+	// first; both N are measured on the vector path, not only the long one.
 	//
 	// Both arches must be measured: a NEON win can be an AVX2 regression. A cfg
 	// below the gate (block width T-2 < minCombBlock, or N < minCombBlock) takes
@@ -322,8 +327,9 @@ func BenchmarkCombFilterConst(b *testing.B) {
 		{64, 360}, {120, 360},
 		{64, 840}, {120, 840}, {256, 840}, {512, 840}, {1022, 840},
 		// The band [34, 47] that minCombBlock=32 opens but the rows above skip.
-		// T=40 is the worst shape in it: a block width of 38 leaves 6 outputs on
-		// the kernel's own scalar tail on AVX2.
+		// T=40 is a representative mid-band shape: block width 38 leaves 6 outputs
+		// on the kernel's own scalar tail on AVX2. It is not the worst in the band
+		// (T=41, block width 39, leaves 7), just a mid-band point above the gate.
 		{34, 840}, {40, 840},
 		// The shorter of the two real decoder shapes on the vector path.
 		{64, 120}, {120, 120},

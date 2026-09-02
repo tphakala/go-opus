@@ -138,7 +138,8 @@ func sat16(x int32) int16 {
 // combFilter is comb_filter (celt.c:238) for the non-QEXT (overlap!=240) path.
 // It cross-fades between the old (T0,g0,tapset0) and new (T1,g1,tapset1)
 // post-filters over the first `overlap` samples, then runs the constant filter.
-// y[yb..] and x[xb..] alias in the decoder; window is celt_coef (int16).
+// y[yb..] and x[xb..] alias in the decoder post-filter and are separate buffers in
+// the encoder prefilter and the PLC fold; window is celt_coef (int16).
 func combFilter(y []int32, yb int, x []int32, xb int, T0, T1, N int, g0, g1 int16, tapset0, tapset1, overlap int, window []int16) {
 	if g0 == 0 && g1 == 0 {
 		// combFilter is called both in place (the decoder post-filter: y aliases x)

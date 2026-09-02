@@ -11,16 +11,16 @@ import (
 // optional pre-release suffix and no leading "v" (the tag adds that). Build
 // metadata ("+...") is excluded because Go module tags cannot carry it. Keep this
 // in exact agreement, case for case, with the bash ERE in scripts/release.sh
-// (each written in its own dialect); TestSemverCore and the release closure proof
-// check both.
+// (each written in its own dialect, kept in sync by hand); TestSemverCore exercises
+// this RE2 pattern.
 var semverCore = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$`)
 
 // TestSemverCore exercises the shape regexp directly, since in normal use it only
 // ever sees the one correct Version constant. The reject cases pin the rules the
 // pattern enforces: three dot-separated numeric identifiers, no leading zero, no
 // leading "v", no build metadata, and a nonempty pre-release after the hyphen. The
-// bash ERE in scripts/release.sh must agree case for case; the release closure
-// proof runs the same table through it.
+// bash ERE in scripts/release.sh must agree case for case; that agreement is kept by
+// hand and is not asserted by any automated test today.
 func TestSemverCore(t *testing.T) {
 	accept := []string{"1.1.0", "1.1.0-rc.1", "10.20.30"}
 	reject := []string{"v1.1.0", "1.1", "", "1.1.0+meta", "01.2.3", "1.1.0-", "1.1.0.0", "1.1.0 "}
