@@ -28,16 +28,18 @@ is licensed under the same 3-clause BSD license (see LICENSE).
   i16.DotProduct and i16.XCorr, the radix-3/radix-5 FFT butterflies
   (kiss_fft.go) through the cint fixed-point complex ops (cint.Mul / Add / Sub /
   MulByScalar), the haar1 transform through the i32 kernels (i32.ScaleQ31 for the
-  in-place Q31 scale, i32.Butterfly for the wide-stride butterfly), and the
+  in-place Q31 scale, i32.Butterfly for the wide-stride butterfly), the
   band-gain requant on both paths (normaliseBands / denormaliseBands) through
-  i32.GainQ31, mirroring the go-flac scalar-reference-plus-SIMD structure. The
+  i32.GainQ31, and the post-filter comb (combFilterConst) through
+  i32.FIRSymValidQ15, mirroring the go-flac scalar-reference-plus-SIMD structure. The
   library is pure Go plus its own per-arch assembly (SMLAL/SMLAL2 on arm64,
   PMADDWD/AVX2 on amd64) and has no cgo; it pulls golang.org/x/sys (indirect,
   also cgo-free) for CPU-feature detection. Each kernel keeps a scalar reference
   (internal/celt/pitch_ref.go for pitch, internal/celt/haar1_ref.go and
-  internal/celt/bandgain_ref.go for the i32 kernels, the frozen *Scalar
-  butterflies for the FFT) that the library results are asserted bit-exact
-  against (internal/celt/pitch_simd_test.go, internal/celt/haar1_simd_test.go,
+  internal/celt/bandgain_ref.go for the i32 kernels, internal/celt/comb_ref.go
+  for the comb filter, the frozen *Scalar butterflies for the FFT) that the
+  library results are asserted bit-exact against (internal/celt/pitch_simd_test.go,
+  internal/celt/haar1_simd_test.go, internal/celt/comb_simd_test.go,
   internal/celt/fft_cint_oracle_test.go).
 
 ## Test corpus and conformance vectors

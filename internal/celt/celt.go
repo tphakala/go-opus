@@ -26,7 +26,7 @@ const (
 	maxPeriodC       = 1024
 	decodeBufferSize = 2048
 	// celtLpcOrder is CELT_LPC_ORDER (celt_lpc.h): the LPC order of the
-	// pitch-based PLC synthesis filter. Only the PLC (stubbed) uses it, but the
+	// pitch-based PLC synthesis filter. Only the PLC uses it, but the
 	// trailing lpc[] buffer is sized by it to match the C allocation.
 	celtLpcOrder = 24
 
@@ -133,7 +133,7 @@ func sat16(x int32) int16 {
 
 // combFilterConst (comb_filter_const_c, celt.c:166) lives in comb_simd.go as a
 // SIMD-dispatched kernel; its frozen scalar oracle is combFilterConstGeneric in
-// comb_ref.go. combFilter below calls it unchanged.
+// comb_ref.go.
 
 // combFilter is comb_filter (celt.c:238) for the non-QEXT (overlap!=240) path.
 // It cross-fades between the old (T0,g0,tapset0) and new (T1,g1,tapset1)
@@ -141,9 +141,10 @@ func sat16(x int32) int16 {
 // y[yb..] and x[xb..] alias in the decoder; window is celt_coef (int16).
 func combFilter(y []int32, yb int, x []int32, xb int, T0, T1, N int, g0, g1 int16, tapset0, tapset1, overlap int, window []int16) {
 	if g0 == 0 && g1 == 0 {
-		// The decoder always calls in place (y aliases x at the same base), so
-		// the OPUS_MOVE is a self-copy / no-op; copy keeps the general case
-		// correct without a x!=y test.
+		// combFilter is called both in place (the decoder post-filter: y aliases x)
+		// and with separate buffers (the encoder prefilter and the decoder PLC fold).
+		// This copy is load-bearing, not a self-copy no-op: for separate buffers it
+		// is an actual OPUS_MOVE of the input passthrough. Do not drop it.
 		copy(y[yb:yb+N], x[xb:xb+N])
 		return
 	}

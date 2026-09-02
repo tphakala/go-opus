@@ -10,7 +10,7 @@ import (
 
 // combGainTriples covers the (g10, g11, g12) shapes the codec actually produces
 // plus the wrapping edges. The production gains are MULT16_16_P15(g1, combGains
-// row) with g1 the Q15 postfilter gain in [0, ~0.9], so all three are positive
+// row) with g1 the Q15 postfilter gain in [0, 0.75], so all three are positive
 // int16 with a dominant center tap; tapsets 1 and 2 have g12 == 0 (and tapset 2
 // a small g11). The edge triples (Max/MinInt16, single-nonzero, mixed sign)
 // exercise the per-product Q15 truncation and the wrapping pair-adds across the

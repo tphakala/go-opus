@@ -32,7 +32,7 @@ const minCombBlock = 32
 // constant, not a test-guarded correctness one.
 const combTile = 256
 
-// combPairs is the K=2 mirror-pair layout FIRSymValidQ15 expects: pairs[0] is
+// combPairs is K=2, the number of mirror pairs FIRSymValidQ15 takes: pairs[0] is
 // the +-1 tap (g11), pairs[1] the +-2 tap (g12).
 const combPairs = 2
 
@@ -63,14 +63,15 @@ const combPairs = 2
 //
 // # Recurrence and blocking
 //
-// The decoder runs the filter in place (y and x are the same slice at the same
-// base), so y[i] overwrites x[i] and later outputs read earlier outputs: it is a
-// recursive comb. Processing output blocks of width W <= T-2 makes every tap read
-// within a block land at index <= blockStart-1 (the most-forward read is i-T+2 at
-// i = blockStart+W-1), so a block depends only on samples finalized before it
-// began, and running blocks in order reproduces C's recurrence exactly. For the
-// separate-buffer callers (encoder prefilter) x is never written, so any width is
-// trivially correct; blocking unconditionally means no aliasing test is needed.
+// The decoder post-filter runs the filter in place (y and x are the same slice
+// at the same base), so y[i] overwrites x[i] and later outputs read earlier
+// outputs: it is a recursive comb. Processing output blocks of width W <= T-2
+// makes every tap read within a block land at index <= blockStart-1 (the
+// most-forward read is i-T+2 at i = blockStart+W-1), so a block depends only on
+// samples finalized before it began, and running blocks in order reproduces C's
+// recurrence exactly. For the separate-buffer callers (the encoder prefilter and
+// the decoder's PLC fold) x is never written, so any width is trivially correct;
+// blocking unconditionally means no aliasing test is needed.
 //
 // Within a block the kernel reads the history window x[s-T-2, s-T+2+W) (W+4
 // samples, all below s) and writes the private stack scratch acc, which never

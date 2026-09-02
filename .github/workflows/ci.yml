@@ -101,8 +101,8 @@ jobs:
           files: coverage.out
           fail_ci_if_error: false
 
-  # Forced pure-Go SIMD fallback (#38). The pitch (i16), haar1/band-gain (i32),
-  # and FFT butterfly (cint) kernels are backed by tphakala/simd, which runs
+  # Forced pure-Go SIMD fallback (#38). The pitch (i16), haar1/band-gain/comb
+  # (i32), and FFT butterfly (cint) kernels are backed by tphakala/simd, which runs
   # hand-written NEON/SSE2/AVX2 on the arm64/amd64 CI hosts and a pure-Go
   # fallback on every other GOARCH (riscv64, ppc64le, s390x, loong64, wasm). The
   # `test` job therefore only ever exercises the assembly; the Go fallback's
@@ -110,7 +110,7 @@ jobs:
   # library's own suite, not go-opus's differential gate. SIMD_DISABLE=all makes
   # the simd cpu package clear every detected feature at init, so every dispatch
   # falls to the exact Go functions the exotic arches run, letting the existing
-  # differential suites (pitch/haar1/band-gain/FFT-cint) cover the fallback on a
+  # differential suites (pitch/haar1/band-gain/comb/FFT-cint) cover the fallback on a
   # native amd64 runner. -count=1 is mandatory: the outcome depends on an env var
   # the go test cache does not track, so a cached SIMD result would defeat the
   # leg. TestSIMDFallbackForced asserts the features really were cleared, so a
@@ -333,8 +333,8 @@ jobs:
       # A short bounded run of each decode-path fuzz target on every build. The
       # packet and Ogg readers parse untrusted bytes, so this guards against
       # panics and unbounded allocation on malformed input; a crash a run finds
-      # is committed under testdata/fuzz as a regression seed. The last target
-      # fuzzes a SIMD kernel against its scalar reference. Smoke runs, not a
+      # is committed under testdata/fuzz as a regression seed. The last two targets
+      # fuzz a SIMD kernel against its scalar reference. Smoke runs, not a
       # substitute for a long local fuzz session. The libopus submodule is not
       # needed: these targets are pure Go, the C reference is build-tagged out.
       - name: Fuzz Opus packet parser

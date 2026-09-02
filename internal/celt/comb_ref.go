@@ -7,11 +7,12 @@ import "github.com/tphakala/go-opus/internal/fixedmath"
 // prefilter (encode). It is the differential oracle that comb_simd_test.go pins
 // the SIMD dispatcher (combFilterConst, comb_simd.go) against on every build, and
 // it is also the small-block fallback the dispatcher calls directly. Do not
-// optimize this: its whole value is being a byte-identical, self-evidently
-// correct transliteration of the C.
+// optimize this: its whole value is being a self-evidently correct
+// transliteration of the C, bit-identical to it sample for sample.
 //
 // y[yb..] and x[xb..] may alias the same slice with the same base (the decoder
-// always applies the filter in place); negative x indices reach back into the
+// post-filter runs in place); the encoder prefilter and the decoder PLC fold
+// pass separate buffers. Negative x indices reach back into the
 // decode-memory history. FIXED_POINT bias of -1 and SIG_SAT saturation match the
 // C exactly. Each symmetric tap pair (x1+x3, x0+x4) is summed with wrapping
 // int32 ADD32 BEFORE its single MULT16_32_Q15 truncation, so the per-sample body

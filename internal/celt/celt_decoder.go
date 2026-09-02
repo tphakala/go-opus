@@ -409,9 +409,8 @@ func celtSynthesis(m *celtMode, X []int32, outSyn [][]int32, oldBandE []int32, s
 // foldPrefilter is prefilter_and_fold (celt_decoder.c:576): after a concealed
 // (PLC) frame, apply the pre-filter to the MDCT overlap and simulate TDAC so the
 // concealed signal blends into the next real frame. It is only reachable through
-// the PLC path (prefilter_and_fold is set by celtDecodeLost), which is stubbed
-// here, so this runs only if a future PLC port sets the flag. Ported for
-// completeness; it uses only comb_filter and the mode window.
+// the PLC path (prefilter_and_fold is set by celtDecodeLost), so it runs during
+// packet-loss concealment. It uses only comb_filter and the mode window.
 func (st *Decoder) foldPrefilter(decMem [][]int32, N int) {
 	m := st.mode
 	overlap := st.overlap
@@ -720,8 +719,9 @@ func (st *Decoder) Decode(data []byte, pcm []int16, frameSize int) (int, error) 
 // DecodeWithEC is celt_decode_with_ec (the celt_decode_with_ec_dred body with
 // all DRED/QEXT/DEEP_PLC/CUSTOM_MODES branches removed for the frozen config).
 // If dec is nil a range decoder is initialized over data; accum!=0 accumulates
-// into pcm (used by the hybrid Opus path). Only the NORMAL (data present) path
-// is implemented; a lost frame routes to the celtDecodeLost stub.
+// into pcm (used by the hybrid Opus path). A data-present packet takes the
+// NORMAL path; a lost frame routes to celtDecodeLost, which implements both
+// concealment regimes.
 //
 // Not safe for concurrent use: one Decoder per goroutine. The decoder state and
 // its pooled scratch (see scratch.go) are mutated without synchronization.

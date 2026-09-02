@@ -11,7 +11,7 @@
 
 A native Go implementation of the [Opus](https://opus-codec.org/) audio codec
 (RFC 6716), built as a pure-Go port of [libopus](https://gitlab.xiph.org/xiph/opus).
-No cgo. The one direct runtime dependency is github.com/tphakala/simd (pure Go plus its own assembly, also cgo-free), which backs the hot pitch and FFT kernels; it pulls golang.org/x/sys (indirect, also cgo-free) for CPU-feature detection.
+No cgo. The one direct runtime dependency is github.com/tphakala/simd (pure Go plus its own assembly, also cgo-free), which backs the hot pitch, FFT, haar1, band-gain and comb-filter kernels; it pulls golang.org/x/sys (indirect, also cgo-free) for CPU-feature detection.
 
 It is the Opus member of a family of pure-Go audio libraries that also covers
 [WAV](https://github.com/tphakala/go-wav),
@@ -84,11 +84,11 @@ pipelines need. Quality is that of the fixed-point reference (both libopus build
 are RFC-conformant and perceptually equivalent); go-opus reproduces it exactly.
 Fixed-point is also SIMD-friendly: the integer multiply-accumulate kernels map
 straight onto SSE and NEON, and because integer SIMD is exact, accelerated
-kernels stay bit-exact against the same test suites. The hot pitch, FFT, haar1
-and band-gain kernels are already backed by the cgo-free github.com/tphakala/simd
-library (assembly plus a pure-Go fallback), verified against the scalar reference
-on every build; further Opus-specific kernels are planned behind the same scalar
-function signatures.
+kernels stay bit-exact against the same test suites. The hot pitch, FFT, haar1,
+band-gain and comb-filter kernels are already backed by the cgo-free
+github.com/tphakala/simd library (assembly plus a pure-Go fallback), verified
+against the scalar reference on every build; further Opus-specific kernels are
+planned behind the same scalar function signatures.
 
 ## Performance
 
@@ -175,12 +175,13 @@ butterflies are vectorized (via the `tphakala/simd` `cint` kernels), and their
 strided twiddle gather is precomputed at plan time rather than looked up through
 a process-global map; the spreading-decision histogram has a hand-written NEON
 and SSE2 kernel; `haar1` runs through the `simd` `i32` kernels (an in-place Q31
-scale plus a wide-stride butterfly); and the band-gain requant on both paths
+scale plus a wide-stride butterfly); the band-gain requant on both paths
 (`normaliseBands` and `denormaliseBands`) goes through the `i32` `GainQ31`
-kernel; and the post-filter comb (`combFilterConst`) runs as one symmetric Q15
-FIR pass through the `i32` `FIRSymValidQ15` kernel, which folds each mirror tap
-pair before its single truncation exactly as the C does. So the ones still on
-the list are the PVQ search and `exp_rotation`.
+kernel; and the post-filter comb (`combFilterConst`) runs through the `i32`
+`FIRSymValidQ15` kernel above a tuned block-size threshold, with the scalar
+reference below it, folding each mirror tap pair before its single truncation
+exactly as the C does. So the ones still on the list are the PVQ search and
+`exp_rotation`.
 
 Reproduce with:
 

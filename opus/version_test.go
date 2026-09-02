@@ -11,8 +11,10 @@ import (
 // ("+...") is excluded because Go module tags cannot carry it.
 var semverCore = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
 
-// TestVersionIsSemver pins the constant's shape so a "-dev" placeholder, a
-// stray "v", or an empty string cannot ship as the codec version.
+// TestVersionIsSemver pins the constant's shape so a stray "v", build metadata
+// ("+..."), or an empty string cannot ship as the codec version. A pre-release
+// suffix like "-dev" or "-rc.1" is deliberately allowed: the release tooling cuts
+// pre-release tags, so semverCore accepts them.
 func TestVersionIsSemver(t *testing.T) {
 	if !semverCore.MatchString(Version) {
 		t.Fatalf("opus.Version = %q: want MAJOR.MINOR.PATCH (optional -prerelease), no leading v", Version)

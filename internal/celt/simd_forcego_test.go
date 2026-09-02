@@ -9,13 +9,13 @@ import (
 
 // Forced-fallback guard for the simd Go path (#38).
 //
-// The pitch (i16), haar1/band-gain (i32), and FFT butterfly (cint) kernels are
-// backed by github.com/tphakala/simd, which selects NEON/SSE2/AVX2 assembly at
+// The pitch (i16), haar1/band-gain/comb (i32), and FFT butterfly (cint) kernels
+// are backed by github.com/tphakala/simd, which selects NEON/SSE2/AVX2 assembly at
 // compile time on arm64/amd64 and a pure-Go fallback (dotGo/xcorrGo, scaleQ31Go,
 // mulGo, ...) on every other GOARCH. go-opus's own differential suites
 // (pitch_simd_test.go, haar1_simd_test.go, bandgain_simd_test.go,
-// fft_cint_oracle_test.go) run on the amd64/arm64 CI hosts, so they normally
-// exercise the assembly, never that Go fallback. On riscv64/ppc64le/s390x/
+// comb_simd_test.go, fft_cint_oracle_test.go) run on the amd64/arm64 CI hosts, so
+// they normally exercise the assembly, never that Go fallback. On riscv64/ppc64le/s390x/
 // loong64/wasm the fallback's bit-exactness would then rest only on the simd
 // library's own tests, not go-opus's gate.
 //
