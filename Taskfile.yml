@@ -74,3 +74,10 @@ tasks:
       - task: vet
       - task: lint
       - task: test:race
+
+  release:
+    desc: "Cut a release: bump opus.Version, run the release-tag guard, commit and tag (usage: task release VERSION=1.2.0, then git push --atomic origin main vX.Y.Z, matching what the script prints: --atomic so a rejected main also rejects the tag)"
+    requires:
+      vars: [VERSION]
+    cmds:
+      - scripts/release.sh "{{.VERSION}}"

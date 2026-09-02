@@ -1,0 +1,77 @@
+name: Release
+
+# Runs on every v* tag push. The verify job is the guard behind issue #68: the
+# v1.1.0 tag was cut while opus.Version still said "1.0.0", so every exported
+# clip carried a stale OpusTags vendor string and nothing noticed.
+# TestVersionMatchesReleaseTag fails unless "v"+opus.Version equals the tag, and
+# the release job depends on it, so a mismatched tag yields a red workflow and no
+# release instead of a wrong one. Recovery: delete the tag, cut it again with
+# `task release VERSION=x.y.z` (scripts/release.sh, which bumps and verifies),
+# and push.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify opus.Version matches the tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Check the version constant against the tag
+        env:
+          GOOPUS_RELEASE_TAG: ${{ github.ref_name }}
+        # Require the guard's PASS line, not just a green `go test`. GitHub Actions
+        # runs this with `bash -e` but no pipefail, so enable it; the test must fail
+        # the step, not tee. Renaming TestVersionMatchesReleaseTag (so '^TestVersion'
+        # no longer selects it) or dropping GOOPUS_RELEASE_TAG (so it SKIPs) would
+        # otherwise leave the step green without the guard ever running.
+        run: |
+          set -o pipefail
+          go test -count=1 -run '^TestVersion' -v ./opus/ | tee version-guard.log
+          grep -qF -- '--- PASS: TestVersionMatchesReleaseTag (' version-guard.log
+
+  release:
+    name: Create draft GitHub release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Draft so the notes can be edited before publishing. go-opus is a pure
+      # library with no binary artifacts, so there is nothing to attach. A
+      # release that already exists (created by hand before the workflow ran) is
+      # left alone rather than failing the job.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists, leaving it untouched"
+            exit 0
+          fi
+          # A hyphen marks a pre-release tag (semverCore and release.sh accept
+          # -rc.1 etc, and the v*.*.* filter matches them). Flag it as such so it
+          # is not published as the repo's "Latest release" and does not drive the
+          # README version badge.
+          args=(--draft --title "$TAG" --generate-notes)
+          case "$TAG" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh release create "$TAG" "${args[@]}"

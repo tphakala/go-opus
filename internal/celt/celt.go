@@ -26,7 +26,7 @@ const (
 	maxPeriodC       = 1024
 	decodeBufferSize = 2048
 	// celtLpcOrder is CELT_LPC_ORDER (celt_lpc.h): the LPC order of the
-	// pitch-based PLC synthesis filter. Only the PLC (stubbed) uses it, but the
+	// pitch-based PLC synthesis filter. Only the PLC uses it, but the
 	// trailing lpc[] buffer is sized by it to match the C allocation.
 	celtLpcOrder = 24
 
@@ -131,40 +131,21 @@ func sat16(x int32) int16 {
 	return int16(x)
 }
 
-// combFilterConst is comb_filter_const_c (celt.c:166), the constant-filter
-// portion of the post-filter. y[yb..] and x[xb..] may alias the same slice with
-// the same base (the decoder always applies the filter in place); negative
-// x indices reach back into the decode-memory history. FIXED_POINT bias of -1
-// and SIG_SAT saturation match the C exactly.
-func combFilterConst(y []int32, yb int, x []int32, xb int, T, N int, g10, g11, g12 int16) {
-	x4 := x[xb-T-2]
-	x3 := x[xb-T-1]
-	x2 := x[xb-T]
-	x1 := x[xb-T+1]
-	for i := 0; i < N; i++ {
-		x0 := x[xb+i-T+2]
-		v := x[xb+i] +
-			fixedmath.MULT16_32_Q15(g10, x2) +
-			fixedmath.MULT16_32_Q15(g11, x1+x3) +
-			fixedmath.MULT16_32_Q15(g12, x0+x4)
-		v-- // FIXED_POINT bias (celt.c:184)
-		y[yb+i] = fixedmath.SATURATE(v, sigSat)
-		x4 = x3
-		x3 = x2
-		x2 = x1
-		x1 = x0
-	}
-}
+// combFilterConst (comb_filter_const_c, celt.c:166) lives in comb_simd.go as a
+// SIMD-dispatched kernel; its frozen scalar oracle is combFilterConstGeneric in
+// comb_ref.go.
 
 // combFilter is comb_filter (celt.c:238) for the non-QEXT (overlap!=240) path.
 // It cross-fades between the old (T0,g0,tapset0) and new (T1,g1,tapset1)
 // post-filters over the first `overlap` samples, then runs the constant filter.
-// y[yb..] and x[xb..] alias in the decoder; window is celt_coef (int16).
+// y[yb..] and x[xb..] alias in the decoder post-filter and are separate buffers in
+// the encoder prefilter and the PLC fold; window is celt_coef (int16).
 func combFilter(y []int32, yb int, x []int32, xb int, T0, T1, N int, g0, g1 int16, tapset0, tapset1, overlap int, window []int16) {
 	if g0 == 0 && g1 == 0 {
-		// The decoder always calls in place (y aliases x at the same base), so
-		// the OPUS_MOVE is a self-copy / no-op; copy keeps the general case
-		// correct without a x!=y test.
+		// combFilter is called both in place (the decoder post-filter: y aliases x)
+		// and with separate buffers (the encoder prefilter and the decoder PLC fold).
+		// This copy is load-bearing, not a self-copy no-op: for separate buffers it
+		// is an actual OPUS_MOVE of the input passthrough. Do not drop it.
 		copy(y[yb:yb+N], x[xb:xb+N])
 		return
 	}

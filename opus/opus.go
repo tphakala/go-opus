@@ -6,8 +6,13 @@ import (
 	"github.com/tphakala/go-opus/internal/packet"
 )
 
-// Version is the go-opus release string, mirroring flac.Version in go-flac.
-const Version = "1.0.0"
+// Version is the go-opus release string, mirroring flac.Version in go-flac. It
+// MUST equal the release tag without the leading "v": the OpusTags vendor string
+// ("go-opus <Version>") is derived from it, so a stale value mislabels every
+// exported file. Bump it with `task release VERSION=x.y.z` (scripts/release.sh),
+// which also runs TestVersionMatchesReleaseTag; the Release workflow re-checks
+// it on every tag push and refuses to publish a release whose tag disagrees.
+const Version = "1.1.0"
 
 // Sentinel errors returned by the opus package, testable with errors.Is. They
 // map from the libopus OPUS_* error codes (see docs/api-design.md): OPUS_BAD_ARG
