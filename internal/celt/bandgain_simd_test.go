@@ -16,13 +16,8 @@ import (
 // stray write past n as well as any value mismatch.
 func runBandGainRequantPair(t *testing.T, src []int32, dstLen int, g int32, preShift, postShift int) {
 	t.Helper()
-	const sentinel = int32(0x0BADF00D)
-	a := make([]int32, dstLen)
-	b := make([]int32, dstLen)
-	for i := range a {
-		a[i] = sentinel
-		b[i] = sentinel
-	}
+	a := sentinelBuf(dstLen)
+	b := sentinelBuf(dstLen)
 	bandGainRequantGeneric(a, src, g, preShift, postShift)
 	bandGainRequant(b, src, g, preShift, postShift)
 	if !slices.Equal(a, b) {
@@ -115,19 +110,9 @@ func TestBandGainRequantExtremes(t *testing.T) {
 	lengths := []int{1, 2, 8, 16, 17}
 	for _, n := range lengths {
 		// Every-edge buffer.
-		allEdge := make([]int32, n)
-		for i := range allEdge {
-			allEdge[i] = edges[i%len(edges)]
-		}
+		allEdge := edgeFill(edges, n)
 		// Alternating min/max to stress the product and rounding wraps.
-		alt := make([]int32, n)
-		for i := range alt {
-			if i%2 == 0 {
-				alt[i] = math.MinInt32
-			} else {
-				alt[i] = math.MaxInt32
-			}
-		}
+		alt := altMinMax(n)
 		for _, g := range bandGainGains {
 			for _, preShift := range bandGainShifts {
 				for _, postShift := range bandGainShifts {
@@ -223,19 +208,16 @@ func BenchmarkBandGainRequant(b *testing.B) {
 	// decoder-shaped (6,14) benchmarked here; it is not benchmarked separately.
 	lengths := []int{4, 8, 16, 24, 48, 96, 176, 240}
 	for _, n := range lengths {
-		seed := make([]int32, n)
-		for i := range seed {
-			seed[i] = int32(uint32(i)*2654435761 + 1)
-		}
+		seed := seqFillI32(n)
 		const g = int32(1 << 24)
-		b.Run(fmt.Sprintf("scalar/n%d", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("n%d/impl=scalar", n), func(b *testing.B) {
 			dst := make([]int32, n)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				bandGainRequantGeneric(dst, seed, g, 6, 14)
 			}
 		})
-		b.Run(fmt.Sprintf("simd/n%d", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("n%d/impl=simd", n), func(b *testing.B) {
 			dst := make([]int32, n)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

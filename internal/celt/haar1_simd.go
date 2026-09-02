@@ -96,6 +96,7 @@ func haar1(X []int32, N0, stride int) {
 //
 //go:noinline
 func haar1WideButterfly(rest []int32, stride int) {
+	observeHaar1Dispatch() // dispatch-observation hook, compiled out unless -tags dispatchcount
 	for len(rest) >= 2*stride {
 		i32.Butterfly(rest[:stride], rest[stride:][:stride])
 		rest = rest[2*stride:]

@@ -36,6 +36,22 @@ const minCombBlock = 32
 // constant, not a test-guarded correctness one.
 const combTile = 256
 
+// combVecAlign is the block-width granularity the dispatcher rounds down to when
+// more blocks follow. i32.FIRSymValidQ15 vectorizes its outputs in fixed-width
+// vector iterations (8 int32 on AVX2, 4 on NEON) and drops the sub-vector
+// remainder of each call to a per-output scalar tail. blockW = T-2 is congruent
+// to 6 mod 8 for every pitch period that is a multiple of 8 (48, 64, 120, 256,
+// 512, ... the wide shapes the decoder actually produces), so an unaligned block
+// hands the kernel a 6-output scalar remainder on every block: about 5 percent of
+// outputs at T=120 and 13 percent at T=48. Rounding each non-final block down to a
+// multiple of 8 lets the leftover roll into the next block and the final block
+// absorb N mod 8, so only the last kernel call has a scalar remainder (measured 8
+// to 16 percent fewer AVX2 instructions on the wide shapes; issue #71). 8 is a
+// multiple of NEON's 4, so the alignment is correct on both arches. This is
+// bit-exact by the same blocking argument the combTile cap relies on: narrowing a
+// block only reaches further back into already-finalized history.
+const combVecAlign = 8
+
 // combPairs is K=2, the number of mirror pairs FIRSymValidQ15 takes: pairs[0] is
 // the +-1 tap (g11), pairs[1] the +-2 tap (g12).
 const combPairs = 2
@@ -88,10 +104,21 @@ func combFilterConst(y []int32, yb int, x []int32, xb int, T, N int, g10, g11, g
 		combFilterConstGeneric(y, yb, x, xb, T, N, g10, g11, g12)
 		return
 	}
+	observeCombDispatch() // dispatch-observation hook, compiled out unless -tags dispatchcount
 	pairs := [combPairs]int16{g11, g12}
 	var accArr [combTile]int32
 	for base := 0; base < N; {
 		w := min(N-base, blockW, combTile)
+		// Align every block but the last to combVecAlign so its kernel call runs
+		// with no sub-vector scalar remainder; the leftover rolls into the next
+		// block. Only when more blocks follow (base+w < N), and only if a full
+		// aligned block remains, so w is never rounded to zero. Bit-exact: a
+		// narrower block reaches only further-back, already-finalized history.
+		if base+w < N {
+			if a := w &^ (combVecAlign - 1); a >= combVecAlign {
+				w = a
+			}
+		}
 		s := xb + base
 		acc := accArr[:w:w]
 		// The window is the W+4 history samples x[s-T-2 .. s-T+2+W); the kernel
