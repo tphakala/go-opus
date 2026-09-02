@@ -47,12 +47,22 @@ const (
 // function opus_encode_native calls at :1246 and :1315.
 func celtMaxabs16(x []int16, n int) int32 {
 	var maxval, minval int16
-	for i := 0; i < n; i++ {
-		if x[i] > maxval {
-			maxval = x[i]
+	// Bound the window against len(x), the same bound the original per-sample x[i]
+	// enforced, then range over it so the reduction is check-free. The guard keeps
+	// a mis-sized caller panicking deterministically rather than letting the
+	// two-index reslice widen silently into spare capacity (x[:n] bounds against
+	// cap, not len). One check per call replaces one per element; the arithmetic is
+	// untouched, so the result stays bit-identical. Mirrors the celt-package copy
+	// (internal/celt/celt_lpc.go) so the two stay identical.
+	if n < 0 || n > len(x) {
+		panic("opusenc: celtMaxabs16: n out of range")
+	}
+	for _, v := range x[:n] {
+		if v > maxval {
+			maxval = v
 		}
-		if x[i] < minval {
-			minval = x[i]
+		if v < minval {
+			minval = v
 		}
 	}
 	return fixedmath.MAX32(fixedmath.EXTEND32(maxval), -fixedmath.EXTEND32(minval))
@@ -73,6 +83,16 @@ func isDigitalSilence(pcm []int16, frameSize, channels int) bool {
 func computeFrameEnergy(pcm []int16, frameSize, channels int) int32 {
 	length := frameSize * channels
 
+	// Reslice to the exact frame window once, with a guard, so the per-sample pcm[i]
+	// check in the energy loop below is elided and a mis-sized caller still panics
+	// deterministically rather than letting the reslice widen into spare capacity
+	// (pcm[:length] bounds against cap, not len). Order and arithmetic are untouched,
+	// so the energy stays bit-identical.
+	if length < 0 || length > len(pcm) {
+		panic("opusenc: computeFrameEnergy: length out of range")
+	}
+	pcm = pcm[:length]
+
 	// Max amplitude in the signal (RES2INT16 is the identity here).
 	sampleMax := celtMaxabs16(pcm, length)
 
@@ -82,9 +102,10 @@ func computeFrameEnergy(pcm []int16, frameSize, channels int) int32 {
 	shift := fixedmath.IMAX(0, (fixedmath.Celt_ilog2(1+sampleMax)<<1)+maxShift-28)
 
 	// Energy, accumulated with each square pre-shifted so the sum stays in range.
+	// pcm is already resliced to length above, so range is check-free.
 	var energy int32
-	for i := 0; i < length; i++ {
-		energy += fixedmath.SHR32(fixedmath.MULT16_16(pcm[i], pcm[i]), shift)
+	for _, v := range pcm {
+		energy += fixedmath.SHR32(fixedmath.MULT16_16(v, v), shift)
 	}
 
 	// Normalize by the frame size, then left-shift back to the original position.
