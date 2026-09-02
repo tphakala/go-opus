@@ -262,10 +262,21 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
+      # skip-cache because the action's shared analysis cache poisons this job. On
+      # 2026-09-02 every run, on main and on every PR branch, began failing with
+      # four SA5011 "possible nil pointer dereference" reports in test files whose
+      # nil check is a t.Fatalf immediately above the use. The same commit had
+      # passed hours earlier, reruns failed identically, and every failing run
+      # logged a hit on the same restored cache key. Running the pinned linter
+      # (v2.12.2) against the pinned Go (1.26.7) on a clean cache reports zero
+      # issues for both main and the branch, so the findings come from the cache
+      # rather than from the code. A lint gate has to reflect the tree; the cache
+      # saves seconds on a job the reftest dwarfs anyway.
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
+          skip-cache: true
 
   vet:
     name: Vet
