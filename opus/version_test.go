@@ -6,10 +6,35 @@ import (
 	"testing"
 )
 
-// semverCore is the shape Version must have: MAJOR.MINOR.PATCH with an optional
-// pre-release suffix and no leading "v" (the tag adds that). Build metadata
-// ("+...") is excluded because Go module tags cannot carry it.
-var semverCore = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+// semverCore is the shape Version must have: MAJOR.MINOR.PATCH, each a numeric
+// identifier with no leading zero (so Go's module resolver accepts it), with an
+// optional pre-release suffix and no leading "v" (the tag adds that). Build
+// metadata ("+...") is excluded because Go module tags cannot carry it. Keep this
+// in exact agreement, case for case, with the bash ERE in scripts/release.sh
+// (each written in its own dialect); TestSemverCore and the release closure proof
+// check both.
+var semverCore = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$`)
+
+// TestSemverCore exercises the shape regexp directly, since in normal use it only
+// ever sees the one correct Version constant. The reject cases pin the rules the
+// pattern enforces: three dot-separated numeric identifiers, no leading zero, no
+// leading "v", no build metadata, and a nonempty pre-release after the hyphen. The
+// bash ERE in scripts/release.sh must agree case for case; the release closure
+// proof runs the same table through it.
+func TestSemverCore(t *testing.T) {
+	accept := []string{"1.1.0", "1.1.0-rc.1", "10.20.30"}
+	reject := []string{"v1.1.0", "1.1", "", "1.1.0+meta", "01.2.3", "1.1.0-", "1.1.0.0", "1.1.0 "}
+	for _, s := range accept {
+		if !semverCore.MatchString(s) {
+			t.Errorf("semverCore rejected %q, want accept", s)
+		}
+	}
+	for _, s := range reject {
+		if semverCore.MatchString(s) {
+			t.Errorf("semverCore accepted %q, want reject", s)
+		}
+	}
+}
 
 // TestVersionIsSemver pins the constant's shape so a stray "v", build metadata
 // ("+..."), or an empty string cannot ship as the codec version. A pre-release

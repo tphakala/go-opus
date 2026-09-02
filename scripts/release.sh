@@ -12,8 +12,12 @@ if [[ -z "$version" ]]; then
   echo "usage: $0 X.Y.Z[-pre]" >&2
   exit 2
 fi
-if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-  echo "error: '$version' is not MAJOR.MINOR.PATCH[-prerelease] (no leading v)" >&2
+# MAJOR.MINOR.PATCH, each a numeric identifier with no leading zero, plus an
+# optional pre-release suffix and no leading "v". This bash ERE must stay in exact
+# agreement, case for case, with the RE2 semverCore in opus/version_test.go (each
+# in its own dialect); TestSemverCore covers the same table.
+if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+  echo "error: '$version' is not MAJOR.MINOR.PATCH[-prerelease] (no leading v, no leading zeros)" >&2
   exit 2
 fi
 tag="v$version"

@@ -77,5 +77,7 @@ tasks:
 
   release:
     desc: "Cut a release: bump opus.Version, run the release-tag guard, commit and tag (usage: task release VERSION=1.2.0, then git push origin main vX.Y.Z)"
+    requires:
+      vars: [VERSION]
     cmds:
-      - scripts/release.sh {{.VERSION}}
+      - scripts/release.sh "{{.VERSION}}"
