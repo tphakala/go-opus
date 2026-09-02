@@ -27,6 +27,9 @@ const minCombBlock = 32
 // combTile caps the per-block scratch so acc stays on the stack (1 KB) and
 // L1-resident. Capping the block below T-2 is always bit-exact: a narrower block
 // only reads further-back, already-finalized history, never a pending sample.
+// Because every value of combTile is bit-exact, shrinking it is invisible to the
+// differential (combTile=3 passes it): it is a benchmark-guarded performance
+// constant, not a test-guarded correctness one.
 const combTile = 256
 
 // combPairs is the K=2 mirror-pair layout FIRSymValidQ15 expects: pairs[0] is
