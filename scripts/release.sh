@@ -30,8 +30,17 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 git fetch --quiet --tags origin
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-  echo "error: tag $tag already exists" >&2
+  echo "error: tag $tag already exists; if it exists only locally, remove it with 'git tag -d $tag' and re-run" >&2
   exit 1
+fi
+# Refuse to release from a main that is behind its remote. git updates refs
+# independently, so pushing a tag off a stale main would publish a tag whose
+# commit is not on origin/main. Only checked when origin/main is known locally.
+if git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
+  if ! git merge-base --is-ancestor refs/remotes/origin/main HEAD; then
+    echo "error: local main is behind origin/main; pull first" >&2
+    exit 1
+  fi
 fi
 
 file="opus/opus.go"
@@ -40,9 +49,20 @@ if ! grep -q '^const Version = "' "$file"; then
   exit 1
 fi
 # Portable in-place edit (BSD sed has no GNU -i form): rewrite via a temp file.
+# $log (used by the guard below) is created here too so a single EXIT trap covers
+# both temp files. Both live outside the repo, so they never dirty the tree.
 tmp="$(mktemp)"
+log="$(mktemp)"
+trap 'rm -f "$tmp" "$log"' EXIT
 sed "s/^const Version = \".*\"\$/const Version = \"$version\"/" "$file" > "$tmp"
-mv "$tmp" "$file"
+# cat, not mv: mktemp creates the temp at 0600, and mv would carry that mode onto
+# opus.go (observed 664 -> 600). Writing through cat keeps $file's existing mode.
+cat "$tmp" > "$file"
+# From here until `git add`, restore opus.go to HEAD on any failure (the gofmt
+# check, the guard test), so a partial run never leaves the bump uncommitted for
+# the next run's clean-tree guard to trip over. The clean-tree check above means
+# HEAD is exactly the pre-bump state.
+trap 'git checkout -q -- "$file"' ERR
 if [[ -n "$(gofmt -l "$file")" ]]; then
   echo "error: $file is not gofmt clean after the bump" >&2
   exit 1
@@ -55,13 +75,22 @@ fi
 # vendor-string tests compare symbolically against opus.Version, so they cannot
 # fail on its value; they are folded in here at no cost.
 echo "verifying opus.Version against $tag"
-log="$(mktemp)"
 GOOPUS_RELEASE_TAG="$tag" go test -count=1 -v \
   -run '^TestVersion|^TestVendorString|^TestConfigVendorDefault' ./opus/ ./oggopus/ | tee "$log"
 grep -qF -- '--- PASS: TestVersionMatchesReleaseTag (' "$log"
 
+trap - ERR
 git add "$file"
-git commit --quiet -m "chore: bump version to $version"
+if git diff --cached --quiet; then
+  # The constant already read $version, so there is nothing to commit. The point
+  # of this run is the tag, so tag HEAD anyway instead of dying on git commit's
+  # "nothing to commit, working tree clean".
+  echo "opus.Version already reads $version; tagging HEAD without a new commit"
+else
+  git commit --quiet -m "chore: bump version to $version"
+fi
 git tag -a "$tag" -m "$tag"
-echo "committed and tagged $tag; publish with:"
-echo "  git push origin main $tag"
+# --atomic so a rejected main (someone pushed first) also rejects the tag, instead
+# of leaving a published tag whose commit never reached origin/main.
+echo "tagged $tag; publish with:"
+echo "  git push --atomic origin main $tag"
