@@ -298,12 +298,17 @@ func interpBits2pulses(m *celtMode, start, end, skip_start int,
 	// eb views eBands over [0,codedBands]; j+1 <= codedBands < len(eb), so the
 	// band-width reads fold check-free (same values, same order).
 	eb := m.eBands[:codedBands+1]
+	// bd views the per-band bit array over [0,codedBands); j < codedBands then folds
+	// the bo[j] stores check-free (the prover cannot propagate codedBands <= end into
+	// the length-end bo view on its own). Same backing array, same indices and order,
+	// so the distribution stays bit-identical.
+	bd := bo[:codedBands]
 	for j := start; j < codedBands; j++ {
-		bo[j] += int(percoeff * int32(int(eb[j+1])-int(eb[j])))
+		bd[j] += int(percoeff * int32(int(eb[j+1])-int(eb[j])))
 	}
 	for j := start; j < codedBands; j++ {
 		tmp := int(fixedmath.MIN32(left, int32(int(eb[j+1])-int(eb[j]))))
-		bo[j] += tmp
+		bd[j] += tmp
 		left -= int32(tmp)
 	}
 
