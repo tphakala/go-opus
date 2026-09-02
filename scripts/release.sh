@@ -48,9 +48,17 @@ if [[ -n "$(gofmt -l "$file")" ]]; then
   exit 1
 fi
 
+# Verify the constant against the tag and require the guard's PASS line, not just
+# a green `go test`: renaming TestVersionMatchesReleaseTag (so '^TestVersion' no
+# longer selects it) or unsetting GOOPUS_RELEASE_TAG (so it SKIPs) would leave the
+# run green without the guard ever running, and a SKIP is not a PASS. The oggopus
+# vendor-string tests compare symbolically against opus.Version, so they cannot
+# fail on its value; they are folded in here at no cost.
 echo "verifying opus.Version against $tag"
-GOOPUS_RELEASE_TAG="$tag" go test -count=1 -run '^TestVersion' ./opus/
-go test -count=1 -run '^TestVendorString|^TestConfigVendorDefault' ./oggopus/
+log="$(mktemp)"
+GOOPUS_RELEASE_TAG="$tag" go test -count=1 -v \
+  -run '^TestVersion|^TestVendorString|^TestConfigVendorDefault' ./opus/ ./oggopus/ | tee "$log"
+grep -qF -- '--- PASS: TestVersionMatchesReleaseTag (' "$log"
 
 git add "$file"
 git commit --quiet -m "chore: bump version to $version"

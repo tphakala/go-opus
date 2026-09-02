@@ -35,7 +35,15 @@ jobs:
       - name: Check the version constant against the tag
         env:
           GOOPUS_RELEASE_TAG: ${{ github.ref_name }}
-        run: go test -count=1 -run '^TestVersion' -v ./opus/
+        # Require the guard's PASS line, not just a green `go test`. GitHub Actions
+        # runs this with `bash -e` but no pipefail, so enable it; the test must fail
+        # the step, not tee. Renaming TestVersionMatchesReleaseTag (so '^TestVersion'
+        # no longer selects it) or dropping GOOPUS_RELEASE_TAG (so it SKIPs) would
+        # otherwise leave the step green without the guard ever running.
+        run: |
+          set -o pipefail
+          go test -count=1 -run '^TestVersion' -v ./opus/ | tee version-guard.log
+          grep -qF -- '--- PASS: TestVersionMatchesReleaseTag (' version-guard.log
 
   release:
     name: Create draft GitHub release
