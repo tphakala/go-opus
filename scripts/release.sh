@@ -57,11 +57,10 @@ if ! grep -q '^const Version = "' "$file"; then
   echo "error: no 'const Version = \"...\"' line in $file" >&2
   exit 1
 fi
-# Portable in-place edit (BSD sed has no GNU -i form): rewrite via a temp file.
-# $log (used by the guard below) is created here too so a single EXIT trap covers
-# both temp files. Both live outside the repo, so they never dirty the tree.
+# Portable in-place edit (BSD sed has no GNU -i form): rewrite via a temp file. It
+# lives outside the repo, so it never dirties the tree. The version-guard tee log
+# is owned by scripts/verify-version.sh, which writes it outside the workspace too.
 tmp="$(mktemp)"
-log="$(mktemp)"
 # One EXIT trap does cleanup and restore. It removes both temp files and, until the
 # bump is staged, restores opus.go to HEAD on every exit path: a nonzero command, an
 # explicit `exit`, or a signal such as SIGINT (an ERR trap fires only for the first,
@@ -73,7 +72,7 @@ log="$(mktemp)"
 # The clean-tree guard above ran first, so HEAD is the exact pre-bump state and the
 # restore can never discard user work.
 committed=0
-trap 'rm -f "$tmp" "$log"; [[ $committed == 1 ]] || { git reset -q -- "$file"; git checkout -q -- "$file"; }' EXIT
+trap 'rm -f "$tmp"; [[ $committed == 1 ]] || { git reset -q -- "$file"; git checkout -q -- "$file"; }' EXIT
 sed "s/^const Version = \".*\"\$/const Version = \"$version\"/" "$file" > "$tmp"
 # cat, not mv: mktemp creates the temp at 0600, and mv would carry that mode onto
 # opus.go (observed 664 -> 600). Writing through cat keeps $file's existing mode.
@@ -83,16 +82,10 @@ if [[ -n "$(gofmt -l "$file")" ]]; then
   exit 1
 fi
 
-# Verify the constant against the tag and require the guard's PASS line, not just
-# a green `go test`: renaming TestVersionMatchesReleaseTag (so '^TestVersion' no
-# longer selects it) or unsetting GOOPUS_RELEASE_TAG (so it SKIPs) would leave the
-# run green without the guard ever running, and a SKIP is not a PASS. The oggopus
-# vendor-string tests compare symbolically against opus.Version, so they cannot
-# fail on its value; they are folded in here at no cost.
-echo "verifying opus.Version against $tag"
-GOOPUS_RELEASE_TAG="$tag" go test -count=1 -v \
-  -run '^TestVersion|^TestVendorString|^TestConfigVendorDefault' ./opus/ ./oggopus/ | tee "$log"
-grep -qF -- '--- PASS: TestVersionMatchesReleaseTag (' "$log"
+# Verify the bumped constant against the tag. scripts/verify-version.sh owns the
+# GOOPUS_RELEASE_TAG wiring and the PASS-line check, shared with the Release
+# workflow so the two cannot drift; on failure the EXIT trap above restores opus.go.
+scripts/verify-version.sh "$tag"
 
 git add "$file"
 if git diff --cached --quiet; then

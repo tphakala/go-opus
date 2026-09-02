@@ -81,14 +81,9 @@ func combBuf(gen func(i int) int32, T, N int) (buf []int32, xb int) {
 // through the later gain triples that reuse the same buffer.
 func runCombSep(t *testing.T, buf []int32, xb, T, N int, g10, g11, g12 int16) {
 	t.Helper()
-	const sentinel = int32(0x0BADF00D)
 	yLen := xb + N + 8
-	a := make([]int32, yLen)
-	b := make([]int32, yLen)
-	for i := range a {
-		a[i] = sentinel
-		b[i] = sentinel
-	}
+	a := sentinelBuf(yLen)
+	b := sentinelBuf(yLen)
 	xOrig := slices.Clone(buf)
 	combFilterConstGeneric(a, xb, buf, xb, T, N, g10, g11, g12)
 	combFilterConst(b, xb, buf, xb, T, N, g10, g11, g12)
@@ -125,8 +120,11 @@ const combMaxT = combfilterMaxperiod - 2
 // T-2 == minCombBlock (T=34), the combTile boundary at T-2 == combTile (T=258)
 // and just past it (T=259) where a block is split, prime-ish widths, and large
 // periods where a block covers many vector registers, up to the clamped max
-// combMaxT.
-var combTestPeriods = []int{15, 16, 17, 31, 32, 33, 34, 63, 120, 255, 258, 259, 512, combMaxT}
+// combMaxT. T=40 and T=48 sit in the band above the gate where blockW = T-2 (38,
+// 46) is not a multiple of combVecAlign, so a multi-block call there exercises the
+// block-width alignment rounding (issue #71) and the recurrence across the shifted
+// block boundaries it produces.
+var combTestPeriods = []int{15, 16, 17, 31, 32, 33, 34, 40, 48, 63, 120, 255, 258, 259, 512, combMaxT}
 
 // combTestLengths span below the gate, exactly at it (N=32 == minCombBlock) and
 // above, include N=122 (an exact multiple of T=63's block width 61, so a
@@ -205,16 +203,8 @@ func TestCombFilterConstExtremes(t *testing.T) {
 	for _, T := range periods {
 		for _, N := range lengths {
 			buflen := T + 2 + N
-			allEdge := make([]int32, buflen)
-			alt := make([]int32, buflen)
-			for i := range allEdge {
-				allEdge[i] = edges[i%len(edges)]
-				if i%2 == 0 {
-					alt[i] = math.MinInt32
-				} else {
-					alt[i] = math.MaxInt32
-				}
-			}
+			allEdge := edgeFill(edges, buflen)
+			alt := altMinMax(buflen)
 			xb := T + 2
 			for _, g := range combGainTriples {
 				runCombSep(t, allEdge, xb, T, N, g[0], g[1], g[2])

@@ -33,14 +33,6 @@ func runHaar1Pair(t *testing.T, src []int32, N0, stride int) {
 	}
 }
 
-func fillRandI32(r *rand.Rand, n int) []int32 {
-	x := make([]int32, n)
-	for i := range x {
-		x[i] = int32(r.Uint32())
-	}
-	return x
-}
-
 func TestHaar1SIMDMatchesScalar(t *testing.T) {
 	r := rand.New(rand.NewSource(1))
 	strides := []int{-1, 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 30}
@@ -70,21 +62,9 @@ func TestHaar1SIMDExtremes(t *testing.T) {
 	for _, c := range cases {
 		n := haar1TouchLen(c.N0, c.stride) + 4
 		// Every-edge buffer.
-		allEdge := make([]int32, n)
-		for i := range allEdge {
-			allEdge[i] = edges[i%len(edges)]
-		}
-		runHaar1Pair(t, allEdge, c.N0, c.stride)
+		runHaar1Pair(t, edgeFill(edges, n), c.N0, c.stride)
 		// Alternating min/max to stress sum/difference overflow.
-		alt := make([]int32, n)
-		for i := range alt {
-			if i%2 == 0 {
-				alt[i] = math.MinInt32
-			} else {
-				alt[i] = math.MaxInt32
-			}
-		}
-		runHaar1Pair(t, alt, c.N0, c.stride)
+		runHaar1Pair(t, altMinMax(n), c.N0, c.stride)
 	}
 }
 
@@ -119,18 +99,15 @@ func BenchmarkHaar1(b *testing.B) {
 		if n == 0 {
 			continue
 		}
-		seed := make([]int32, n)
-		for i := range seed {
-			seed[i] = int32(uint32(i)*2654435761 + 1)
-		}
-		b.Run(fmt.Sprintf("scalar/N%d_s%d", c.N0, c.stride), func(b *testing.B) {
+		seed := seqFillI32(n)
+		b.Run(fmt.Sprintf("N%d_s%d/impl=scalar", c.N0, c.stride), func(b *testing.B) {
 			buf := append([]int32(nil), seed...)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				haar1Generic(buf, c.N0, c.stride)
 			}
 		})
-		b.Run(fmt.Sprintf("simd/N%d_s%d", c.N0, c.stride), func(b *testing.B) {
+		b.Run(fmt.Sprintf("N%d_s%d/impl=simd", c.N0, c.stride), func(b *testing.B) {
 			buf := append([]int32(nil), seed...)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

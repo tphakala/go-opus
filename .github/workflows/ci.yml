@@ -91,6 +91,14 @@ jobs:
         run: go test ${{ matrix.race }} ${{ matrix.cover }} $SHORT_FLAG -timeout 20m ./...
       - name: Run codec tests with the scratch poison harness
         run: go test -tags poison $SHORT_FLAG -count=1 -timeout 15m ./internal/celt/... ./internal/packet/... ./opus/...
+      # The SIMD differential suites diff each dispatcher against a scalar reference
+      # that is also the dispatcher's fallback, so a green suite cannot tell a working
+      # vector kernel from one that never ran (issue #72). The dispatchcount build
+      # arms a per-kernel counter at the exact library call site; the Dispatch tests
+      # then assert each dispatcher reaches its vector kernel (and, where an in-tree
+      # fallback exists, that the fallback shape does not). Runs on both arches.
+      - name: Verify the SIMD dispatchers reach their vector kernels
+        run: go test -tags dispatchcount -count=1 -run Dispatch ./internal/celt/
       # Coverage is informational (codecov, fail_ci_if_error: false), never a gate.
       # Only the amd64 leg sets `cover`, so it is the only leg with a coverage.out to
       # upload; the arm leg skips this step.
@@ -344,7 +352,7 @@ jobs:
       # A short bounded run of each decode-path fuzz target on every build. The
       # packet and Ogg readers parse untrusted bytes, so this guards against
       # panics and unbounded allocation on malformed input; a crash a run finds
-      # is committed under testdata/fuzz as a regression seed. The last two targets
+      # is committed under testdata/fuzz as a regression seed. The last four targets
       # fuzz a SIMD kernel against its scalar reference. Smoke runs, not a
       # substitute for a long local fuzz session. The libopus submodule is not
       # needed: these targets are pure Go, the C reference is build-tagged out.
@@ -364,3 +372,7 @@ jobs:
         run: go test -run='^$' -fuzz='^FuzzXcorrKernel$' -fuzztime=15s ./internal/celt
       - name: Fuzz comb filter SIMD differential
         run: go test -run='^$' -fuzz='^FuzzCombFilterConst$' -fuzztime=15s ./internal/celt
+      - name: Fuzz haar1 SIMD differential
+        run: go test -run='^$' -fuzz='^FuzzHaar1$' -fuzztime=15s ./internal/celt
+      - name: Fuzz band-gain SIMD differential
+        run: go test -run='^$' -fuzz='^FuzzBandGainRequant$' -fuzztime=15s ./internal/celt

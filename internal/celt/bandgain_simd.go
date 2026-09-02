@@ -39,5 +39,6 @@ import "github.com/tphakala/simd/i32"
 // real callers never overlap at all, and GainQ31's exact-alias allowance is
 // strictly more permissive than what they need.
 func bandGainRequant(dst, src []int32, g int32, preShift, postShift int) {
+	observeBandGainDispatch() // dispatch-observation hook, compiled out unless -tags dispatchcount
 	i32.GainQ31(dst, src, g, preShift, postShift)
 }

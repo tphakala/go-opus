@@ -33,6 +33,7 @@ func celtInnerProd(x []int16, xOff int, y []int16, yOff, N int) int32 {
 	}
 	_ = x[xOff+N-1]
 	_ = y[yOff+N-1]
+	observeInnerProdDispatch() // dispatch-observation hook, compiled out unless -tags dispatchcount
 	return i16.DotProduct(x[xOff:xOff+N], y[yOff:yOff+N])
 }
 
@@ -58,6 +59,7 @@ func xcorrKernel(x, y []int16, sum *[4]int32, len_ int) {
 	// library will read so a mis-sized caller panics here.
 	_ = x[len_-1]
 	_ = y[len_+2]
+	observeXcorrDispatch() // dispatch-observation hook, compiled out unless -tags dispatchcount
 	var tmp [4]int32
 	i16.XCorr(tmp[:], x[:len_], y[:len_+3])
 	sum[0] += tmp[0]
