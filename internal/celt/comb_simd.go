@@ -12,16 +12,20 @@ import (
 // the register-carrying scalar loop. T is clamped to [combfilterMinperiod,
 // combfilterMaxperiod-2] = [15, 1022] by the callers, so T-2 is in [13, 1020].
 //
-// Tuned by benchstat (BenchmarkCombFilterConst, count 6-8) on amd64 (i7-1260P,
-// AVX2, pinned) and arm64 (Raspberry Pi 5 Cortex-A76, NEON). Below the
-// threshold the two paths are indistinguishable on both; at T=48 (block width
-// 46) the kernel wins 26% on AVX2 and 5% on NEON, and from T=64 up it wins
-// 33-44% on AVX2 and 2-6% on NEON, flattening to break-even on NEON at the
-// widest periods (T>=512). NEON gains are small because its 4-lane 64-bit
-// product kernel is only ~2.4x its own Go fallback, and the scalar tail is a
-// fixed cost per output; AVX2 is 8 lanes wide. The tail's bounds-check-free
-// reslicing is load-bearing for the NEON result: with checked indexing the same
-// rows were 10-20% slower than scalar.
+// Tuned by benchstat (BenchmarkCombFilterConst, count 10, one core pinned with
+// GOMAXPROCS=1) on two idle hosts: amd64 AVX2 (i7-1260P) and arm64 NEON
+// (Raspberry Pi 5, Cortex-A76). Below the gate the extra branch costs 0.1 to 0.8
+// percent on amd64 and nothing measurable on arm64. Above it every routed shape
+// wins on amd64, by 32 to 48 percent, and all but one wins on arm64, by 0.4 to 7
+// percent; the exception is T=120 at N=120, which is 1.1 percent slower there.
+// The band the gate opens is the cheapest to doubt and was measured directly:
+// T=34 (block width exactly 32) wins 46 percent on AVX2 and 7 percent on NEON.
+// NEON gains are small because its 4-lane 64-bit product kernel is only about
+// 2.4x its own Go fallback while AVX2 is 8 lanes wide, and the scalar tail is a
+// fixed per-output cost either way. End to end that is 0.5 percent off decode on
+// amd64 and 0.3 percent on arm64. The tail's bounds-check-free reslicing is
+// load-bearing for the arm64 result: with checked indexing the same rows ran 10
+// to 20 percent SLOWER than scalar.
 const minCombBlock = 32
 
 // combTile caps the per-block scratch so acc stays on the stack (1 KB) and

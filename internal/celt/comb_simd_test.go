@@ -45,9 +45,11 @@ func combValues(seed uint32) func(i int) int32 {
 
 // combValuesInBand squeezes combValues into the codec's real dynamic range. On the
 // separate-buffer path this provably never reaches SATURATE: >> 6 bounds |x| <=
-// 2^25, so the three MULT16_32_Q15 terms bound |v| = |acc + x - 1| <= 2^25 + 2^25 +
-// 2^26 + 2^26 = 201326592, well under sigSat = 536870911 (adversarial worst measured
-// 201321473). The in-place path re-amplifies through the recurrence, so it does
+// 2^25, so the passthrough plus the three MULT16_32_Q15 terms bound
+// |v| = |acc + x - 1| <= 2^25 + 2^25 + 2^26 + 2^26 = 201326592, well under
+// sigSat = 536870911. The adversarial worst over the whole int16 gain range is
+// 201326590, reached at g = MinInt16, where MULT16_32_Q15(-32768, a) == -a loses
+// nothing to the Q15 truncation; over the committed gain table it is 91890123. The in-place path re-amplifies through the recurrence, so it does
 // clamp: about 11 percent of in-band outputs against about 75 percent at full range.
 // Clamping collapses a genuine per-sample divergence onto an equal value, so the
 // in-band pass is strictly more sensitive: over the 768 vector cells a one-sample
