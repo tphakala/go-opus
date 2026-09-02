@@ -57,16 +57,20 @@ fi
 # both temp files. Both live outside the repo, so they never dirty the tree.
 tmp="$(mktemp)"
 log="$(mktemp)"
-trap 'rm -f "$tmp" "$log"' EXIT
+# One EXIT trap does cleanup and restore. It removes both temp files and, until the
+# bump is staged, restores opus.go to HEAD on every exit path: a nonzero command, an
+# explicit `exit`, or a signal such as SIGINT (an ERR trap fires only for the first,
+# which is why round 1 left the tree dirty on the gofmt exit and on an interrupt).
+# `committed` flips to 1 right after `git add`; from that point the index holds the
+# bump, so a checkout would reinstate it rather than undo it and the restore stops.
+# The clean-tree guard above ran first, so HEAD is the exact pre-bump state and the
+# restore can never discard user work.
+committed=0
+trap 'rm -f "$tmp" "$log"; [[ $committed == 1 ]] || git checkout -q -- "$file"' EXIT
 sed "s/^const Version = \".*\"\$/const Version = \"$version\"/" "$file" > "$tmp"
 # cat, not mv: mktemp creates the temp at 0600, and mv would carry that mode onto
 # opus.go (observed 664 -> 600). Writing through cat keeps $file's existing mode.
 cat "$tmp" > "$file"
-# From here until `git add`, restore opus.go to HEAD on any failure (the gofmt
-# check, the guard test), so a partial run never leaves the bump uncommitted for
-# the next run's clean-tree guard to trip over. The clean-tree check above means
-# HEAD is exactly the pre-bump state.
-trap 'git checkout -q -- "$file"' ERR
 if [[ -n "$(gofmt -l "$file")" ]]; then
   echo "error: $file is not gofmt clean after the bump" >&2
   exit 1
@@ -83,8 +87,8 @@ GOOPUS_RELEASE_TAG="$tag" go test -count=1 -v \
   -run '^TestVersion|^TestVendorString|^TestConfigVendorDefault' ./opus/ ./oggopus/ | tee "$log"
 grep -qF -- '--- PASS: TestVersionMatchesReleaseTag (' "$log"
 
-trap - ERR
 git add "$file"
+committed=1
 if git diff --cached --quiet; then
   # The constant already read $version, so there is nothing to commit. The point
   # of this run is the tag, so tag HEAD anyway instead of dying on git commit's
