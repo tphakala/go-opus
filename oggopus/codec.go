@@ -154,7 +154,36 @@ func (d *opusFrameDecoder) decodeFrame(packet []byte) ([]int16, error) {
 // close releases codec resources; see opusFrameEncoder.close.
 func (d *opusFrameDecoder) close() {}
 
-// newFrameDecoder builds the per-stream decoder from the parsed OpusHead.
+// opusMSFrameDecoder adapts the public opus.MultistreamDecoder to the frameDecoder
+// seam for channel mapping family 1 (surround) and any other family that carries a
+// mapping table. It mirrors opusFrameDecoder but routes each packet through the N
+// sub-streams the multistream decoder schedules onto the API channels.
+type opusMSFrameDecoder struct {
+	dec      *opus.MultistreamDecoder
+	channels int
+	buf      []int16
+}
+
+// decodeFrame decodes one multistream packet into interleaved int16 PCM for all
+// API channels. The buffer is sized for the longest Opus frame across every
+// channel, so a short packet fills less of it; opus.MultistreamDecoder reports the
+// per-channel sample count.
+func (d *opusMSFrameDecoder) decodeFrame(packet []byte) ([]int16, error) {
+	n, err := d.dec.Decode(packet, d.buf)
+	if err != nil {
+		return nil, fmt.Errorf("oggopus: decoding a multistream packet: %w", err)
+	}
+	return d.buf[:n*d.channels], nil
+}
+
+// close releases codec resources; see opusFrameEncoder.close.
+func (d *opusMSFrameDecoder) close() {}
+
+// newFrameDecoder builds the per-stream decoder from the parsed OpusHead. Channel
+// mapping family 0 (mono/stereo) decodes through a single opus.Decoder; a non-zero
+// family (family 1 surround, and any other family that carries a mapping table)
+// decodes through opus.MultistreamDecoder, driven by the OpusHead stream count,
+// coupled-stream count and channel mapping the container parsed.
 //
 // The decoder always runs at 48 kHz, whatever OpusHead's input-sample-rate field
 // says: RFC 7845 section 5.1 makes that field informational ("the sample rate of
@@ -163,15 +192,31 @@ func (d *opusFrameDecoder) close() {}
 // granule in the stream mean something different from what the container says.
 var newFrameDecoder = func(head opusHead) (frameDecoder, error) {
 	channels := int(head.channels)
-	dec, err := opus.NewDecoder(sampleRate48k, channels)
-	if err != nil {
-		// Reachable only through a mapping family other than 0: parseOpusHead
-		// already holds family 0 to 1 or 2 channels, but family 1 (ambisonics /
-		// surround) may declare more, and multistream decoding is not implemented.
-		return nil, fmt.Errorf("oggopus: building the opus decoder for %d channels (mapping family %d): %w",
-			channels, head.mappingFamily, err)
+	if head.mappingFamily == mappingFamily0 {
+		dec, err := opus.NewDecoder(sampleRate48k, channels)
+		if err != nil {
+			// parseOpusHead already holds family 0 to 1 or 2 channels, so a bad rate
+			// or channel count here is not expected; wrap it rather than swallow it.
+			return nil, fmt.Errorf("oggopus: building the opus decoder for %d channels: %w", channels, err)
+		}
+		return &opusFrameDecoder{
+			dec:      dec,
+			channels: channels,
+			buf:      make([]int16, maxFrameSamples48k*channels),
+		}, nil
 	}
-	return &opusFrameDecoder{
+	// A non-zero mapping family carries an OpusHead mapping table (stream count,
+	// coupled count, and one mapping byte per channel); route the N sub-streams
+	// through the multistream decoder. NewMultistreamDecoder validates the layout
+	// and returns ErrBadArg for an inconsistent table, so a hostile header is
+	// rejected with an error rather than a panic.
+	dec, err := opus.NewMultistreamDecoder(sampleRate48k, channels,
+		int(head.streamCount), int(head.coupledCount), head.channelMapping)
+	if err != nil {
+		return nil, fmt.Errorf("oggopus: building the multistream opus decoder for %d channels (mapping family %d, %d streams, %d coupled): %w",
+			channels, head.mappingFamily, head.streamCount, head.coupledCount, err)
+	}
+	return &opusMSFrameDecoder{
 		dec:      dec,
 		channels: channels,
 		buf:      make([]int16, maxFrameSamples48k*channels),

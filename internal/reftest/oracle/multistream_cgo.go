@@ -21,10 +21,6 @@ import (
 // multistream_shim.h and never edits the shared oracle files. Build flags and
 // include paths come from oracle_cgo.go.
 
-// oAppAudioMS mirrors OPUS_APPLICATION_AUDIO (the value also lives in
-// opusenc_cgo.go's constant block, kept here so this file stands alone).
-const oAppAudioMS = 2049 // OPUS_APPLICATION_AUDIO
-
 // maxMSPacketBytes bounds one encoded multistream packet. A multistream packet is
 // up to nb_streams sub-packets; at 8 channels / <=5 streams and normal bitrates
 // this is generous.
@@ -55,7 +51,7 @@ func MSSurroundEncodeSeq(family, channels, Fs, bitrate, frameSize int, pcm []int
 	var streams, coupled C.int
 
 	r := C.oracle_ms_surround_encode_seq(
-		C.int(family), C.int(channels), C.int(Fs), C.int(oAppAudioMS), C.int(bitrate),
+		C.int(family), C.int(channels), C.int(Fs), C.int(oAppAudio), C.int(bitrate),
 		C.int(frameSize), (*C.int16_t)(unsafe.Pointer(&pcm[0])), C.int(numFrames),
 		&streams, &coupled, (*C.uchar)(unsafe.Pointer(&mapping[0])),
 		(*C.uchar)(unsafe.Pointer(&packets[0])), (*C.int32_t)(unsafe.Pointer(&lens[0])),
