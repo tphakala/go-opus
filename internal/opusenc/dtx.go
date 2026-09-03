@@ -52,8 +52,9 @@ func celtMaxabs16(x []int16, n int) int32 {
 	// a mis-sized caller panicking deterministically rather than letting the
 	// two-index reslice widen silently into spare capacity (x[:n] bounds against
 	// cap, not len). One check per call replaces one per element; the arithmetic is
-	// untouched, so the result stays bit-identical. Mirrors the celt-package copy
-	// (internal/celt/celt_lpc.go) so the two stay identical.
+	// untouched, so the result stays bit-identical. Mirrors the celt-package scalar
+	// reference (internal/celt/maxabs_ref.go, celtMaxabs16Generic) so the two stay
+	// identical.
 	if n < 0 || n > len(x) {
 		panic("opusenc: celtMaxabs16: n out of range")
 	}
