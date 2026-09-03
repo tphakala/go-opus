@@ -71,6 +71,60 @@ static int oracle_ms_surround_encode_seq(
     return 0;
 }
 
+/* oracle_ms_surround_encode_seq_opts is oracle_ms_surround_encode_seq with extra
+ * encoder controls, so the differential test can force in-band FEC / LBRR, DTX, a
+ * bandwidth and a signal type. complexity, vbr, bitrate are always applied; use_fec
+ * and use_dtx toggle OPUS_SET_INBAND_FEC / OPUS_SET_DTX; packet_loss_perc sets the
+ * loss hint (only when > 0); bandwidth and signal_type set OPUS_SET_BANDWIDTH /
+ * OPUS_SET_SIGNAL when nonzero (0 means leave at OPUS_AUTO). Layout and packet
+ * outputs match oracle_ms_surround_encode_seq. */
+static int oracle_ms_surround_encode_seq_opts(
+    int family, int channels, int Fs, int application, int bitrate,
+    int complexity, int vbr, int use_fec, int packet_loss_perc, int use_dtx,
+    int bandwidth, int signal_type,
+    int frame_size, const int16_t *pcm_in, int num_frames,
+    int *streams, int *coupled, unsigned char *mapping,
+    unsigned char *packets, int32_t *packet_lens, int max_packet_bytes)
+{
+    int err = OPUS_OK;
+    int st_streams = 0, st_coupled = 0;
+    int i;
+    OpusMSEncoder *enc = opus_multistream_surround_encoder_create(
+        (opus_int32)Fs, channels, family, &st_streams, &st_coupled,
+        mapping, application, &err);
+    if (enc == NULL || err != OPUS_OK)
+        return err != OPUS_OK ? err : OPUS_INTERNAL_ERROR;
+
+    opus_multistream_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+    opus_multistream_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
+    opus_multistream_encoder_ctl(enc, OPUS_SET_VBR(vbr));
+    if (use_fec)
+        opus_multistream_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
+    if (packet_loss_perc > 0)
+        opus_multistream_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(packet_loss_perc));
+    if (use_dtx)
+        opus_multistream_encoder_ctl(enc, OPUS_SET_DTX(1));
+    if (bandwidth != 0)
+        opus_multistream_encoder_ctl(enc, OPUS_SET_BANDWIDTH(bandwidth));
+    if (signal_type != 0)
+        opus_multistream_encoder_ctl(enc, OPUS_SET_SIGNAL(signal_type));
+    *streams = st_streams;
+    *coupled = st_coupled;
+
+    for (i = 0; i < num_frames; i++) {
+        const int16_t *frame = pcm_in + (size_t)i * channels * frame_size;
+        int n = opus_multistream_encode(enc, frame, frame_size,
+            packets + (size_t)i * max_packet_bytes, max_packet_bytes);
+        if (n < 0) {
+            opus_multistream_encoder_destroy(enc);
+            return n;
+        }
+        packet_lens[i] = n;
+    }
+    opus_multistream_encoder_destroy(enc);
+    return 0;
+}
+
 /* oracle_ms_dec_create / _decode / _final_range / _destroy expose a stateful C
  * multistream decoder over a void* handle (avoids cgo incomplete-type friction).
  * The layout is explicit so the test can decode with a custom mapping. */

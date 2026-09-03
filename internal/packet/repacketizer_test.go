@@ -1,6 +1,7 @@
 package packet
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 )
@@ -296,6 +297,57 @@ func TestRepacketizerCatSelfDelimited(t *testing.T) {
 	}
 	if !framesEqual(p.Frames, [][]byte{{10}, {20, 21}, {30, 31, 32}}) {
 		t.Errorf("frames = %v", p.Frames)
+	}
+}
+
+// TestRepacketizerOutSelfDelimited exercises the exported OutSelfDelimited and the
+// multistream framing invariant it exists for: a self-delimited packet followed by
+// a normal packet parses as two packets, the first reporting how far it extends via
+// Consumed so the next stream resumes at data[Consumed:]. This is exactly how a
+// multistream payload concatenates each leading stream's sub-packet before the
+// final stream's plain Out.
+func TestRepacketizerOutSelfDelimited(t *testing.T) {
+	// Two distinct single-frame code 0 packets standing in for two streams.
+	streamA := []byte{0x00, 11, 22, 33}
+	streamB := []byte{0x00, 44, 55}
+
+	rpA := catAll(t, streamA)
+	sd := make([]byte, 64)
+	na, err := rpA.OutSelfDelimited(sd)
+	if err != nil {
+		t.Fatalf("OutSelfDelimited: %v", err)
+	}
+
+	// The self-delimited packet alone round-trips and reports its own extent.
+	pa, err := ParseSelfDelimited(sd[:na])
+	if err != nil {
+		t.Fatalf("ParseSelfDelimited: %v", err)
+	}
+	if !framesEqual(pa.Frames, [][]byte{{11, 22, 33}}) {
+		t.Errorf("stream A frames = %v", pa.Frames)
+	}
+	if pa.Consumed != na {
+		t.Errorf("stream A consumed = %d want %d", pa.Consumed, na)
+	}
+
+	// Concatenate the self-delimited leading stream with the final stream's plain
+	// packet, the shape of a two-stream multistream payload, and walk it the way
+	// the multistream decoder does: ParseSelfDelimited the first, resume at
+	// Consumed, Parse the rest.
+	ms := append(bytes.Clone(sd[:na]), streamB...)
+	first, err := ParseSelfDelimited(ms)
+	if err != nil {
+		t.Fatalf("ParseSelfDelimited(ms): %v", err)
+	}
+	if !framesEqual(first.Frames, [][]byte{{11, 22, 33}}) {
+		t.Errorf("multistream first frames = %v", first.Frames)
+	}
+	second, err := Parse(ms[first.Consumed:])
+	if err != nil {
+		t.Fatalf("Parse(ms tail): %v", err)
+	}
+	if !framesEqual(second.Frames, [][]byte{{44, 55}}) {
+		t.Errorf("multistream second frames = %v", second.Frames)
 	}
 }
 

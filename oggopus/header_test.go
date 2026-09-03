@@ -150,3 +150,56 @@ func TestParseOpusHeadFamily1(t *testing.T) {
 		t.Fatalf("family 1 fields wrong: %+v", h)
 	}
 }
+
+// TestOpusHeadMarshalRoundTripFamily1 pins that marshal emits the family-1 mapping
+// table exactly as parseOpusHead reads it back, so a parsed family-1 head
+// round-trips through marshal.
+func TestOpusHeadMarshalRoundTripFamily1(t *testing.T) {
+	want := opusHead{
+		version:         opusHeadVersion,
+		channels:        6,
+		preSkip:         312,
+		inputSampleRate: 48000,
+		outputGain:      -256,
+		mappingFamily:   1,
+		streamCount:     4,
+		coupledCount:    2,
+		channelMapping:  []byte{0, 4, 1, 2, 3, 5},
+	}
+	b := want.marshal()
+	if len(b) != opusHeadFamily0Len+2+int(want.channels) {
+		t.Fatalf("marshal length = %d, want %d", len(b), opusHeadFamily0Len+2+int(want.channels))
+	}
+	got, err := parseOpusHead(b)
+	if err != nil {
+		t.Fatalf("parseOpusHead: %v", err)
+	}
+	if got.mappingFamily != want.mappingFamily || got.streamCount != want.streamCount ||
+		got.coupledCount != want.coupledCount || got.channels != want.channels ||
+		!bytes.Equal(got.channelMapping, want.channelMapping) {
+		t.Fatalf("family-1 round-trip mismatch:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestParseOpusHeadFamily1Truncated rejects a family-1 header that carries the base
+// 19 bytes but is short of its declared mapping table, rather than reading out of
+// bounds.
+func TestParseOpusHeadFamily1Truncated(t *testing.T) {
+	// 19-byte family-1 head (channels=6) with the streamCount/coupledCount bytes but
+	// none of the 6 mapping bytes.
+	b := []byte{
+		'O', 'p', 'u', 's', 'H', 'e', 'a', 'd',
+		1,    // version
+		6,    // channels
+		0, 0, // pre-skip
+		0x80, 0xbb, 0, 0, // rate 48000
+		0, 0, // gain
+		1, // family 1
+		4, // stream count
+		2, // coupled count
+		// mapping table (6 bytes) omitted: truncated
+	}
+	if _, err := parseOpusHead(b); err == nil {
+		t.Fatal("parseOpusHead accepted a truncated family-1 mapping table; want an error")
+	}
+}

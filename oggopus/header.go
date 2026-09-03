@@ -38,10 +38,17 @@ type opusHead struct {
 	channelMapping []byte
 }
 
-// marshal serialises h as an OpusHead packet. v1 only emits family 0, so the
-// output is always opusHeadFamily0Len bytes.
+// marshal serialises h as an OpusHead packet. Family 0 (the only family the
+// encoder emits) is the fixed opusHeadFamily0Len bytes; a non-zero mapping family
+// additionally appends the mapping table (stream count, coupled count, and one
+// mapping byte per channel), the RFC 7845 section 5.1 layout parseOpusHead reads
+// back, so a parsed family-1 head round-trips through marshal.
 func (h opusHead) marshal() []byte {
-	b := make([]byte, opusHeadFamily0Len)
+	n := opusHeadFamily0Len
+	if h.mappingFamily != mappingFamily0 {
+		n += 2 + int(h.channels)
+	}
+	b := make([]byte, n)
 	copy(b, opusHeadMagic)
 	b[8] = h.version
 	b[9] = h.channels
@@ -49,6 +56,11 @@ func (h opusHead) marshal() []byte {
 	binary.LittleEndian.PutUint32(b[12:16], h.inputSampleRate)
 	binary.LittleEndian.PutUint16(b[16:18], uint16(h.outputGain))
 	b[18] = h.mappingFamily
+	if h.mappingFamily != mappingFamily0 {
+		b[19] = h.streamCount
+		b[20] = h.coupledCount
+		copy(b[21:21+int(h.channels)], h.channelMapping)
+	}
 	return b
 }
 
