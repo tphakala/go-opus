@@ -26,6 +26,10 @@ import (
 // this is generous.
 const maxMSPacketBytes = 8000
 
+// oSignalVoice mirrors OPUS_SIGNAL_VOICE; passed to OPUS_SET_SIGNAL to bias the
+// sub-encoders toward SILK / hybrid so the FEC leg emits real LBRR.
+const oSignalVoice = 3001 // OPUS_SIGNAL_VOICE
+
 // MSLayout is the channel layout a surround encoder derived for a channel count.
 type MSLayout struct {
 	Streams int
@@ -70,6 +74,69 @@ func MSSurroundEncodeSeq(family, channels, Fs, bitrate, frameSize int, pcm []int
 	return MSLayout{Streams: int(streams), Coupled: int(coupled), Mapping: mapping}, out, nil
 }
 
+// MSEncodeOpts carries the extra surround-encoder controls the differential legs
+// need (in-band FEC / LBRR, DTX, a forced bandwidth and signal type). The zero
+// value means auto bandwidth and signal, no FEC and no DTX; Bitrate, Complexity and
+// VBR are always applied.
+type MSEncodeOpts struct {
+	Bitrate       int
+	Complexity    int
+	VBR           int // 0 or 1
+	InbandFEC     bool
+	PacketLossPct int
+	DTX           bool
+	Bandwidth     int // 0 = auto, else an OPUS_BANDWIDTH_* value
+	SignalType    int // 0 = auto, else an OPUS_SIGNAL_* value
+}
+
+// MSSurroundEncodeSeqOpts is MSSurroundEncodeSeq with the extra encoder controls in
+// opts, so a test can force FEC / LBRR, DTX, bandwidth and signal type. The layout
+// and per-frame packets are returned the same way.
+func MSSurroundEncodeSeqOpts(family, channels, Fs, frameSize int, pcm []int16, numFrames int, opts MSEncodeOpts) (MSLayout, [][]byte, error) {
+	if numFrames <= 0 {
+		return MSLayout{}, nil, fmt.Errorf("numFrames must be positive, got %d", numFrames)
+	}
+	if len(pcm) < channels*frameSize*numFrames {
+		return MSLayout{}, nil, fmt.Errorf("pcm has %d samples, need %d", len(pcm), channels*frameSize*numFrames)
+	}
+
+	mapping := make([]byte, channels)
+	packets := make([]byte, numFrames*maxMSPacketBytes)
+	lens := make([]int32, numFrames)
+	var streams, coupled C.int
+
+	fec, dtx := 0, 0
+	if opts.InbandFEC {
+		fec = 1
+	}
+	if opts.DTX {
+		dtx = 1
+	}
+
+	r := C.oracle_ms_surround_encode_seq_opts(
+		C.int(family), C.int(channels), C.int(Fs), C.int(oAppAudio), C.int(opts.Bitrate),
+		C.int(opts.Complexity), C.int(opts.VBR), C.int(fec), C.int(opts.PacketLossPct), C.int(dtx),
+		C.int(opts.Bandwidth), C.int(opts.SignalType),
+		C.int(frameSize), (*C.int16_t)(unsafe.Pointer(&pcm[0])), C.int(numFrames),
+		&streams, &coupled, (*C.uchar)(unsafe.Pointer(&mapping[0])),
+		(*C.uchar)(unsafe.Pointer(&packets[0])), (*C.int32_t)(unsafe.Pointer(&lens[0])),
+		C.int(maxMSPacketBytes))
+	if r != 0 {
+		return MSLayout{}, nil, fmt.Errorf("oracle_ms_surround_encode_seq_opts: error %d", int(r))
+	}
+
+	out := make([][]byte, numFrames)
+	for i := 0; i < numFrames; i++ {
+		n := int(lens[i])
+		p := make([]byte, n)
+		if n > 0 {
+			copy(p, packets[i*maxMSPacketBytes:i*maxMSPacketBytes+n])
+		}
+		out[i] = p
+	}
+	return MSLayout{Streams: int(streams), Coupled: int(coupled), Mapping: mapping}, out, nil
+}
+
 // CMSDecoder is a stateful C multistream decoder for replaying a packet sequence
 // with an explicit layout. Destroy it when done.
 type CMSDecoder struct {
@@ -95,6 +162,18 @@ func NewCMSDecoder(Fs, channels, streams, coupled int, mapping []byte) (*CMSDeco
 // Decode decodes one packet (nil for PLC) into interleaved int16 pcm and returns
 // the per-channel sample count.
 func (d *CMSDecoder) Decode(pkt []byte, pcm []int16, frameSize int) (int, error) {
+	return d.decode(pkt, pcm, frameSize, 0)
+}
+
+// DecodeFEC reconstructs a lost frame from the in-band FEC carried by pkt (the next
+// received packet), mirroring opus_multistream_decode with decode_fec=1. Streams
+// without FEC for the lost duration fall back to concealment.
+func (d *CMSDecoder) DecodeFEC(pkt []byte, pcm []int16, frameSize int) (int, error) {
+	return d.decode(pkt, pcm, frameSize, 1)
+}
+
+// decode is the shared body of Decode and DecodeFEC.
+func (d *CMSDecoder) decode(pkt []byte, pcm []int16, frameSize, decodeFec int) (int, error) {
 	if d.st == nil {
 		return 0, fmt.Errorf("CMSDecoder.Decode: decoder is destroyed")
 	}
@@ -113,7 +192,7 @@ func (d *CMSDecoder) Decode(pkt []byte, pcm []int16, frameSize int) (int, error)
 		dl = C.int32_t(len(pkt))
 	}
 	n := C.oracle_ms_dec_decode(d.st, dp, dl, (*C.int16_t)(unsafe.Pointer(&pcm[0])),
-		C.int(frameSize), 0)
+		C.int(frameSize), C.int(decodeFec))
 	if int(n) < 0 {
 		return 0, fmt.Errorf("opus_multistream_decode: error %d", int(n))
 	}

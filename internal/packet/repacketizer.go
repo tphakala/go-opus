@@ -83,6 +83,18 @@ func (rp *Repacketizer) Out(data []byte) (int, error) {
 	return rp.outRangeImpl(0, rp.nbFrames, data, false, false)
 }
 
+// OutSelfDelimited writes all accumulated frames as a single SELF-DELIMITED packet
+// into data and returns the packet length, or ErrBufferTooSmall if data is too
+// short. Self-delimited framing appends the last frame's length explicitly; it is
+// the framing every stream but the last uses inside a multistream packet, so a
+// multistream packet is assembled by concatenating each leading stream's
+// OutSelfDelimited output with the final stream's plain Out. It is the assembly
+// counterpart to packet.ParseSelfDelimited and is used by the multistream encoder
+// path and its tests.
+func (rp *Repacketizer) OutSelfDelimited(data []byte) (int, error) {
+	return rp.outRangeImpl(0, rp.nbFrames, data, true, false)
+}
+
 // OutRange writes frames [begin, end) as a single packet into data and returns
 // the packet length. begin and end are frame indices in [0, GetNbFrames()].
 // Mirrors opus_repacketizer_out_range().
