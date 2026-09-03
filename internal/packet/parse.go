@@ -69,6 +69,23 @@ func ParseInto(data []byte, dst *Packet, frames *[MaxFrames][]byte) error {
 	return p.fillPacket(data, dst)
 }
 
+// ParseSelfDelimitedInto is ParseInto for a self-delimited packet: the framing
+// used for every stream but the last inside a multistream packet, where the
+// packet carries an explicit length for its last frame and may be shorter than
+// data. On success dst.Consumed reports how far into data this packet extends, so
+// the multistream decoder resumes the next stream from data[dst.Consumed:]. It
+// allocates nothing (dst and frames are caller-owned) and, like ParseInto, leaves
+// dst in an unspecified partial state on error and never panics.
+func ParseSelfDelimitedInto(data []byte, dst *Packet, frames *[MaxFrames][]byte) error {
+	p := parser{data: data}
+	if err := p.run(true); err != nil {
+		return err
+	}
+	dst.Frames = frames[:p.count]
+	clear(frames[p.count:])
+	return p.fillPacket(data, dst)
+}
+
 // parser transliterates opus_packet_parse_impl() from libopus src/opus.c. It
 // carries the running parse state so each frame-count code can be handled by a
 // small method instead of one deeply nested function.
