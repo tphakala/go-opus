@@ -99,6 +99,17 @@ func NewCMSDecoder(Fs, channels, streams, coupled int, mapping []byte) (*CMSDeco
 // Decode decodes one packet (nil for PLC) into interleaved int16 pcm and returns
 // the per-channel sample count.
 func (d *CMSDecoder) Decode(pkt []byte, pcm []int16, frameSize int) (int, error) {
+	if d.st == nil {
+		return 0, fmt.Errorf("CMSDecoder.Decode: decoder is destroyed")
+	}
+	// opus_multistream_decode writes up to frameSize*channels interleaved samples
+	// into pcm; guard the capacity here so a mis-sized caller gets an error instead
+	// of a Go panic on &pcm[0] (empty pcm) or the C decoder writing past the Go
+	// allocation.
+	if frameSize <= 0 || len(pcm) < frameSize*d.channels {
+		return 0, fmt.Errorf("CMSDecoder.Decode: pcm holds %d samples, need %d (frameSize=%d, channels=%d)",
+			len(pcm), frameSize*d.channels, frameSize, d.channels)
+	}
 	var dp *C.uchar
 	var dl C.int32_t
 	if len(pkt) > 0 {

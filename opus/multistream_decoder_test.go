@@ -71,6 +71,20 @@ func TestMultistreamDecoderValidLayouts(t *testing.T) {
 		if d.Channels() != tc.channels || d.Streams() != tc.streams {
 			t.Fatalf("ch%d: got channels=%d streams=%d", tc.channels, d.Channels(), d.Streams())
 		}
+		if d.CoupledStreams() != tc.coupled {
+			t.Fatalf("ch%d: got coupledStreams=%d want %d", tc.channels, d.CoupledStreams(), tc.coupled)
+		}
+		got := d.Mapping()
+		if !bytes.Equal(got, tc.mapping) {
+			t.Fatalf("ch%d: got mapping=%v want %v", tc.channels, got, tc.mapping)
+		}
+		// Mapping returns a defensive copy: mutating it must not affect the decoder.
+		if len(got) > 0 {
+			got[0] ^= 0xff
+			if bytes.Equal(d.Mapping(), got) {
+				t.Fatalf("ch%d: Mapping() is not a defensive copy", tc.channels)
+			}
+		}
 	}
 }
 

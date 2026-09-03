@@ -108,6 +108,16 @@ func (d *MultistreamDecoder) Channels() int { return d.channels }
 // Streams returns the number of Opus streams each packet carries.
 func (d *MultistreamDecoder) Streams() int { return d.dec.Streams() }
 
+// CoupledStreams returns the number of stereo (coupled) streams; the remaining
+// Streams()-CoupledStreams() streams are mono.
+func (d *MultistreamDecoder) CoupledStreams() int { return d.dec.CoupledStreams() }
+
+// Mapping returns a copy of the channel mapping table passed to
+// NewMultistreamDecoder: one entry per output channel, naming the decoded stream
+// channel that feeds it, or 255 for a muted channel. The returned slice is a
+// fresh copy, so mutating it does not affect the decoder.
+func (d *MultistreamDecoder) Mapping() []byte { return d.dec.Mapping() }
+
 // FinalRange returns the XOR of every stream's post-decode range-coder state
 // (OPUS_GET_FINAL_RANGE), the strong per-packet bit-exactness check against the
 // encoder's recorded value.
