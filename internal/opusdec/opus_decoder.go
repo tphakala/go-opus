@@ -697,27 +697,45 @@ func (st *OpusDecoder) opusDecodeFrame(data []byte, pcm []int16, frameSize, deco
 	return audiosize
 }
 
-// opusDecodeNative is opus_decode_native (opus_decoder.c:716-879) for the frozen
-// build (no self_delimited / soft_clip / DRED): packet parse, the FEC entry, and
-// the multi-frame loop. data is the packet (nil/empty for PLC), pcm the output,
-// frameSize the caller's per-channel buffer capacity, decodeFec the FEC request.
-// Returns the per-channel sample count or a negative Opus error code.
+// opusDecodeNative is the non-self-delimited entry to opus_decode_native
+// (opus_decoder.c:716-879), used by the single-stream public Decode. It delegates
+// to opusDecodeNativeImpl and drops the packet-offset the multistream decoder
+// needs. data is the packet (nil/empty for PLC), pcm the output, frameSize the
+// caller's per-channel buffer capacity, decodeFec the FEC request. Returns the
+// per-channel sample count or a negative Opus error code.
 func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, decodeFec int) int {
+	ret, _ := st.opusDecodeNativeImpl(data, pcm, frameSize, decodeFec, false)
+	return ret
+}
+
+// opusDecodeNativeImpl is opus_decode_native (opus_decoder.c:716-879) for the
+// frozen build (no soft_clip / DRED), shared by the single-stream decode
+// (selfDelimited=false) and the multistream stream decode (selfDelimited=true).
+// It returns the per-channel sample count (or a negative Opus error code) and, on
+// success, packetOffset: the number of input bytes the packet occupied, i.e.
+// opus_decode_native's *packet_offset. For a normal packet packetOffset equals
+// len(data); for a self-delimited packet it may be smaller, and the multistream
+// decoder resumes the next stream from data[packetOffset:]. packetOffset is 0 on
+// the PLC path and on every error return except the FEC PLC-fallback branch,
+// which returns the parsed length even though ret may be negative, mirroring how
+// C sets *packet_offset at parse time. The one caller that reads it advances data
+// and then returns on ret <= 0, so the offset on an error path is never consumed.
+func (st *OpusDecoder) opusDecodeNativeImpl(data []byte, pcm []int16, frameSize, decodeFec int, selfDelimited bool) (int, int) {
 	length := len(data)
 
 	if decodeFec < 0 || decodeFec > 1 {
-		return opusBadArg
+		return opusBadArg, 0
 	}
 	/* For FEC/PLC, frame_size has to be to have a multiple of 2.5 ms */
 	if (decodeFec != 0 || length == 0 || data == nil) && frameSize%(int(st.Fs)/400) != 0 {
-		return opusBadArg
+		return opusBadArg, 0
 	}
 	if length == 0 || data == nil {
 		pcmCount := 0
 		for {
 			ret := st.opusDecodeFrame(nil, pcm[pcmCount*st.channels:], frameSize-pcmCount, 0)
 			if ret < 0 {
-				return ret
+				return ret, 0
 			}
 			pcmCount += ret
 			if pcmCount >= frameSize {
@@ -726,9 +744,9 @@ func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, dec
 		}
 		/* celt_assert(pcm_count == frame_size) */
 		st.lastPacketDuration = pcmCount
-		return pcmCount
+		return pcmCount, 0
 	} else if length < 0 {
-		return opusBadArg
+		return opusBadArg, 0
 	}
 
 	packetMode := opusPacketGetMode(data[0])
@@ -737,13 +755,23 @@ func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, dec
 	packetStreamChannels := opusPacketGetNbChannels(data[0])
 
 	// Parse into decoder-held storage (no per-packet allocation). The recursive
-	// opusDecodeNative calls on the FEC/PLC path below always pass data==nil and
-	// return before reaching here, so they never clobber st.pkt while it is live.
-	if err := packet.ParseInto(data, &st.pkt, &st.pktFrames); err != nil {
-		return opusInvalidPacket
+	// opusDecodeNativeImpl calls on the FEC/PLC path below always pass data==nil
+	// and return before reaching here, so they never clobber st.pkt while it is
+	// live. A self-delimited packet may be shorter than data; ParseSelfDelimitedInto
+	// records how far it extends in st.pkt.Consumed (opus_decode_native's
+	// packet_offset).
+	var perr error
+	if selfDelimited {
+		perr = packet.ParseSelfDelimitedInto(data, &st.pkt, &st.pktFrames)
+	} else {
+		perr = packet.ParseInto(data, &st.pkt, &st.pktFrames)
+	}
+	if perr != nil {
+		return opusInvalidPacket, 0
 	}
 	p := &st.pkt
 	count := len(p.Frames)
+	packetOffset := p.Consumed
 	// The frame slices alias the caller's data buffer and are consumed entirely
 	// within this call; drop the references on the way out so an idle decoder
 	// does not pin the last packet's backing buffer until the next parse.
@@ -756,15 +784,16 @@ func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, dec
 	if decodeFec != 0 {
 		/* If no FEC can be present, run the PLC (recursive call) */
 		if frameSize < packetFrameSize || packetMode == modeCeltOnly || st.mode == modeCeltOnly {
-			return st.opusDecodeNative(nil, pcm, frameSize, 0)
+			ret, _ := st.opusDecodeNativeImpl(nil, pcm, frameSize, 0, false)
+			return ret, packetOffset
 		}
 		/* Otherwise, run the PLC on everything except the size for which we might have FEC */
 		durationCopy := st.lastPacketDuration
 		if frameSize-packetFrameSize != 0 {
-			ret := st.opusDecodeNative(nil, pcm, frameSize-packetFrameSize, 0)
+			ret, _ := st.opusDecodeNativeImpl(nil, pcm, frameSize-packetFrameSize, 0, false)
 			if ret < 0 {
 				st.lastPacketDuration = durationCopy
-				return ret
+				return ret, 0
 			}
 			/* celt_assert(ret==frame_size-packet_frame_size) */
 		}
@@ -776,14 +805,14 @@ func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, dec
 		ret := st.opusDecodeFrame(p.Frames[0], pcm[st.channels*(frameSize-packetFrameSize):],
 			packetFrameSize, 1)
 		if ret < 0 {
-			return ret
+			return ret, 0
 		}
 		st.lastPacketDuration = frameSize
-		return frameSize
+		return frameSize, packetOffset
 	}
 
 	if count*packetFrameSize > frameSize {
-		return opusBufferTooSmall
+		return opusBufferTooSmall, 0
 	}
 
 	/* Update the state as the last step to avoid updating it on an invalid packet */
@@ -796,13 +825,23 @@ func (st *OpusDecoder) opusDecodeNative(data []byte, pcm []int16, frameSize, dec
 	for i := 0; i < count; i++ {
 		ret := st.opusDecodeFrame(p.Frames[i], pcm[nbSamples*st.channels:], frameSize-nbSamples, 0)
 		if ret < 0 {
-			return ret
+			return ret, 0
 		}
 		/* celt_assert(ret==packet_frame_size) */
 		nbSamples += ret
 	}
 	st.lastPacketDuration = nbSamples
-	return nbSamples
+	return nbSamples, packetOffset
+}
+
+// decodeStream is opus_decode_native for one stream of a multistream packet. It
+// exposes the self_delimited + packet_offset path of opusDecodeNativeImpl to the
+// multistream decoder in this package. data is the remaining multistream payload
+// starting at this stream (empty for PLC); selfDelimited is true for every stream
+// but the last. It returns the per-channel sample count (or a negative Opus error
+// code) and the number of input bytes this stream's packet consumed.
+func (st *OpusDecoder) decodeStream(data []byte, pcm []int16, frameSize, decodeFec int, selfDelimited bool) (samples, consumed int) {
+	return st.opusDecodeNativeImpl(data, pcm, frameSize, decodeFec, selfDelimited)
 }
 
 // Decode is opus_decode (opus_decoder.c:887-894, the FIXED_POINT non-RES24 path):
