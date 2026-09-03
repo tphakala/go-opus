@@ -18,8 +18,9 @@ import (
 // through oggopus.Decoder, and checks the PCM equals what opus.MultistreamDecoder
 // produces from the same packets. Both paths share the same multistream decoder,
 // so any difference is in the container wiring: the family-1 OpusHead parse,
-// newFrameDecoder routing to the multistream decoder, and the pre-skip and
-// end-trim accounting.
+// newFrameDecoder routing to the multistream decoder, and the pre-skip drop.
+// End-trim is zero here (sourceSamples is the full post-pre-skip count); the
+// mapping-family-independent end-trim path is covered by TestContainerRoundTrip.
 func TestDecodeFamily1SurroundRoundTrip(t *testing.T) {
 	const (
 		frameSize = 960 // 20 ms at 48 kHz

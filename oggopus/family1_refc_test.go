@@ -18,9 +18,9 @@ import (
 // stream, decoded through oggopus.Decoder, and compared byte-for-byte against a
 // direct reference multistream decode of the same packets. This proves the whole
 // container decode path (family-1 OpusHead parse, newFrameDecoder routing to the
-// multistream decoder, the pre-skip drop and the end-trim) agrees with the
-// reference codec across real surround layouts, beyond the go-only wiring the
-// default round-trip test covers.
+// multistream decoder, and the pre-skip drop) agrees with the reference codec across
+// real surround layouts, beyond the go-only wiring the default round-trip test
+// covers. End-trim is zero here for the same reason as the go-only round-trip test.
 func TestDecodeFamily1SurroundAgainstLibopus(t *testing.T) {
 	const (
 		Fs        = 48000

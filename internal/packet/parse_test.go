@@ -456,3 +456,48 @@ func checkPacketInvariants(t *testing.T, data []byte, p *Packet, selfDelimited b
 		t.Fatalf("frames+padding = %d exceed input %d", total+len(p.Padding), len(data))
 	}
 }
+
+// TestParseIntoClearsFramesOnError pins the malformed-packet contract the
+// multistream decoder relies on: on a parse error, ParseInto and
+// ParseSelfDelimitedInto must nil dst.Frames and clear the caller's long-lived
+// frames array, so a bad packet does not leave it aliasing (and pinning) a buffer
+// from a previous successful parse. Reverting the run-error clear in parseInto turns
+// this red.
+func TestParseIntoClearsFramesOnError(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func([]byte, *Packet, *[MaxFrames][]byte) error
+	}{
+		{"ParseInto", ParseInto},
+		{"ParseSelfDelimitedInto", ParseSelfDelimitedInto},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var dst Packet
+			var frames [MaxFrames][]byte
+
+			// A good parse populates dst.Frames and at least one frames entry.
+			good := []byte{0x00, 1, 2, 3} // code 0, one frame
+			if err := tc.fn(good, &dst, &frames); err != nil {
+				t.Fatalf("%s(good): unexpected error %v", tc.name, err)
+			}
+			if len(dst.Frames) == 0 || frames[0] == nil {
+				t.Fatalf("%s(good): expected populated frames, got dst.Frames=%v frames[0]=%v", tc.name, dst.Frames, frames[0])
+			}
+
+			// A malformed packet (empty: run() rejects immediately) must clear both,
+			// so the long-lived frames array no longer aliases the good packet's bytes.
+			if err := tc.fn(nil, &dst, &frames); !errors.Is(err, ErrInvalidPacket) {
+				t.Fatalf("%s(bad): err = %v, want ErrInvalidPacket", tc.name, err)
+			}
+			if dst.Frames != nil {
+				t.Errorf("%s(bad): dst.Frames = %v, want nil after error", tc.name, dst.Frames)
+			}
+			for i, f := range frames {
+				if f != nil {
+					t.Errorf("%s(bad): frames[%d] = %v, want cleared after error", tc.name, i, f)
+				}
+			}
+		})
+	}
+}

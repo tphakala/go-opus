@@ -175,14 +175,14 @@ func (d *CMSDecoder) DecodeFEC(pkt []byte, pcm []int16, frameSize int) (int, err
 // decode is the shared body of Decode and DecodeFEC.
 func (d *CMSDecoder) decode(pkt []byte, pcm []int16, frameSize, decodeFec int) (int, error) {
 	if d.st == nil {
-		return 0, fmt.Errorf("CMSDecoder.Decode: decoder is destroyed")
+		return 0, fmt.Errorf("CMSDecoder: decoder is destroyed")
 	}
 	// opus_multistream_decode writes up to frameSize*channels interleaved samples
 	// into pcm; guard the capacity here so a mis-sized caller gets an error instead
 	// of a Go panic on &pcm[0] (empty pcm) or the C decoder writing past the Go
 	// allocation.
 	if frameSize <= 0 || len(pcm) < frameSize*d.channels {
-		return 0, fmt.Errorf("CMSDecoder.Decode: pcm holds %d samples, need %d (frameSize=%d, channels=%d)",
+		return 0, fmt.Errorf("CMSDecoder: pcm holds %d samples, need %d (frameSize=%d, channels=%d)",
 			len(pcm), frameSize*d.channels, frameSize, d.channels)
 	}
 	var dp *C.uchar

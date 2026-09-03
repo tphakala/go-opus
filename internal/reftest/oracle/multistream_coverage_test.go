@@ -17,9 +17,11 @@ import (
 // the REAL surround encoder to synthesize packets, then decodes them through BOTH
 // opus_multistream_decode and the pure-Go opusdec.OpusMSDecoder in lockstep.
 
-// decodeMSPairFEC is decodeMSPair for the FEC path: it reconstructs a "lost" frame
-// from pkt's in-band FEC through both decoders (decode_fec=1) and asserts the
-// recovered PCM and final range agree.
+// decodeMSPairFEC is decodeMSPair for the FEC path: it decodes pkt with decode_fec=1
+// through both decoders and asserts the recovered PCM and final range agree. Both are
+// given a 120 ms frameSize (msMaxPerCh), as the single-stream FEC test does, so each
+// reconstruction is concealment for the lead-in plus the tail LBRR frame; the
+// differential is valid because both decoders use the identical frameSize.
 func decodeMSPairFEC(t *testing.T, label string, cDec *CMSDecoder, gDec *opusdec.OpusMSDecoder, channels int, pkt []byte) {
 	t.Helper()
 	const sentinel int16 = 0x5aa5
@@ -86,13 +88,16 @@ func TestMultistreamExoticFrameSizesDifferential(t *testing.T) {
 }
 
 // TestMultistreamFECDifferential encodes a family-1 stereo stream (one coupled
-// stream) with in-band FEC forced into SILK, so real LBRR is emitted, then runs the
-// drop-and-recover sequence through the multistream decode path on both decoders:
-// decode packet 0, and for each later packet, DecodeFEC to reconstruct the previous
-// frame from its LBRR before decoding it normally. Both decoders must agree
-// bit-for-bit at every step. This is the real-LBRR coverage the pure-Go DecodeFEC
-// test cannot reach (the public encoder emits no FEC), so it only exercised the PLC
-// fallback.
+// stream) with in-band FEC enabled and the stream forced into SILK, which carries
+// LBRR, then runs the drop-and-recover sequence through the multistream decode path
+// on both decoders: decode packet 0, and for each later packet, DecodeFEC to
+// reconstruct the previous frame before decoding it normally. Both decoders must
+// agree bit-for-bit at every step. The pure-Go DecodeFEC test cannot enable FEC (the
+// public encoder emits none) and so only exercises the PLC fallback; this leg drives
+// the reference encoder with FEC on. The mode guard below confirms the packets are
+// LBRR-capable (SILK/hybrid); it does not independently prove LBRR bytes were
+// decoded, but the C-vs-Go parity is valid coverage of the FEC decode path either
+// way.
 //
 // The single coupled stream is deliberate: the surround rate allocation in
 // opus_multistream_surround_encoder drives per-stream mode and bandwidth from its
@@ -257,7 +262,8 @@ func TestMultistreamMixedMappingDifferential(t *testing.T) {
 }
 
 // TestMultistreamCorruptionParity mutates the FRAMING layer of a multi-stream
-// packet (truncations that break a stream's self-delimited length) and asserts the
+// packet (tail truncations that shorten it below the streams' declared frame
+// lengths) and asserts the
 // C and Go decoders agree on the outcome: both reject it, or both accept and produce
 // identical PCM. Framing corruption is used deliberately (not payload corruption),
 // because a corrupted compressed payload can leave the reference decoder returning
@@ -290,6 +296,7 @@ func TestMultistreamCorruptionParity(t *testing.T) {
 		t.Fatal("no corruption trials constructed")
 	}
 
+	rejected := 0
 	for ci, cp := range trials {
 		// Fresh decoders per trial: a rejected packet must not leave shared state that
 		// perturbs the next trial's parity.
@@ -313,6 +320,10 @@ func TestMultistreamCorruptionParity(t *testing.T) {
 			t.Fatalf("%s: decode-success parity mismatch: C ok=%v (%v), Go ok=%v (%v)",
 				label, cErr == nil, cErr, gErr == nil, gErr)
 		}
+		if cErr != nil {
+			// Parity held above, so both rejected: count it as a real reject-path hit.
+			rejected++
+		}
 		if cErr == nil && gErr == nil {
 			if cN != gN {
 				t.Fatalf("%s: sample-count mismatch C=%d Go=%d", label, cN, gN)
@@ -323,5 +334,12 @@ func TestMultistreamCorruptionParity(t *testing.T) {
 			}
 		}
 		cDec.Destroy()
+	}
+
+	// Positive control: at least one truncation must have exercised the reject path,
+	// otherwise the leg would silently degrade to "two decoders agree on valid input"
+	// if the packet shape ever changed.
+	if rejected == 0 {
+		t.Fatalf("no truncation trial was rejected; corruption leg exercised no error path")
 	}
 }

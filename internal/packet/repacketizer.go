@@ -89,8 +89,8 @@ func (rp *Repacketizer) Out(data []byte) (int, error) {
 // the framing every stream but the last uses inside a multistream packet, so a
 // multistream packet is assembled by concatenating each leading stream's
 // OutSelfDelimited output with the final stream's plain Out. It is the assembly
-// counterpart to packet.ParseSelfDelimited and is used by the multistream encoder
-// path and its tests.
+// counterpart to packet.ParseSelfDelimited, used to build multistream payloads in
+// the packet and oggopus tests.
 func (rp *Repacketizer) OutSelfDelimited(data []byte) (int, error) {
 	return rp.outRangeImpl(0, rp.nbFrames, data, true, false)
 }
