@@ -94,6 +94,26 @@ func TestNewFrameDecoderRejectsBadFamily1Header(t *testing.T) {
 	}
 }
 
+// TestNewFrameDecoderRejectsFamily1Over8Channels rejects a family-1 header that
+// declares more than the 8 channels RFC 7845 permits for family 1, even when the
+// stream layout and mapping are otherwise self-consistent.
+func TestNewFrameDecoderRejectsFamily1Over8Channels(t *testing.T) {
+	// 9 mono streams, mapping 0..8: a valid multistream layout on its own, but
+	// family 1 caps at 8 channels.
+	head := opusHead{
+		version:        opusHeadVersion,
+		channels:       9,
+		preSkip:        312,
+		mappingFamily:  1,
+		streamCount:    9,
+		coupledCount:   0,
+		channelMapping: []byte{0, 1, 2, 3, 4, 5, 6, 7, 8},
+	}
+	if _, err := newFrameDecoder(head); err == nil {
+		t.Fatal("newFrameDecoder accepted a 9-channel family-1 header; want an error (RFC 7845 caps family 1 at 8)")
+	}
+}
+
 // encodeMultistreamSeq encodes nFrames frames of a (streams, coupled, mapping)
 // family-1 layout, returning one multistream packet per frame. Each sub-stream is
 // encoded with the single-stream encoder from the API channels the mapping routes

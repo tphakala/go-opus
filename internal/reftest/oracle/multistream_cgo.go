@@ -42,8 +42,9 @@ type MSLayout struct {
 // of interleaved int16 PCM, returning the derived layout and one packet per frame.
 // pcm must hold channels*frameSize*numFrames samples.
 func MSSurroundEncodeSeq(family, channels, Fs, bitrate, frameSize int, pcm []int16, numFrames int) (MSLayout, [][]byte, error) {
-	if numFrames <= 0 {
-		return MSLayout{}, nil, fmt.Errorf("numFrames must be positive, got %d", numFrames)
+	if channels <= 0 || frameSize <= 0 || numFrames <= 0 {
+		return MSLayout{}, nil, fmt.Errorf("channels, frameSize and numFrames must be positive, got %d/%d/%d",
+			channels, frameSize, numFrames)
 	}
 	if len(pcm) < channels*frameSize*numFrames {
 		return MSLayout{}, nil, fmt.Errorf("pcm has %d samples, need %d", len(pcm), channels*frameSize*numFrames)
@@ -93,8 +94,9 @@ type MSEncodeOpts struct {
 // opts, so a test can force FEC / LBRR, DTX, bandwidth and signal type. The layout
 // and per-frame packets are returned the same way.
 func MSSurroundEncodeSeqOpts(family, channels, Fs, frameSize int, pcm []int16, numFrames int, opts MSEncodeOpts) (MSLayout, [][]byte, error) {
-	if numFrames <= 0 {
-		return MSLayout{}, nil, fmt.Errorf("numFrames must be positive, got %d", numFrames)
+	if channels <= 0 || frameSize <= 0 || numFrames <= 0 {
+		return MSLayout{}, nil, fmt.Errorf("channels, frameSize and numFrames must be positive, got %d/%d/%d",
+			channels, frameSize, numFrames)
 	}
 	if len(pcm) < channels*frameSize*numFrames {
 		return MSLayout{}, nil, fmt.Errorf("pcm has %d samples, need %d", len(pcm), channels*frameSize*numFrames)

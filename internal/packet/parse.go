@@ -52,10 +52,10 @@ func ParseSelfDelimited(data []byte) (*Packet, error) {
 // aliasing data (no copy), and dst.TOC / dst.Padding / dst.Consumed are filled.
 // It is the zero-allocation form of Parse for the steady-state decode path (the
 // multi-frame loop in internal/opusdec). frames must stay live for as long as the
-// caller reads dst.Frames. On error dst.Frames is nil and the frames array is
-// cleared (so a malformed packet pins no backing buffer); the other dst fields are
-// left in an unspecified partial state and must not be read. It returns
-// ErrInvalidPacket for any malformed input and never panics.
+// caller reads dst.Frames. On error dst.Frames and dst.Padding are nil and the
+// frames array is cleared (so a malformed packet pins no backing buffer); the other
+// dst fields are left in an unspecified partial state and must not be read. It
+// returns ErrInvalidPacket for any malformed input and never panics.
 func ParseInto(data []byte, dst *Packet, frames *[MaxFrames][]byte) error {
 	return parseInto(data, dst, frames, false)
 }
@@ -66,7 +66,7 @@ func ParseInto(data []byte, dst *Packet, frames *[MaxFrames][]byte) error {
 // data. On success dst.Consumed reports how far into data this packet extends, so
 // the multistream decoder resumes the next stream from data[dst.Consumed:]. It
 // allocates nothing (dst and frames are caller-owned) and, like ParseInto, nils
-// dst.Frames and clears the frames array on error and never panics.
+// dst.Frames and dst.Padding and clears the frames array on error and never panics.
 func ParseSelfDelimitedInto(data []byte, dst *Packet, frames *[MaxFrames][]byte) error {
 	return parseInto(data, dst, frames, true)
 }
@@ -74,14 +74,15 @@ func ParseSelfDelimitedInto(data []byte, dst *Packet, frames *[MaxFrames][]byte)
 // parseInto is the shared body of ParseInto and ParseSelfDelimitedInto, threading
 // the self-delimited flag exactly as the allocating parse() does. On any error (a
 // malformed header/frame table from run, or an out-of-bounds frame or padding from
-// fillPacket) it clears the whole frames array and nils dst.Frames, so the caller's
-// long-lived frames storage keeps aliasing neither this packet's buffer nor an
-// earlier packet's stale entries until the next successful parse.
+// fillPacket) it clears the whole frames array and nils dst.Frames and dst.Padding,
+// so the caller's long-lived storage keeps aliasing neither this packet's buffer nor
+// an earlier packet's stale frames or padding until the next successful parse.
 func parseInto(data []byte, dst *Packet, frames *[MaxFrames][]byte, selfDelimited bool) error {
 	p := parser{data: data}
 	if err := p.run(selfDelimited); err != nil {
 		clear(frames[:])
 		dst.Frames = nil
+		dst.Padding = nil
 		return err
 	}
 	dst.Frames = frames[:p.count]
@@ -93,6 +94,7 @@ func parseInto(data []byte, dst *Packet, frames *[MaxFrames][]byte, selfDelimite
 	if err := p.fillPacket(data, dst); err != nil {
 		clear(frames[:])
 		dst.Frames = nil
+		dst.Padding = nil
 		return err
 	}
 	return nil

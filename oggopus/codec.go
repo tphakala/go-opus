@@ -205,6 +205,13 @@ var newFrameDecoder = func(head opusHead) (frameDecoder, error) {
 			buf:      make([]int16, maxFrameSamples48k*channels),
 		}, nil
 	}
+	// RFC 7845 section 5.1.1 defines channel mapping family 1 for 1 to 8 channels; a
+	// family-1 header declaring more is malformed, so reject it rather than build a
+	// decoder for a layout the format does not permit. Other families that carry a
+	// mapping table are not bound by this limit.
+	if head.mappingFamily == 1 && channels > 8 {
+		return nil, fmt.Errorf("oggopus: channel mapping family 1 allows at most 8 channels, got %d (RFC 7845)", channels)
+	}
 	// A non-zero mapping family carries an OpusHead mapping table (stream count,
 	// coupled count, and one mapping byte per channel); route the N sub-streams
 	// through the multistream decoder. NewMultistreamDecoder validates the layout
