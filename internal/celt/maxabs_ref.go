@@ -66,7 +66,7 @@ func celtMaxabsResGeneric(x []int16, xOff, len_ int) int32 {
 	// two-index reslice widen silently into spare capacity (it bounds against cap,
 	// not len). One check per call replaces one per element; the arithmetic is
 	// untouched, so the result stays bit-identical.
-	if xOff < 0 || len_ < 0 || xOff+len_ > len(x) {
+	if xOff < 0 || len_ < 0 || xOff > len(x) || len_ > len(x)-xOff {
 		panic("celt: celtMaxabsRes: window exceeds operand length")
 	}
 	for _, v := range x[xOff : xOff+len_] {
@@ -91,7 +91,7 @@ func celtMaxabs32Generic(x []int32, xOff, len_ int) int32 {
 	// reslice widen silently into spare capacity (it bounds against cap, not len).
 	// len_==0 yields an empty window and the original zero result. The arithmetic is
 	// unchanged, so the result stays bit-identical.
-	if xOff < 0 || len_ < 0 || xOff+len_ > len(x) {
+	if xOff < 0 || len_ < 0 || xOff > len(x) || len_ > len(x)-xOff {
 		panic("celt: celtMaxabs32: window exceeds operand length")
 	}
 	for _, v := range x[xOff : xOff+len_] {

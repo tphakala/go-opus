@@ -3,6 +3,7 @@ package celt
 import (
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -258,6 +259,25 @@ func TestCeltMaxabsGuards(t *testing.T) {
 			t.Errorf("%s: got %d, want %d", name, got, want)
 		}
 	}
+	// mustPanicMsg additionally checks the panic came from the named window guard,
+	// not from a downstream slice-bounds panic. It pins the overflow-safe guard: a
+	// naive xOff+len_ > len(x) check wraps for a window whose xOff+len_ overflows int
+	// and slips through, deferring the panic to the slice expression with a different
+	// message; the guard here must catch it.
+	mustPanicMsg := func(name, want string, f func()) {
+		t.Helper()
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Errorf("%s: expected panic, got none", name)
+				return
+			}
+			if s, ok := r.(string); !ok || !strings.Contains(s, want) {
+				t.Errorf("%s: panic %v does not contain %q (guard bypassed?)", name, r, want)
+			}
+		}()
+		f()
+	}
 
 	mustPanic("maxabs32 len_<0", func() { celtMaxabs32(x32, 0, -1) })
 	mustPanic("maxabs32 xOff<0", func() { celtMaxabs32(x32, -1, 1) })
@@ -267,6 +287,10 @@ func TestCeltMaxabsGuards(t *testing.T) {
 	mustPanic("maxabsRes xOff<0", func() { celtMaxabsRes(x16, -1, 1) })
 	mustPanic("maxabsRes len_<0", func() { celtMaxabsRes(x16, 0, -1) })
 	mustPanic("maxabsRes xOff+len_>len", func() { celtMaxabsRes(x16, 5, 6) })
+
+	// A window whose xOff+len_ overflows int must still hit the named guard.
+	mustPanicMsg("maxabs32 len_ overflow", "celtMaxabs32", func() { celtMaxabs32(x32, 5, math.MaxInt) })
+	mustPanicMsg("maxabsRes len_ overflow", "celtMaxabsRes", func() { celtMaxabsRes(x16, 5, math.MaxInt) })
 
 	mustReturn("maxabs32 empty", celtMaxabs32(x32, 0, 0), 0)
 	mustReturn("maxabs32 boundary empty", celtMaxabs32(x32, len(x32), 0), 0)

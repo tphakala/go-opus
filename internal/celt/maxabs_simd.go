@@ -58,7 +58,7 @@ func celtMaxabs16(x []int16, len_ int) int32 {
 // exactly celtMaxabs16 over x[xOff:xOff+len_] in the frozen (non-ENABLE_RES24)
 // config. See celtMaxabsResGeneric for the mapping.
 func celtMaxabsRes(x []int16, xOff, len_ int) int32 {
-	if xOff < 0 || len_ < 0 || xOff+len_ > len(x) {
+	if xOff < 0 || len_ < 0 || xOff > len(x) || len_ > len(x)-xOff {
 		panic("celt: celtMaxabsRes: window exceeds operand length")
 	}
 	observeMaxabs16Dispatch() // dispatch-observation hook, compiled out unless -tags dispatchcount
@@ -80,7 +80,7 @@ func celtMaxabsRes(x []int16, xOff, len_ int) int32 {
 // (see i32.MaxAbs's own doc), but the clamp removes the caveat entirely and is what
 // TestCeltMaxabs32SIMDMatchesScalar pins over every full-range adversarial input.
 func celtMaxabs32(x []int32, xOff, len_ int) int32 {
-	if xOff < 0 || len_ < 0 || xOff+len_ > len(x) {
+	if xOff < 0 || len_ < 0 || xOff > len(x) || len_ > len(x)-xOff {
 		panic("celt: celtMaxabs32: window exceeds operand length")
 	}
 	observeMaxabs32Dispatch() // dispatch-observation hook, compiled out unless -tags dispatchcount
