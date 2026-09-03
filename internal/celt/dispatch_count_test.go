@@ -100,6 +100,36 @@ func TestBandGainDispatchObserved(t *testing.T) {
 	}
 }
 
+func TestMaxabsDispatchObserved(t *testing.T) {
+	// celtMaxabs32 / celtMaxabs16 / celtMaxabsRes have no in-tree fallback branch;
+	// they delegate to i32.MaxAbs / i16.MaxAbs past a window guard that panics
+	// rather than returning, so the counter only proves the dispatcher is exercised
+	// (not dead code), not that the vector kernel ran rather than a scalar
+	// reimplementation (see the file header on branch-free wrappers).
+	x32 := seqFillI32(480)
+	before32 := maxabs32Dispatches.Load()
+	_ = celtMaxabs32(x32, 0, len(x32))
+	if maxabs32Dispatches.Load() == before32 {
+		t.Fatal("celtMaxabs32 did not reach i32.MaxAbs")
+	}
+
+	x16 := make([]int16, 480)
+	for i := range x16 {
+		x16[i] = int16(i - 240)
+	}
+	before16 := maxabs16Dispatches.Load()
+	_ = celtMaxabs16(x16, len(x16))
+	if maxabs16Dispatches.Load() == before16 {
+		t.Fatal("celtMaxabs16 did not reach i16.MaxAbs")
+	}
+	// celtMaxabsRes shares the i16.MaxAbs counter; a windowed call must also move it.
+	midRes := maxabs16Dispatches.Load()
+	_ = celtMaxabsRes(x16, 16, 448)
+	if maxabs16Dispatches.Load() == midRes {
+		t.Fatal("celtMaxabsRes did not reach i16.MaxAbs")
+	}
+}
+
 func TestPitchDispatchObserved(t *testing.T) {
 	x := make([]int16, 480)
 	y := make([]int16, 480+3)

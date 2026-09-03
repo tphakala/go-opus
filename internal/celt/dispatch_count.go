@@ -21,6 +21,8 @@ var (
 	bandGainDispatches  atomic.Uint64
 	innerProdDispatches atomic.Uint64
 	xcorrDispatches     atomic.Uint64
+	maxabs32Dispatches  atomic.Uint64
+	maxabs16Dispatches  atomic.Uint64
 )
 
 func observeCombDispatch()      { combDispatches.Add(1) }
@@ -28,3 +30,5 @@ func observeHaar1Dispatch()     { haar1Dispatches.Add(1) }
 func observeBandGainDispatch()  { bandGainDispatches.Add(1) }
 func observeInnerProdDispatch() { innerProdDispatches.Add(1) }
 func observeXcorrDispatch()     { xcorrDispatches.Add(1) }
+func observeMaxabs32Dispatch()  { maxabs32Dispatches.Add(1) }
+func observeMaxabs16Dispatch()  { maxabs16Dispatches.Add(1) }
