@@ -92,8 +92,8 @@ planned behind the same scalar function signatures.
 
 ## Performance
 
-go-opus encodes at **1.6x to 2.0x the time of the equivalent C**, decodes at
-**1.4x to 1.5x**, and **allocates nothing per frame on either path**. That is
+go-opus encodes at **1.5x to 2.0x the time of the equivalent C**, decodes at
+**1.3x to 1.5x**, and **allocates nothing per frame on either path**. That is
 the honest headline. There is more on the table.
 
 The C it is measured against is the pinned v1.6.1 oracle built `FIXED_POINT +
@@ -104,18 +104,18 @@ bit-exact, the harness *asserts* that the two sides encode to byte-identical
 packets before it times either of them. If they were doing different work, the
 bytes would say so.
 
-darwin/arm64 (Apple M4 Pro), Go 1.26, 48 kHz, 64 kbps per channel, median of 5.
-"Before" is the pre-optimization baseline; the C column is the same C in both
-runs, so it doubles as a drift control.
+darwin/arm64 (Apple M4 Pro), Go 1.27, 48 kHz, 64 kbps per channel, median of 10.
+"Before" is the pre-optimization baseline from its own run; "Go now" and "C" are
+a fresh capture, so each "Go/C now" is a within-run Go/C pair.
 
 **Encode**
 
 | Frame | Go before | Go now | C | Go/C before | **Go/C now** | Allocs |
 | ----- | --------: | -----: | ------: | ---------: | -----------: | -----: |
-| mono 10 ms | 45.9 us | **31.0 us** | 15.3 us | 2.99x | **2.03x** | 94 → **0** |
-| mono 20 ms | 89.0 us | **59.6 us** | 30.4 us | 2.90x | **1.96x** | 151 → **0** |
-| stereo 10 ms | 108.5 us | **85.8 us** | 52.0 us | 2.02x | **1.65x** | 256 → **0** |
-| stereo 20 ms | 212.5 us | **173.7 us** | 101.8 us | 2.04x | **1.71x** | 501 → **0** |
+| mono 10 ms | 45.9 us | **31.2 us** | 15.9 us | 2.99x | **1.96x** | 94 → **0** |
+| mono 20 ms | 89.0 us | **57.9 us** | 30.0 us | 2.90x | **1.93x** | 151 → **0** |
+| stereo 10 ms | 108.5 us | **83.5 us** | 55.1 us | 2.02x | **1.52x** | 256 → **0** |
+| stereo 20 ms | 212.5 us | **169.7 us** | 113.3 us | 2.04x | **1.50x** | 501 → **0** |
 
 **Decode**
 
@@ -123,13 +123,13 @@ Pooling the decoder's per-frame scratch took decode from its old 1.5x-1.8x to:
 
 | Frame | Go | C | **Go/C** | Allocs |
 | ----- | --: | ------: | -------: | -----: |
-| mono 10 ms | 10.9 us | 7.5 us | **1.45x** | 32 → **0** |
-| mono 20 ms | 23.0 us | 16.9 us | **1.36x** | 46 → **0** |
-| stereo 10 ms | 21.7 us | 14.3 us | **1.52x** | 43 → **0** |
-| stereo 20 ms | 45.1 us | 31.8 us | **1.42x** | 70 → **0** |
+| mono 10 ms | 10.6 us | 7.6 us | **1.39x** | 32 → **0** |
+| mono 20 ms | 22.0 us | 16.9 us | **1.30x** | 46 → **0** |
+| stereo 10 ms | 21.6 us | 14.7 us | **1.47x** | 43 → **0** |
+| stereo 20 ms | 43.6 us | 31.3 us | **1.39x** | 70 → **0** |
 
-The encoder runs at roughly **115x realtime** for stereo 20 ms frames and the
-decoder at **440x**, so an hour of audio encodes in about half a minute.
+The encoder runs at roughly **118x realtime** for stereo 20 ms frames and the
+decoder at **460x**, so an hour of audio encodes in about half a minute.
 
 ### Where the gap comes from, and what closed it
 
