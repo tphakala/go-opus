@@ -38,6 +38,9 @@ type CPlainMSEncoder struct {
 // NewCPlainMSEncoder creates a libopus plain multistream encoder at Fs/channels
 // with the given (streams, coupled, mapping) layout and application.
 func NewCPlainMSEncoder(Fs, channels, streams, coupled int, mapping []byte, application int) (*CPlainMSEncoder, error) {
+	if channels < 1 || streams < 1 {
+		return nil, fmt.Errorf("channels and streams must be positive, got %d and %d", channels, streams)
+	}
 	if len(mapping) < channels {
 		return nil, fmt.Errorf("mapping has %d entries, need %d", len(mapping), channels)
 	}
@@ -84,6 +87,9 @@ func (e *CPlainMSEncoder) Encode(pcm []int16, frameSize, maxBytes int) ([]byte, 
 		return nil, fmt.Errorf("CPlainMSEncoder: pcm holds %d samples, need %d (frameSize=%d, channels=%d)",
 			len(pcm), frameSize*e.channels, frameSize, e.channels)
 	}
+	if maxBytes < 1 { // a zero/negative budget would panic at make or &buf[0]
+		return nil, fmt.Errorf("CPlainMSEncoder: maxBytes must be positive, got %d", maxBytes)
+	}
 	buf := make([]byte, maxBytes)
 	n := C.oracle_ms_plain_enc_encode(e.st, (*C.int16_t)(unsafe.Pointer(&pcm[0])),
 		C.int(frameSize), (*C.uchar)(unsafe.Pointer(&buf[0])), C.int32_t(maxBytes))
@@ -113,6 +119,9 @@ func (e *CPlainMSEncoder) Destroy() {
 // encoder at the given layout and bitrate, returning the per-stream bitrate array
 // (length streams) and the rate sum. It pins the Go rateAllocation in isolation.
 func RateAllocationC(Fs, channels, streams, coupled int, mapping []byte, application int, bitrateBps int32, frameSize int) ([]int32, int32, error) {
+	if channels < 1 || streams < 1 {
+		return nil, 0, fmt.Errorf("channels and streams must be positive, got %d and %d", channels, streams)
+	}
 	if len(mapping) < channels {
 		return nil, 0, fmt.Errorf("mapping has %d entries, need %d", len(mapping), channels)
 	}

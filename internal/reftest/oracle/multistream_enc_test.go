@@ -164,7 +164,7 @@ func applyGoCfg(t *testing.T, e *opusenc.OpusMSEncoder, c msEncCfg) {
 // applyCCfg applies cfg to the C oracle multistream encoder in the same order and
 // with the same values, so both encoders reach an identical configuration.
 func applyCCfg(e *CPlainMSEncoder, c msEncCfg) {
-	e.SetForceMode(1002) // MODE_CELT_ONLY
+	e.SetForceMode(oModeCeltOnly)
 	e.SetComplexity(c.complexity)
 	e.SetVBR(c.vbr)
 	e.SetVBRConstraint(c.vbrConstr)
