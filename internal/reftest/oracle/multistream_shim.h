@@ -31,6 +31,7 @@
 #include <string.h>
 #include "opus.h"
 #include "opus_multistream.h"
+#include "opus_private.h" /* MODE_CELT_ONLY, OPUS_SET_FORCE_MODE */
 
 /* oracle_ms_surround_encode_seq builds a fresh mapping_family surround encoder at
  * Fs/channels with the given application and bitrate, writes the derived layout
@@ -152,6 +153,74 @@ static uint32_t oracle_ms_dec_final_range(void *st)
 static void oracle_ms_dec_destroy(void *st)
 {
     opus_multistream_decoder_destroy((OpusMSDecoder *)st);
+}
+
+/* oracle_ms_plain_enc_* expose a stateful C multistream ENCODER over the PLAIN
+ * (family 0/255, MAPPING_TYPE_NONE) constructor opus_multistream_encoder_create,
+ * for the internal/opusenc multistream encoder (opus_multistream_encoder.go)
+ * differential test: encode frame by frame through BOTH the C and the Go plain MS
+ * encoders and assert byte-identical packets and equal final range. The layout is
+ * explicit (streams, coupled, mapping), exactly the Go NewMSEncoder arguments. Only
+ * the public opus_multistream API is used here, so there is one definition of each
+ * symbol; the static rate_allocation probe lives in the wm_ translation unit. */
+static void *oracle_ms_plain_enc_create(int Fs, int channels, int streams,
+    int coupled, const unsigned char *mapping, int application, int *err)
+{
+    return (void *)opus_multistream_encoder_create((opus_int32)Fs, channels,
+        streams, coupled, mapping, application, err);
+}
+
+static void oracle_ms_plain_enc_set_bitrate(void *st, int32_t v)
+{
+    opus_multistream_encoder_ctl((OpusMSEncoder *)st, OPUS_SET_BITRATE(v));
+}
+
+static void oracle_ms_plain_enc_set_vbr(void *st, int v)
+{
+    opus_multistream_encoder_ctl((OpusMSEncoder *)st, OPUS_SET_VBR(v));
+}
+
+static void oracle_ms_plain_enc_set_vbr_constraint(void *st, int v)
+{
+    opus_multistream_encoder_ctl((OpusMSEncoder *)st, OPUS_SET_VBR_CONSTRAINT(v));
+}
+
+static void oracle_ms_plain_enc_set_complexity(void *st, int v)
+{
+    opus_multistream_encoder_ctl((OpusMSEncoder *)st, OPUS_SET_COMPLEXITY(v));
+}
+
+static void oracle_ms_plain_enc_set_dtx(void *st, int v)
+{
+    opus_multistream_encoder_ctl((OpusMSEncoder *)st, OPUS_SET_DTX(v));
+}
+
+static void oracle_ms_plain_enc_set_force_mode(void *st, int v)
+{
+    opus_multistream_encoder_ctl((OpusMSEncoder *)st, OPUS_SET_FORCE_MODE(v));
+}
+
+static int oracle_ms_plain_enc_encode(void *st, const int16_t *pcm, int frame_size,
+    unsigned char *data, int32_t max_bytes)
+{
+    return opus_multistream_encode((OpusMSEncoder *)st, pcm, frame_size, data, max_bytes);
+}
+
+static uint32_t oracle_ms_plain_enc_final_range(void *st)
+{
+    opus_uint32 r = 0;
+    opus_multistream_encoder_ctl((OpusMSEncoder *)st, OPUS_GET_FINAL_RANGE(&r));
+    return (uint32_t)r;
+}
+
+static void oracle_ms_plain_enc_reset(void *st)
+{
+    opus_multistream_encoder_ctl((OpusMSEncoder *)st, OPUS_RESET_STATE);
+}
+
+static void oracle_ms_plain_enc_destroy(void *st)
+{
+    opus_multistream_encoder_destroy((OpusMSEncoder *)st);
 }
 
 #endif /* GOOPUS_MULTISTREAM_SHIM_H */
