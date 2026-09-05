@@ -54,6 +54,34 @@ byte-identical to libopus.
   limited this way: it handles all three modes, so go-opus decodes any Opus stream
   regardless of how it was encoded.
 
+## Audio quality
+
+go-opus tracks the reference libopus encoder closely. On real recordings the two
+are within measurement noise and both effectively transparent at 128 kbps;
+libopus keeps a small edge in raw SNR and in VBR file size.
+
+Quality is measured objectively, not by ear: real 48 kHz recordings are encoded,
+decoded, and scored against the original.
+
+- ViSQOL (MOS, 1-5, higher is better): predicted listening-test score; 4.5+ is
+  effectively transparent.
+- PEAQ (ITU-R BS.1387 ODG, 0 to -4, closer to 0 is better): audibility of
+  impairment; 0 imperceptible, -1 audible but not annoying, -2 slightly
+  annoying.
+- SNR and spectral distance (dB): raw fidelity. A high SNR alone does not
+  guarantee good perceived quality.
+
+Snapshot (2026-09-05), 128 kbps, decoded output scored against the source:
+
+| Clip              | go-opus ViSQOL / PEAQ | libopus ViSQOL / PEAQ |
+|-------------------|-----------------------|-----------------------|
+| nature soundscape | 4.62 / -0.01          | 4.63 / -0.01          |
+| pygmy owl         | 4.50 / -0.03          | 4.46 / -0.04          |
+
+Both encoders are transparent here and the differences sit below the audible
+threshold. This is a small directional sample, not a full benchmark; results
+vary with material and bitrate. A corpus-based regression gate is planned (#87).
+
 ## Approach
 
 go-opus is a faithful transliteration of libopus **v1.6.1**, kept honest by
