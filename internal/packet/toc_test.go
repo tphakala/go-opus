@@ -53,7 +53,7 @@ func TestParseTOCConfigTable(t *testing.T) {
 		// Sweep the stereo flag and all four frame-count codes for each config
 		// to prove those low bits do not perturb the config decoding.
 		for _, stereo := range []bool{false, true} {
-			for code := uint8(0); code < 4; code++ {
+			for code := range uint8(4) {
 				b := tc.config<<3 | code
 				if stereo {
 					b |= 0x4
