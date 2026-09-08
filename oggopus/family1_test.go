@@ -257,10 +257,7 @@ func genInterleavedPCM(n, channels int) []int16 {
 // firstDiffByte returns the index of the first differing byte, or the shorter
 // length when one is a prefix of the other.
 func firstDiffByte(a, b []byte) int {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
+	n := min(len(b), len(a))
 	for i := range n {
 		if a[i] != b[i] {
 			return i

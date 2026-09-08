@@ -173,14 +173,11 @@ func (cw *containerWriter) writePacket(pkt []byte, samples48k int) error {
 // end-of-stream flag. close is idempotent.
 func (cw *containerWriter) close(sourceSamples int64) error {
 	if cw.hasHeld {
-		finalGranule := cw.preSkip + sourceSamples
 		// Guard monotonicity: the final granule must not regress below the
 		// previous page's cumulative count. This never triggers for consistent
 		// inputs; it defends against a caller passing a sourceSamples smaller
 		// than the already-committed audio.
-		if finalGranule < cw.granule {
-			finalGranule = cw.granule
-		}
+		finalGranule := max(cw.preSkip+sourceSamples, cw.granule)
 		if err := cw.sw.writeAudioPacket(cw.heldPacket, finalGranule); err != nil {
 			return err
 		}

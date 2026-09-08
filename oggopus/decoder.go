@@ -200,10 +200,7 @@ func (d *Decoder) fill() (done bool, err error) {
 	}
 	// End-trim so the total delivered equals finalGranule - preSkip.
 	if d.limit >= 0 && d.delivered+int64(perChan) > d.limit {
-		keep := int(d.limit - d.delivered)
-		if keep < 0 {
-			keep = 0
-		}
+		keep := max(int(d.limit-d.delivered), 0)
 		samples = samples[:keep*d.info.Channels]
 		perChan = keep
 	}

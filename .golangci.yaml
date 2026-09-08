@@ -13,8 +13,11 @@
 #   - internal/reftest is a cgo differential harness (build tag refc); it is held
 #     to the idiomatic standard but exempted from a few cgo-hostile checks.
 #   - opus/, oggopus/, cmd/ are idiomatic Go at full strength.
-#   - modernize stays disabled: it panics on Go 1.26 + atomic types in
-#     golangci-lint v2 (known upstream bug), same as go-flac.
+#   - modernize runs on the idiomatic packages; inside the transliteration
+#     packages it joins the relaxed style linters, because its rangeint and
+#     loop rewrites fight diffability against the C. It stayed off until
+#     golangci-lint v2.13.2 on Go 1.27 fixed the v2 panic on atomic types
+#     (previously shared with go-flac).
 version: "2"
 output:
   sort-order:
@@ -38,6 +41,7 @@ linters:
     - iface
     - ineffassign
     - misspell
+    - modernize
     - nilerr
     - nilnil
     - predeclared
@@ -95,6 +99,7 @@ linters:
           - gocyclo
           - goconst
           - misspell
+          - modernize
           - prealloc
           - predeclared
           - revive
@@ -110,10 +115,13 @@ linters:
         linters:
           - staticcheck
         text: "(ST1003|ST1016|QF1|S1021)"
-      # cgo differential harness: cgo pointer patterns and C-mirroring names.
+      # cgo differential harness: cgo pointer patterns, C-mirroring names, and
+      # C-mirroring loops (modernize's rangeint rewrites fight diffability with
+      # the libopus reference the harness is checked against).
       - path: internal/reftest/
         linters:
           - gocritic
+          - modernize
           - revive
       # Test files: table-driven tests are naturally long and repetitive.
       - path: _test\.go
