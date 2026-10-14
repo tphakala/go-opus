@@ -22,4 +22,7 @@ var (
 	// ErrClosed reports an operation on an Encoder or Decoder after Close. Same
 	// value as oggopus.ErrClosed.
 	ErrClosed = oggopus.ErrClosed
+	// ErrNotOpus reports that the first packet of the first logical Ogg stream is
+	// not an OpusHead identification header. Same value as oggopus.ErrNotOpus.
+	ErrNotOpus = oggopus.ErrNotOpus
 )

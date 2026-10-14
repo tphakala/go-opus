@@ -52,7 +52,8 @@ type Decoder struct {
 
 // NewDecoder reads and validates the OpusHead and OpusTags headers from r and
 // returns a Decoder positioned at the first audio packet. Header parsing is
-// real; the PCM output path is stubbed at the codec seam.
+// real; the PCM output path is stubbed at the codec seam. A stream whose first
+// packet is not an OpusHead returns an error wrapping ErrNotOpus.
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	d := &Decoder{}
 	if err := d.init(r); err != nil {
@@ -69,7 +70,8 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 // The codec and container reader are cleared first, so a Reset that fails partway
 // (a nil source, or headers that will not parse) leaves a Decoder that reports its
 // uninitialized error on the next Read rather than one still bound to the previous
-// stream. The decoded-PCM scratch buffer keeps its capacity for reuse.
+// stream. The decoded-PCM scratch buffer keeps its capacity for reuse. A stream
+// whose first packet is not an OpusHead returns an error wrapping ErrNotOpus.
 func (d *Decoder) Reset(r io.Reader) error {
 	d.cr = nil
 	d.dec = nil

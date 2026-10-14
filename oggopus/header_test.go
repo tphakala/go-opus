@@ -2,6 +2,7 @@ package oggopus
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -85,20 +86,28 @@ func TestOpusTagsRoundTrip(t *testing.T) {
 func TestParseOpusHeadRejectsBad(t *testing.T) {
 	full := testHead(2, 312).marshal()
 	tests := []struct {
-		name string
-		in   []byte
+		name    string
+		in      []byte
+		notOpus bool
 	}{
-		{"empty", nil},
-		{"truncated", full[:10]},
-		{"bad magic", append([]byte("XpusHead"), full[8:]...)},
-		{"zero channels", func() []byte { b := bytes.Clone(full); b[9] = 0; return b }()},
-		{"family0 too many channels", func() []byte { b := bytes.Clone(full); b[9] = 3; return b }()},
-		{"bad major version", func() []byte { b := bytes.Clone(full); b[8] = 0x10; return b }()},
+		{"empty", nil, true},
+		{"truncated", full[:10], false},
+		{"bad magic", append([]byte("XpusHead"), full[8:]...), true},
+		{"zero channels", func() []byte { b := bytes.Clone(full); b[9] = 0; return b }(), false},
+		{"family0 too many channels", func() []byte { b := bytes.Clone(full); b[9] = 3; return b }(), false},
+		{"bad major version", func() []byte { b := bytes.Clone(full); b[8] = 0x10; return b }(), false},
+		{"vorbis identification header", vorbisIdentHeader(), true},
+		{"ogg flac mapping header", oggFLACMappingHeader(), true},
+		{"foreign 7 bytes", []byte("\x01vorbis"), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parseOpusHead(tc.in); err == nil {
+			_, err := parseOpusHead(tc.in)
+			if err == nil {
 				t.Fatalf("parseOpusHead(%s) = nil error, want error", tc.name)
+			}
+			if got := errors.Is(err, ErrNotOpus); got != tc.notOpus {
+				t.Fatalf("parseOpusHead(%s) errors.Is(ErrNotOpus) = %v, want %v (err %v)", tc.name, got, tc.notOpus, err)
 			}
 		})
 	}

@@ -43,7 +43,8 @@ type containerReader struct {
 }
 
 // newContainerReader reads and validates the OpusHead and OpusTags header
-// packets, leaving the reader positioned at the first audio packet.
+// packets, leaving the reader positioned at the first audio packet. A first
+// packet without the OpusHead magic returns an error wrapping ErrNotOpus.
 func newContainerReader(r io.Reader) (*containerReader, error) {
 	cr := &containerReader{br: bufio.NewReader(r), finalGranule: -1}
 	hp, err := cr.nextRawPacket()

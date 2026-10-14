@@ -186,6 +186,9 @@ func TestParityWithOggopus(t *testing.T) {
 	if !errors.Is(pcm.ErrClosed, oggopus.ErrClosed) {
 		t.Fatal("pcm.ErrClosed does not match oggopus.ErrClosed")
 	}
+	if !errors.Is(pcm.ErrNotOpus, oggopus.ErrNotOpus) {
+		t.Fatal("pcm.ErrNotOpus does not match oggopus.ErrNotOpus")
+	}
 	if pcm.OutputSampleRate != oggopus.OutputSampleRate {
 		t.Fatal("pcm.OutputSampleRate is not oggopus.OutputSampleRate")
 	}

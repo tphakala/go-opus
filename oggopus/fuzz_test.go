@@ -38,8 +38,19 @@ func FuzzReadPage(f *testing.F) {
 func FuzzParseOpusHead(f *testing.F) {
 	f.Add(testHead(1, 312).marshal())
 	f.Add([]byte("OpusHead"))
-	f.Fuzz(func(_ *testing.T, data []byte) {
-		_, _ = parseOpusHead(data)
+	f.Add([]byte("Opus"))
+	f.Add(vorbisIdentHeader())
+	f.Add(oggFLACMappingHeader())
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, err := parseOpusHead(data)
+		hasMagic := len(data) >= len(opusHeadMagic) && string(data[:len(opusHeadMagic)]) == opusHeadMagic
+		isNotOpus := errors.Is(err, ErrNotOpus)
+		if !hasMagic && !isNotOpus {
+			t.Fatalf("no OpusHead magic but err = %v does not wrap ErrNotOpus", err)
+		}
+		if hasMagic && isNotOpus {
+			t.Fatalf("OpusHead magic present but err = %v wraps ErrNotOpus", err)
+		}
 	})
 }
 

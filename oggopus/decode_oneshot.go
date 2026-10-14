@@ -35,6 +35,9 @@ var ErrDecodeLimit = errors.New("oggopus: decoded size limit exceeded")
 // output would exceed it. For a different ceiling use DecodeInterleavedLimit; for
 // a stream of unknown or unbounded length use NewDecoder, which streams the audio
 // in memory proportional to a single buffer.
+//
+// A stream whose first packet is not an OpusHead returns an error wrapping
+// ErrNotOpus.
 func DecodeInterleaved(r io.Reader) ([]byte, Info, error) {
 	return DecodeInterleavedLimit(r, DefaultMaxDecodedBytes)
 }
