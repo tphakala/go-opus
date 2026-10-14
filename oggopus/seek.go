@@ -27,6 +27,7 @@ type seekIndex struct {
 	audioStart int64 // absolute offset of the first audio page
 	linkEnd    int64 // absolute offset just past the last page of the first logical stream
 	length     int64 // samples per channel sequential decoding yields
+	eos        bool  // the last page of the first link carries the end-of-stream flag
 	err        error // a deterministic rejection of the stream, returned on every call
 }
 
@@ -36,6 +37,7 @@ type pageRef struct {
 	granule    int64
 	serial     uint32
 	hasGranule bool // granule >= 0 and at least one packet completes on the page
+	eos        bool // the page carries the end-of-stream flag
 }
 
 // pageScanner reads and parses pages from the raw source through one reused
@@ -91,6 +93,7 @@ func refOf(pg *page, off int64, n int) pageRef {
 		granule:    pg.granule,
 		serial:     pg.serial,
 		hasGranule: pg.granule >= 0 && pg.completesPacket(),
+		eos:        pg.flags&flagEOS != 0,
 	}
 }
 
@@ -224,6 +227,9 @@ func (s *pageScanner) findBackward(floor, end int64) (ref pageRef, ok bool, err 
 // for the bound stream; a source that grows afterwards is not re-measured. Length
 // trusts the stream's final granule position, so a malformed stream whose granule
 // exceeds what it can decode reports more than sequential decoding yields.
+// A stream whose last page has no end-of-stream flag is not end-trimmed by
+// sequential decoding, so for it Length is the decoded total (the last granule
+// plus the packets that complete after it) and SeekToSample does not trim either.
 func (d *Decoder) Length() (int64, error) {
 	if d.dec == nil {
 		return 0, errUninitialized
@@ -331,13 +337,18 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 
 // resetForSeek puts every piece of decode state in the condition of a decoder
 // that has just been bound to the stream and is about to decode from the packet
-// at sample index delivered, with preSkip samples still to drop.
+// at sample index delivered, with preSkip samples still to drop. The end-trim limit
+// is the stream's length when its last page ends the stream and unset otherwise,
+// as in sequential decoding.
 func (d *Decoder) resetForSeek(target int64, preSkip int, delivered int64) {
 	d.dec.reset()
 	d.preSkipLeft = preSkip
 	d.delivered = delivered
 	d.skipTo = target
-	d.limit = d.idx.length
+	d.limit = -1 // sequential decoding trims only after an end-of-stream page
+	if d.idx.eos {
+		d.limit = d.idx.length
+	}
 	d.pcm = d.pcm[:0]
 	d.atEnd = false
 	d.err = nil
@@ -392,7 +403,9 @@ func (d *Decoder) ensureIndex() error {
 // error is a property of the stream (and so worth remembering) rather than of the
 // I/O. A stream sequential decoding cannot be described by a length (audio on the
 // OpusTags page, an initial granule offset, a final granule below the pre-skip)
-// returns a cached error wrapping ErrSeekUnsupported.
+// returns a cached error wrapping ErrSeekUnsupported. When the last page of the
+// link lacks the end-of-stream flag, length is the decoded total instead of the
+// last granule position, and idx.eos is false.
 func (d *Decoder) buildIndex() (idx seekIndex, cache bool, err error) {
 	idx = d.idx
 	if d.tagsBad {
@@ -453,7 +466,9 @@ func (d *Decoder) buildIndex() (idx seekIndex, cache bool, err error) {
 	}
 
 	final := int64(-1)
-	for end := idx.linkEnd; end > idx.audioStart; {
+	var prev pageRef // the granule-bearing page before the final one
+	havePrev := false
+	for end, first := idx.linkEnd, true; end > idx.audioStart; {
 		p, ok, err := sc.findBackward(idx.audioStart, end)
 		if err != nil {
 			return idx, false, err
@@ -461,14 +476,38 @@ func (d *Decoder) buildIndex() (idx seekIndex, cache bool, err error) {
 		if !ok {
 			break
 		}
+		if first && p.serial == serial {
+			idx.eos = p.eos
+			first = false
+		}
 		if p.serial == serial && p.hasGranule {
-			final = p.granule
-			break
+			if final < 0 {
+				final = p.granule
+				if idx.eos {
+					break
+				}
+			} else {
+				prev, havePrev = p, true
+				break
+			}
 		}
 		end = p.off
 	}
 	if final < 0 {
 		return idx, false, nil
+	}
+	if !idx.eos {
+		// Without an end-of-stream page sequential decoding never trims, so the
+		// length is the decoded total: the last earlier granule plus the packets
+		// that complete after it. A granule that disagrees with the samples
+		// (a malformed stream) is not trusted.
+		total, c, err := d.decodedTotal(idx, prev, havePrev)
+		if err != nil {
+			return idx, c, err
+		}
+		idx.length = max(total-preSkip, 0)
+		cache, err = d.checkInitialGranule(idx)
+		return idx, cache, err
 	}
 	if final < preSkip {
 		// Sequential decoding does not trim when the end-trim limit is negative, so
@@ -478,6 +517,52 @@ func (d *Decoder) buildIndex() (idx seekIndex, cache bool, err error) {
 	idx.length = final - preSkip
 	cache, err = d.checkInitialGranule(idx)
 	return idx, cache, err
+}
+
+// decodedTotal returns the samples per channel at 48 kHz that decoding every packet
+// of the first link yields before the pre-skip is dropped. It starts from the
+// granule of prev (the last granule-bearing page before the final one), or from
+// zero at the first audio page when there is none, and adds the duration of every
+// packet that completes after that point. cache has the meaning it has for
+// buildIndex.
+func (d *Decoder) decodedTotal(idx seekIndex, prev pageRef, havePrev bool) (total int64, cache bool, err error) {
+	start := idx.audioStart
+	if havePrev {
+		start = prev.off
+	}
+	if _, err := d.rs.Seek(start, io.SeekStart); err != nil {
+		return 0, false, err
+	}
+	br := bufio.NewReader(io.LimitReader(d.rs, idx.linkEnd-start))
+	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1}
+	if havePrev {
+		total = prev.granule
+	}
+	for first := true; ; first = false {
+		pg, err := readPage(br)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return total, false, nil
+			}
+			return 0, false, err
+		}
+		if err := cr.processPage(pg); err != nil {
+			return 0, false, err
+		}
+		if first && havePrev {
+			// The packets completing on prev are already in its granule; the tail
+			// fragment it leaves in cr.partial belongs to the next page.
+			cr.queue = cr.queue[:0]
+			continue
+		}
+		for _, pkt := range cr.queue {
+			n, err := packetSamples48k(pkt)
+			if err != nil {
+				return 0, true, fmt.Errorf("%w: %w", ErrSeekUnsupported, err)
+			}
+			total += int64(n)
+		}
+	}
 }
 
 // checkInitialGranule rejects streams whose granule positions do not count from

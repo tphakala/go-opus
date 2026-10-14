@@ -1314,3 +1314,43 @@ func TestLengthReadsOnlyTheTail(t *testing.T) {
 		t.Fatalf("Length read %d bytes of a %d byte stream, want at most %d", src.bytesRead, len(stream), limit)
 	}
 }
+
+// TestSeekStreamWithoutEOSPage covers streams that end without an end-of-stream
+// page. Sequential decoding never trims them, so Length and seeking must report and
+// yield the decoded total, both when the last granule agrees with the samples (an
+// unclosed but well-formed stream) and when it is smaller (malformed but decodable).
+func TestSeekStreamWithoutEOSPage(t *testing.T) {
+	base := seekFixture(t, 2, 20, 3*48000+123, 96000)
+	for name, o := range map[string]*repageOpts{
+		"well-formed":        {maxSegs: 3, noEOS: true},
+		"well-formed 1 seg":  {maxSegs: 1, noEOS: true},
+		"short last granule": {maxSegs: 3, noEOS: true, trimFinal: 700},
+		"well-formed big":    {maxSegs: 255, noEOS: true, trimFinal: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stream := repage(t, base, o)
+			want := streamingDecode(t, stream)
+			total := int64(len(want) / 4)
+			d := seekDecoder(t, stream)
+			length, err := d.Length()
+			if err != nil || length != total {
+				t.Fatalf("Length = %d, %v; want the sequential count %d", length, err, total)
+			}
+			if _, err := d.SeekToSample(0); err != nil {
+				t.Fatal(err)
+			}
+			if got := readAll(t, d); !bytes.Equal(got, want) {
+				t.Fatalf("seek to 0 output differs from sequential decode: %d bytes, want %d", len(got), len(want))
+			}
+			for _, back := range []int64{1, 960, 5000, 60000} {
+				n := total - back
+				if _, err := d.SeekToSample(n); err != nil {
+					t.Fatal(err)
+				}
+				if rest := readAll(t, d); int64(len(rest)) != back*4 {
+					t.Fatalf("seek to Length-%d drained %d bytes, want %d", back, len(rest), back*4)
+				}
+			}
+		})
+	}
+}

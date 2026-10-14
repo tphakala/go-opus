@@ -21,6 +21,7 @@ type repageOpts struct {
 	trimFinal   int64  // subtract from the final granule, so whole trailing packets are end-trimmed away
 	bogusGran   int64  // granule written on non-final pages that complete no packet (RFC 3533 says -1)
 	firstNone   bool   // write granule -1 on the first audio page although packets complete on it
+	noEOS       bool   // end the stream without an end-of-stream page; the last granule is the cumulative total minus trimFinal
 }
 
 type pager struct {
@@ -120,6 +121,9 @@ func repage(t *testing.T, stream []byte, o *repageOpts) []byte {
 		g := cum
 		if i == len(pkts)-1 && !o.eosDangling {
 			g = finalG - o.trimFinal
+			if o.noEOS {
+				g = cum - o.trimFinal
+			}
 		}
 		if g >= 0 {
 			g += o.offset
@@ -140,7 +144,7 @@ func repage(t *testing.T, stream []byte, o *repageOpts) []byte {
 		p.body = append(p.body, make([]byte, maxSegmentLen)...)
 		p.flush(true)
 	} else {
-		p.flush(true)
+		p.flush(!o.noEOS)
 	}
 	out := p.out.Bytes()
 	out = append(out, o.chain...)
