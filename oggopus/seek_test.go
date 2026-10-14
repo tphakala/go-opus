@@ -1206,3 +1206,37 @@ func TestLengthRejectsGranuleBelowPreSkip(t *testing.T) {
 		t.Fatal("failed Length/SeekToSample changed the sequential output")
 	}
 }
+
+// TestScannerWindowEdges pins two window-edge cases: a page whose capture pattern
+// straddles the end of a full window is still found by findForward, including when
+// the bound is exactly the window length, and findBackward does not stop at the end
+// of a window left in the cache by an earlier call.
+func TestScannerWindowEdges(t *testing.T) {
+	page := smallPage(t, 7)
+	size := 4 * scanWindow
+
+	for _, at := range []int{scanWindow - 3, scanWindow - 2, scanWindow - 1} {
+		buf := make([]byte, size) // no fake captures: they would let the scan re-anchor near the edge
+		copy(buf[at:], page)
+		for _, bound := range []int64{int64(scanWindow), int64(size)} {
+			sc := &pageScanner{rs: bytes.NewReader(buf)}
+			got, ok, err := sc.findForward(0, bound)
+			if err != nil || !ok || got.off != int64(at) {
+				t.Fatalf("page at %d, bound %d: findForward = %+v, %v, %v", at, bound, got, ok, err)
+			}
+		}
+	}
+
+	// Warm the cache with a window that ends before the span findBackward reads.
+	buf := make([]byte, size)       // no fake captures: they would let the scan re-anchor near the edge
+	at := size - scanWindow/4 - 100 // past the end of the cached window [2.5W, 3.5W)
+	copy(buf[at:], page)
+	sc := &pageScanner{rs: bytes.NewReader(buf)}
+	if _, err := sc.window(int64(2*scanWindow + scanWindow/2)); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := sc.findBackward(0, int64(size))
+	if err != nil || !ok || got.off != int64(at) {
+		t.Fatalf("findBackward after a warm cache = %+v, %v, %v; want the page at %d", got, ok, err, at)
+	}
+}

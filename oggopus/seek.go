@@ -150,7 +150,13 @@ func (s *pageScanner) findForward(from, bound int64) (ref pageRef, ok bool, err 
 			i = c + 1
 		}
 		if !moved {
-			pos += int64(lim)
+			adv := lim
+			if lim == len(buf) && !s.eof {
+				// A capture pattern may start in the last bytes of a full window and
+				// end in the next one, so the next window starts a pattern early.
+				adv = max(lim-(len(capture)-1), 1)
+			}
+			pos += int64(adv)
 		}
 	}
 	return pageRef{}, false, nil
@@ -164,6 +170,13 @@ func (s *pageScanner) findBackward(floor, end int64) (ref pageRef, ok bool, err 
 		buf, err := s.window(start)
 		if err != nil {
 			return pageRef{}, false, err
+		}
+		if int64(len(buf)) < end-start && !s.eof {
+			// A cached window can end before end; read afresh from start.
+			s.valid = false
+			if buf, err = s.window(start); err != nil {
+				return pageRef{}, false, err
+			}
 		}
 		n := min(int64(len(buf)), end-start)
 		buf = buf[:n]
