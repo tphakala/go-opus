@@ -1256,7 +1256,16 @@ func TestSeekLeavesAtLeastPreRoll(t *testing.T) {
 	if _, err := d.Length(); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []int64{3840, 3841, 4800, 30000, 100001, 200000} {
+	// Targets on and next to the page grid: a target whose n-3840 equals a page's
+	// first new sample must land on that page, and one sample earlier on the page
+	// before it.
+	targets := make([]int64, 0, 12)
+	targets = append(targets, 3840, 3841, 4800, 30000, 100001, 200000)
+	for _, i := range []int{20, 100} {
+		pos := grans[i] - expectedPreSkip
+		targets = append(targets, pos+3840, pos+3840-1, pos+3840+1)
+	}
+	for _, n := range targets {
 		src.startSeek = nil
 		if _, err := d.SeekToSample(n); err != nil {
 			t.Fatal(err)
