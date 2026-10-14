@@ -205,7 +205,11 @@ func (s *pageScanner) findBackward(floor, end int64) (ref pageRef, ok bool, err 
 // yield over the whole first logical stream: the pre-skip is excluded and the
 // granule end-trim applied, so the result equals the sequential decode length
 // exactly. For a stream with several chained links only the first counts, as in
-// sequential decoding.
+// sequential decoding. Links are told apart by serial number: the first link ends
+// at the first page of a different serial. A chain whose links share one serial is
+// treated as one stream, so Length is derived from the final granule position of
+// its last link while Read stops at the first end-of-stream page, and seeks can
+// land in a later link.
 //
 // It needs the reader given to NewDecoder or Reset to be an io.ReadSeeker whose
 // Seek works, including Seek relative to the end; otherwise it returns an error
@@ -215,7 +219,7 @@ func (s *pageScanner) findBackward(floor, end int64) (ref pageRef, ok bool, err 
 // below the pre-skip. A zero-value Decoder returns an error.
 //
 // The first call finds the last page of the stream with a CRC-verified backward
-// scan, through the source directly: the read position is left where it was, so
+// scan, through the source directly: the read position is restored afterwards (a failed restore is latched as described for SeekToSample), so
 // Read output is the same whether or not Length was called. The result is cached
 // for the bound stream; a source that grows afterwards is not re-measured. Length
 // trusts the stream's final granule position, so a malformed stream whose granule
@@ -251,11 +255,11 @@ func (d *Decoder) Length() (int64, error) {
 // It needs a seekable source as described for Length and returns the same errors
 // for the same reasons; a negative sampleIndex returns ErrInvalidSeek. Those
 // errors, and any error from reading the stream's tail while indexing it, leave
-// the decoder unchanged. A failure after the source has been repositioned (an I/O
+// the decoder unchanged, except that a failure to restore the read position is latched like the failures below. A failure after the source has been repositioned (an I/O
 // error, a corrupt page or packet) is latched: Read and WriteTo return it until
 // the next successful SeekToSample or Reset. Seeks trust the stream's granule
 // positions; a malformed stream can land on the wrong sample. Only the first
-// logical stream is covered.
+// logical stream is covered, and links are told apart by serial as described for Length.
 func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 	if d.dec == nil {
 		return 0, errUninitialized

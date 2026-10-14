@@ -43,10 +43,10 @@ type Info struct {
 // # Length and seeking
 //
 // When the reader given to NewDecoder or Reset is an io.ReadSeeker whose Seek
-// works (the current position is queried once, when the Decoder is bound to the
-// source), Length reports the exact sample count and SeekToSample repositions the
+// works (the position is queried when the Decoder is bound to the source), Length reports the exact sample count and SeekToSample repositions the
 // decoder at a sample index. Both cover the first logical stream only, matching
-// sequential decoding, which stops at the first end-of-stream page. For any other
+// sequential decoding, which stops at the first end-of-stream page; links are told
+// apart by serial number, as described for Length. For any other
 // source they return ErrSeekUnsupported and the Decoder decodes sequentially as
 // before. Callers that never call them see no change.
 type Decoder struct {
