@@ -19,7 +19,8 @@ type Info = oggopus.Info
 
 // NewDecoder reads and validates the OpusHead and OpusTags headers from r and
 // returns a Decoder positioned at the first audio packet. It forwards to
-// oggopus.NewDecoder; a nil r returns an error.
+// oggopus.NewDecoder; a nil r returns an error, and a stream whose first packet
+// is not an OpusHead returns an error wrapping ErrNotOpus.
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	return oggopus.NewDecoder(r)
 }

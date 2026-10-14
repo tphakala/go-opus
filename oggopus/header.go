@@ -66,13 +66,15 @@ func (h opusHead) marshal() []byte {
 
 // parseOpusHead decodes an OpusHead packet. It validates the magic, a supported
 // major version, and channel/mapping consistency, and never reads out of bounds
-// on a truncated or hostile packet.
+// on a truncated or hostile packet. A packet that lacks the OpusHead magic
+// (including one shorter than the magic) returns an error wrapping ErrNotOpus;
+// every other failure is a plain error.
 func parseOpusHead(b []byte) (opusHead, error) {
+	if len(b) < len(opusHeadMagic) || string(b[:len(opusHeadMagic)]) != opusHeadMagic {
+		return opusHead{}, fmt.Errorf("%w: bad OpusHead magic %q", ErrNotOpus, b[:min(len(b), len(opusHeadMagic))])
+	}
 	if len(b) < opusHeadFamily0Len {
 		return opusHead{}, fmt.Errorf("oggopus: OpusHead too short (%d bytes)", len(b))
-	}
-	if string(b[0:8]) != opusHeadMagic {
-		return opusHead{}, fmt.Errorf("oggopus: bad OpusHead magic %q", b[0:8])
 	}
 	h := opusHead{
 		version:         b[8],

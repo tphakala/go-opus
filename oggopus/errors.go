@@ -9,6 +9,13 @@ var (
 	ErrInvalidConfig = errors.New("oggopus: invalid config")
 	// ErrClosed reports an operation on an Encoder or Decoder after Close.
 	ErrClosed = errors.New("oggopus: use of closed stream")
+	// ErrNotOpus reports that the first packet of the first logical stream is not
+	// an RFC 7845 OpusHead identification header, for example because the file is
+	// an Ogg Vorbis, Ogg FLAC, Speex or Theora stream. NewDecoder, Decoder.Reset,
+	// DecodeInterleaved and DecodeInterleavedLimit return it wrapped. It is not
+	// returned for input that is not Ogg at all, for an OpusHead that is present
+	// but corrupt, or for OpusTags errors.
+	ErrNotOpus = errors.New("oggopus: not an Ogg Opus stream")
 )
 
 // errUninitialized guards the zero value. NewEncoder, Reset and NewDecoder each
