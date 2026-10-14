@@ -40,6 +40,11 @@ type containerReader struct {
 	sawEOS       bool
 
 	pages []pageInfo
+
+	// consumed counts the bytes of every page read so far (header, segment table
+	// and body). After newContainerReader it is the length of the header pages, so
+	// the first audio page begins at the stream's starting offset plus consumed.
+	consumed int64
 }
 
 // newContainerReader reads and validates the OpusHead and OpusTags header
@@ -85,8 +90,9 @@ func (cr *containerReader) totalSamples() (int64, bool) {
 }
 
 // nextRawPacket returns the next reassembled packet from the logical stream,
-// reading pages as needed. It serves the OpusHead and OpusTags packets too;
-// newContainerReader consumes those before returning.
+// reading pages as needed and adding the size of each page read to consumed. It
+// serves the OpusHead and OpusTags packets too; newContainerReader consumes those
+// before returning.
 func (cr *containerReader) nextRawPacket() ([]byte, error) {
 	for {
 		if cr.qi < len(cr.queue) {
@@ -101,10 +107,24 @@ func (cr *containerReader) nextRawPacket() ([]byte, error) {
 		if err != nil {
 			return nil, err // io.EOF here means a clean end with no EOS page
 		}
+		cr.consumed += int64(pageHeaderFixedLen + len(pg.segTable) + len(pg.body))
 		if err := cr.processPage(pg); err != nil {
 			return nil, err
 		}
 	}
+}
+
+// repositionAt rebinds the reader to r, which must be positioned at a page
+// boundary, and drops all packet state so the next page read starts clean. It
+// keeps the parsed headers and serial. lastGranule is left for the caller to set
+// by processing the page it lands on.
+func (cr *containerReader) repositionAt(r io.Reader) {
+	cr.br.Reset(r)
+	cr.queue = cr.queue[:0]
+	cr.qi = 0
+	cr.partial = cr.partial[:0]
+	cr.sawEOS = false
+	cr.finalGranule = -1
 }
 
 // processPage reassembles the packets on one page into the queue and updates the

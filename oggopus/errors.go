@@ -16,6 +16,16 @@ var (
 	// returned for input that is not Ogg at all, for an OpusHead that is present
 	// but corrupt, or for OpusTags errors.
 	ErrNotOpus = errors.New("oggopus: not an Ogg Opus stream")
+	// ErrSeekUnsupported reports that Decoder.Length or Decoder.SeekToSample cannot
+	// work on this stream: the source given to NewDecoder or Reset is not a working
+	// io.Seeker, it cannot seek relative to its end, or the stream has a layout the
+	// granule arithmetic cannot describe (a nonzero initial granule position, audio
+	// data on the OpusTags page, or a final granule position below the pre-skip).
+	// The Decoder stays usable for sequential decoding.
+	ErrSeekUnsupported = errors.New("oggopus: seek unsupported")
+	// ErrInvalidSeek reports a SeekToSample call with a negative sample index. The
+	// Decoder position is unchanged.
+	ErrInvalidSeek = errors.New("oggopus: invalid seek (negative sample index)")
 )
 
 // errUninitialized guards the zero value. NewEncoder, Reset and NewDecoder each

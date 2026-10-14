@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"math"
 	"testing"
 
@@ -112,6 +113,50 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDecoderLengthAndSeek smoke-tests the aliased Length and SeekToSample over a
+// bytes.Reader, and that a non-seekable source returns the re-exported sentinel.
+func TestDecoderLengthAndSeek(t *testing.T) {
+	var buf bytes.Buffer
+	e, err := pcm.NewEncoder(&buf, validConfig())
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if _, err := e.Write(toneBytes(24000, testChannels, 440, testRate)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	want, _ := decodePCM(t, buf.Bytes())
+
+	d, err := pcm.NewDecoder(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	n, err := d.Length()
+	if err != nil || n != int64(len(want)/(2*testChannels)) {
+		t.Fatalf("Length = %d, %v; want %d", n, err, len(want)/(2*testChannels))
+	}
+	if got, err := d.SeekToSample(0); err != nil || got != 0 {
+		t.Fatalf("SeekToSample(0) = %d, %v", got, err)
+	}
+	var out bytes.Buffer
+	if _, err := d.WriteTo(&out); err != nil || !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("decode after SeekToSample(0): err %v, equal %v", err, bytes.Equal(out.Bytes(), want))
+	}
+
+	ns, err := pcm.NewDecoder(struct{ io.Reader }{bytes.NewReader(buf.Bytes())})
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	if _, err := ns.Length(); !errors.Is(err, pcm.ErrSeekUnsupported) {
+		t.Fatalf("Length on a non-seekable source = %v, want ErrSeekUnsupported", err)
+	}
+	if _, err := d.SeekToSample(-1); !errors.Is(err, pcm.ErrInvalidSeek) {
+		t.Fatalf("SeekToSample(-1) = %v, want ErrInvalidSeek", err)
+	}
+}
+
 // TestEncodeInterleavedOneShot exercises the one-shot helper and its input
 // validation.
 func TestEncodeInterleavedOneShot(t *testing.T) {
@@ -188,6 +233,12 @@ func TestParityWithOggopus(t *testing.T) {
 	}
 	if !errors.Is(pcm.ErrNotOpus, oggopus.ErrNotOpus) {
 		t.Fatal("pcm.ErrNotOpus does not match oggopus.ErrNotOpus")
+	}
+	if !errors.Is(pcm.ErrSeekUnsupported, oggopus.ErrSeekUnsupported) {
+		t.Fatal("pcm.ErrSeekUnsupported does not match oggopus.ErrSeekUnsupported")
+	}
+	if !errors.Is(pcm.ErrInvalidSeek, oggopus.ErrInvalidSeek) {
+		t.Fatal("pcm.ErrInvalidSeek does not match oggopus.ErrInvalidSeek")
 	}
 	if pcm.OutputSampleRate != oggopus.OutputSampleRate {
 		t.Fatal("pcm.OutputSampleRate is not oggopus.OutputSampleRate")
