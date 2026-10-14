@@ -30,4 +30,10 @@
 // (OutputSampleRate); label the decoded PCM with Info().OutputSampleRate, never
 // with Info().InputSampleRate, which is the informational original source rate
 // recorded in OpusHead.
+//
+// When the source is an io.ReadSeeker, Decoder.Length reports the exact number of
+// per-channel samples the stream decodes to and Decoder.SeekToSample repositions
+// the decoder at a sample index, the same shape as go-flac's and go-mp3's pcm
+// decoders. Other sources return ErrSeekUnsupported from both and decode
+// sequentially as before.
 package pcm

@@ -25,4 +25,10 @@ var (
 	// ErrNotOpus reports that the first packet of the first logical Ogg stream is
 	// not an OpusHead identification header. Same value as oggopus.ErrNotOpus.
 	ErrNotOpus = oggopus.ErrNotOpus
+	// ErrSeekUnsupported reports that Decoder.Length or Decoder.SeekToSample cannot
+	// work on this source or stream. Same value as oggopus.ErrSeekUnsupported.
+	ErrSeekUnsupported = oggopus.ErrSeekUnsupported
+	// ErrInvalidSeek reports a SeekToSample call with a negative sample index. Same
+	// value as oggopus.ErrInvalidSeek.
+	ErrInvalidSeek = oggopus.ErrInvalidSeek
 )

@@ -150,3 +150,50 @@ func drainPages(t *testing.T, r io.Reader) []*page {
 		pages = append(pages, pg)
 	}
 }
+
+// TestParsePage pins parsePage against readPage: it accepts the same pages, reports
+// the encoded length, and distinguishes a short buffer from a bad one.
+func TestParsePage(t *testing.T) {
+	good := goldenHeadPage()
+	pg, n, err := parsePage(append(bytes.Clone(good), 0xAA, 0xBB))
+	if err != nil || n != len(good) || pg.serial != 0x12345678 || pg.flags != flagBOS {
+		t.Fatalf("parsePage(golden + trailing) = %+v, %d, %v", pg, n, err)
+	}
+	ref, err := readPage(bufio.NewReader(bytes.NewReader(good)))
+	if err != nil || ref.granule != pg.granule || !bytes.Equal(ref.body, pg.body) || !bytes.Equal(ref.segTable, pg.segTable) {
+		t.Fatalf("readPage disagrees with parsePage: %+v, %v", ref, err)
+	}
+
+	mutate := func(f func(b []byte)) []byte {
+		b := bytes.Clone(good)
+		f(b)
+		return b
+	}
+	tests := []struct {
+		name string
+		in   []byte
+		want error // nil means any error other than errShortPage
+	}{
+		{"empty", nil, errShortPage},
+		{"short header", good[:20], errShortPage},
+		{"short segment table", mutate(func(b []byte) { b[26] = 200 })[:40], errShortPage},
+		{"short body", good[:len(good)-1], errShortPage},
+		{"bad capture", mutate(func(b []byte) { b[0] = 'X' }), errBadCapture},
+		{"bad version", mutate(func(b []byte) { b[4] = 1 }), nil},
+		{"empty segment table", mutate(func(b []byte) { b[26] = 0 }), nil},
+		{"bad crc", mutate(func(b []byte) { b[crcFieldOffset] ^= 0xff }), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := parsePage(tt.in)
+			switch {
+			case err == nil:
+				t.Fatal("parsePage accepted the input")
+			case tt.want != nil && !errors.Is(err, tt.want):
+				t.Fatalf("err = %v, want %v", err, tt.want)
+			case tt.want == nil && errors.Is(err, errShortPage):
+				t.Fatalf("err = %v, want a hard error, not errShortPage", err)
+			}
+		})
+	}
+}

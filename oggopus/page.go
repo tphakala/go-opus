@@ -102,7 +102,8 @@ var errBadCapture = errors.New("oggopus: missing OggS capture pattern")
 
 // readPage reads and validates one Ogg page from r. It returns io.EOF only when
 // r is exhausted at a clean page boundary (no bytes buffered for a new page);
-// a truncated page in progress returns io.ErrUnexpectedEOF. The CRC is verified.
+// a truncated page in progress returns io.ErrUnexpectedEOF. The CRC is verified
+// with pageCRC, the same check parsePage applies to an in-memory page.
 func readPage(r *bufio.Reader) (*page, error) {
 	var hdr [pageHeaderFixedLen]byte
 	// Peek before reading so a clean end-of-stream surfaces as io.EOF rather
@@ -143,15 +144,7 @@ func readPage(r *bufio.Reader) (*page, error) {
 	// Verify the CRC by recomputing over the assembled page with the CRC field
 	// zeroed, exactly as the writer produced it.
 	stored := binary.LittleEndian.Uint32(hdr[crcFieldOffset : crcFieldOffset+4])
-	var zeroed [pageHeaderFixedLen]byte
-	copy(zeroed[:], hdr[:])
-	for i := crcFieldOffset; i < crcFieldOffset+4; i++ {
-		zeroed[i] = 0
-	}
-	sum := crc32(0, zeroed[:])
-	sum = crc32(sum, segTable)
-	sum = crc32(sum, body)
-	if sum != stored {
+	if sum := pageCRC(hdr[:], segTable, body); sum != stored {
 		return nil, fmt.Errorf("oggopus: page CRC mismatch (stored %#08x, computed %#08x)", stored, sum)
 	}
 
@@ -163,6 +156,82 @@ func readPage(r *bufio.Reader) (*page, error) {
 		segTable: segTable,
 		body:     body,
 	}, nil
+}
+
+// pageCRC computes the Ogg CRC of a page from its 27-byte fixed header (whose CRC
+// field may hold any value; it is treated as zero), segment table and body.
+func pageCRC(hdr, segTable, body []byte) uint32 {
+	var zeroed [pageHeaderFixedLen]byte
+	copy(zeroed[:], hdr[:pageHeaderFixedLen])
+	for i := crcFieldOffset; i < crcFieldOffset+4; i++ {
+		zeroed[i] = 0
+	}
+	sum := crc32(0, zeroed[:])
+	sum = crc32(sum, segTable)
+	return crc32(sum, body)
+}
+
+// errShortPage reports that the buffer given to parsePage ends before the page
+// does, so the caller may retry with more bytes.
+var errShortPage = errors.New("oggopus: buffer ends inside a page")
+
+// parsePage parses and CRC-verifies the page that begins at b[0], returning it and
+// its total encoded length. A buffer that ends before the page does returns
+// errShortPage; a buffer that does not begin with a valid page returns another
+// error. It accepts exactly the pages readPage accepts. The returned page's
+// segTable and body alias b.
+func parsePage(b []byte) (*page, int, error) {
+	if len(b) < pageHeaderFixedLen {
+		return nil, 0, errShortPage
+	}
+	if string(b[0:4]) != capturePattern {
+		return nil, 0, errBadCapture
+	}
+	if b[4] != pageVersion {
+		return nil, 0, fmt.Errorf("oggopus: unsupported page version %d", b[4])
+	}
+	segCount := int(b[26])
+	if segCount == 0 {
+		return nil, 0, errors.New("oggopus: page has empty segment table")
+	}
+	hdrLen := pageHeaderFixedLen + segCount
+	if len(b) < hdrLen {
+		return nil, 0, errShortPage
+	}
+	segTable := b[pageHeaderFixedLen:hdrLen]
+	bodyLen := 0
+	for _, l := range segTable {
+		bodyLen += int(l)
+	}
+	total := hdrLen + bodyLen
+	if len(b) < total {
+		return nil, 0, errShortPage
+	}
+	body := b[hdrLen:total]
+	stored := binary.LittleEndian.Uint32(b[crcFieldOffset : crcFieldOffset+4])
+	if sum := pageCRC(b[:pageHeaderFixedLen], segTable, body); sum != stored {
+		return nil, 0, fmt.Errorf("oggopus: page CRC mismatch (stored %#08x, computed %#08x)", stored, sum)
+	}
+	return &page{
+		flags:    headerType(b[5]),
+		granule:  int64(binary.LittleEndian.Uint64(b[6:14])),
+		serial:   binary.LittleEndian.Uint32(b[14:18]),
+		sequence: binary.LittleEndian.Uint32(b[18:22]),
+		segTable: segTable,
+		body:     body,
+	}, total, nil
+}
+
+// completesPacket reports whether any packet ends on the page, that is, whether
+// some lacing value is below 255. Only such a page carries a meaningful granule
+// position (RFC 7845 section 4).
+func (p *page) completesPacket() bool {
+	for _, l := range p.segTable {
+		if l < maxSegmentLen {
+			return true
+		}
+	}
+	return false
 }
 
 // unexpectedEOF maps a mid-structure io.EOF to io.ErrUnexpectedEOF so a

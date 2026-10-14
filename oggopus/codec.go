@@ -41,6 +41,10 @@ type frameDecoder interface {
 	// (channels interleaved). The returned PCM aliases an internal buffer and
 	// stays valid only until the next decodeFrame call; Decoder.fill copies it.
 	decodeFrame(packet []byte) (pcm []int16, err error)
+	// reset returns the decoder to its initial state, as if freshly built, so a
+	// seek decodes from a new position without cross-packet state left over from
+	// the previous one.
+	reset()
 	// close releases codec resources.
 	close()
 }
@@ -151,6 +155,9 @@ func (d *opusFrameDecoder) decodeFrame(packet []byte) ([]int16, error) {
 	return d.buf[:n*d.channels], nil
 }
 
+// reset clears the cross-packet decoder state; see opus.Decoder.Reset.
+func (d *opusFrameDecoder) reset() { d.dec.Reset() }
+
 // close releases codec resources; see opusFrameEncoder.close.
 func (d *opusFrameDecoder) close() {}
 
@@ -175,6 +182,9 @@ func (d *opusMSFrameDecoder) decodeFrame(packet []byte) ([]int16, error) {
 	}
 	return d.buf[:n*d.channels], nil
 }
+
+// reset clears the cross-packet decoder state; see opus.MultistreamDecoder.Reset.
+func (d *opusMSFrameDecoder) reset() { d.dec.Reset() }
 
 // close releases codec resources; see opusFrameEncoder.close.
 func (d *opusMSFrameDecoder) close() {}
@@ -228,4 +238,16 @@ var newFrameDecoder = func(head opusHead) (frameDecoder, error) {
 		channels: channels,
 		buf:      make([]int16, maxFrameSamples48k*channels),
 	}, nil
+}
+
+// packetSamples48k reports how many samples per channel at 48 kHz the Opus packet
+// pkt decodes to, from its TOC byte alone. For a multistream packet it reads the
+// first sub-packet, whose duration is shared by every sub-stream. The container
+// uses it to check a stream's first granule without decoding.
+func packetSamples48k(pkt []byte) (int, error) {
+	n, err := opus.PacketDuration(pkt)
+	if err != nil {
+		return 0, fmt.Errorf("oggopus: reading a packet duration: %w", err)
+	}
+	return n, nil
 }

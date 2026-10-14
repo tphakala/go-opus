@@ -265,6 +265,8 @@ input, prints both caveats, and skips any comparator that is not installed.
   correct even on a non-seekable sink. The writer's pre-skip and end trim are
   checked by decoding an impulse back to the exact sample it went in at, and the
   output is validated against ffmpeg rather than only against our own reader.
+  The decoder reports its exact length and seeks to a sample index when the
+  source is an `io.ReadSeeker`.
 - `pcm`: a thin facade over `oggopus` that presents the codec under the uniform
   `<module>/pcm` import path, matching
   [go-flac](https://github.com/tphakala/go-flac)'s and
