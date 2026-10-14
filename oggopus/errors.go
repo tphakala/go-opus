@@ -19,9 +19,9 @@ var (
 	// ErrSeekUnsupported reports that Decoder.Length or Decoder.SeekToSample cannot
 	// work on this stream: the source given to NewDecoder or Reset is not a working
 	// io.Seeker, it cannot seek relative to its end, or the stream has a layout the
-	// granule arithmetic cannot describe (a nonzero initial granule position, or
-	// audio data on the OpusTags page). The Decoder stays usable for sequential
-	// decoding.
+	// granule arithmetic cannot describe (a nonzero initial granule position, audio
+	// data on the OpusTags page, or a final granule position below the pre-skip).
+	// The Decoder stays usable for sequential decoding.
 	ErrSeekUnsupported = errors.New("oggopus: seek unsupported")
 	// ErrInvalidSeek reports a SeekToSample call with a negative sample index. The
 	// Decoder position is unchanged.

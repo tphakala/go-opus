@@ -198,7 +198,8 @@ func (s *pageScanner) findBackward(floor, end int64) (ref pageRef, ok bool, err 
 // Seek works, including Seek relative to the end; otherwise it returns an error
 // wrapping ErrSeekUnsupported. It also returns ErrSeekUnsupported for a stream
 // whose first granule position is nonzero (RFC 7845 section 4.5) and for one with
-// audio data on the OpusTags page. A zero-value Decoder returns an error.
+// audio data on the OpusTags page, and for one whose final granule position is
+// below the pre-skip. A zero-value Decoder returns an error.
 //
 // The first call finds the last page of the stream with a CRC-verified backward
 // scan, through the source directly: the read position is left where it was, so
@@ -372,7 +373,9 @@ func (d *Decoder) ensureIndex() error {
 
 // buildIndex measures the first logical stream. cache reports whether a returned
 // error is a property of the stream (and so worth remembering) rather than of the
-// I/O.
+// I/O. A stream sequential decoding cannot be described by a length (audio on the
+// OpusTags page, an initial granule offset, a final granule below the pre-skip)
+// returns a cached error wrapping ErrSeekUnsupported.
 func (d *Decoder) buildIndex() (idx seekIndex, cache bool, err error) {
 	idx = d.idx
 	if d.tagsBad {
@@ -450,7 +453,12 @@ func (d *Decoder) buildIndex() (idx seekIndex, cache bool, err error) {
 	if final < 0 {
 		return idx, false, nil
 	}
-	idx.length = max(final-preSkip, 0)
+	if final < preSkip {
+		// Sequential decoding does not trim when the end-trim limit is negative, so
+		// no length can describe what it yields for this stream.
+		return idx, true, fmt.Errorf("%w: final granule position %d is below the pre-skip %d", ErrSeekUnsupported, final, preSkip)
+	}
+	idx.length = final - preSkip
 	cache, err = d.checkInitialGranule(idx)
 	return idx, cache, err
 }

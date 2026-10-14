@@ -1181,3 +1181,28 @@ func TestPacketSamples48kRejectsEmptyPacket(t *testing.T) {
 		t.Fatalf("packetSamples48k(20 ms CELT) = %d, %v; want 960", n, err)
 	}
 }
+
+// TestLengthRejectsGranuleBelowPreSkip pins that a final granule below the pre-skip
+// is refused: sequential decoding keeps every decoded sample of such a stream (a
+// negative end-trim limit never trims), so no Length can match it.
+func TestLengthRejectsGranuleBelowPreSkip(t *testing.T) {
+	base := seekFixture(t, 1, 20, 4800, 64000)
+	cr, _ := readContainer(t, bytes.NewReader(base))
+	stream := repage(t, base, &repageOpts{maxSegs: 255, trimFinal: cr.finalGranule - 200})
+	want := streamingDecode(t, stream)
+	if len(want) == 0 {
+		t.Fatal("sequential decoding yields nothing; the fixture would not show the mismatch")
+	}
+	d := seekDecoder(t, stream)
+	for range 2 {
+		if _, err := d.Length(); !errors.Is(err, ErrSeekUnsupported) {
+			t.Fatalf("Length err = %v, want ErrSeekUnsupported", err)
+		}
+		if _, err := d.SeekToSample(0); !errors.Is(err, ErrSeekUnsupported) {
+			t.Fatalf("SeekToSample err = %v, want ErrSeekUnsupported", err)
+		}
+	}
+	if got := readAll(t, d); !bytes.Equal(got, want) {
+		t.Fatal("failed Length/SeekToSample changed the sequential output")
+	}
+}
