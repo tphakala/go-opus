@@ -199,6 +199,9 @@ type flakySource struct {
 	failAll  bool
 	seeks    int
 	failSeek int // fail the Nth Seek (1-based) overall; 0 disables
+
+	bytesRead int     // bytes returned by Read
+	startSeek []int64 // offsets of every Seek(off, io.SeekStart)
 }
 
 var errInjected = errors.New("injected I/O failure")
@@ -223,11 +226,16 @@ func (f *flakySource) Read(p []byte) (int, error) {
 	if err := f.tick(); err != nil {
 		return 0, err
 	}
-	return f.r.Read(p)
+	n, err := f.r.Read(p)
+	f.bytesRead += n
+	return n, err
 }
 
 func (f *flakySource) Seek(off int64, whence int) (int64, error) {
 	f.seeks++
+	if whence == io.SeekStart {
+		f.startSeek = append(f.startSeek, off)
+	}
 	if f.failAll || (f.failEnd && whence == io.SeekEnd) || (f.failSeek != 0 && f.seeks == f.failSeek) {
 		return 0, errInjected
 	}

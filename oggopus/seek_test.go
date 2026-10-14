@@ -1240,3 +1240,68 @@ func TestScannerWindowEdges(t *testing.T) {
 		t.Fatalf("findBackward after a warm cache = %+v, %v, %v; want the page at %d", got, ok, err, at)
 	}
 }
+
+// TestSeekLeavesAtLeastPreRoll pins the pre-roll against the literal 3840: the page
+// SeekToSample lands on (the last source seek it issues, since decoding only reads)
+// is the last page whose first new sample lies at most 3840 samples before the
+// target, found here by walking every page of a small-page stream.
+func TestSeekLeavesAtLeastPreRoll(t *testing.T) {
+	stream := repage(t, seekFixture(t, 1, 20, 6*48000, 128000), &repageOpts{maxSegs: 1})
+	offs, grans, _ := pageMetaOf(t, stream)
+	src := newFlaky(stream)
+	d, err := NewDecoder(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Length(); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{3840, 3841, 4800, 30000, 100001, 200000} {
+		src.startSeek = nil
+		if _, err := d.SeekToSample(n); err != nil {
+			t.Fatal(err)
+		}
+		want := int64(-1)
+		for i, off := range offs {
+			pg, _, err := parsePage(stream[off:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			pos := grans[i] - expectedPreSkip
+			if grans[i] >= 0 && pg.completesPacket() && pos >= 0 && pos <= n-3840 {
+				want = int64(off)
+			}
+		}
+		if want < 0 {
+			// No page is far enough back: the decoder restarts at the stream start.
+			if got := src.startSeek[len(src.startSeek)-1]; got != 0 {
+				t.Fatalf("n=%d: no landing page exists but the last seek was to %d, want the stream start", n, got)
+			}
+			continue
+		}
+		if got := src.startSeek[len(src.startSeek)-1]; got != want {
+			t.Fatalf("n=%d: landed at offset %d, want %d (last page at least 3840 samples before the target)", n, got, want)
+		}
+	}
+}
+
+// TestLengthReadsOnlyTheTail pins that Length measures a large stream by reading
+// the tail, not the whole source.
+func TestLengthReadsOnlyTheTail(t *testing.T) {
+	stream := seekFixture(t, 1, 20, 24*48000, 510000)
+	if len(stream) < 8*scanWindow {
+		t.Fatalf("stream is %d bytes; the test needs more than 8 scan windows (%d)", len(stream), 8*scanWindow)
+	}
+	src := newFlaky(stream)
+	d, err := NewDecoder(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.bytesRead = 0
+	if _, err := d.Length(); err != nil {
+		t.Fatal(err)
+	}
+	if limit := 3 * scanWindow; src.bytesRead > limit {
+		t.Fatalf("Length read %d bytes of a %d byte stream, want at most %d", src.bytesRead, len(stream), limit)
+	}
+}
