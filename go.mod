@@ -7,7 +7,7 @@ require (
 	// The rule files carry the `ruleguard` build tag, so the normal toolchain
 	// ignores them; tools/tools.go anchors the dependency for `go mod tidy`.
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
-	github.com/tphakala/simd v1.11.0
+	github.com/tphakala/simd v1.13.0
 )
 
-require golang.org/x/sys v0.47.0 // indirect
+require golang.org/x/sys v0.49.0 // indirect
