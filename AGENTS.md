@@ -9,14 +9,14 @@ Orientation for coding agents and automated reviewers working on this repository
 1. **Build anywhere Go builds.** No cgo in the published module. The runtime dependency is `github.com/tphakala/simd` (assembly plus pure-Go fallback, also cgo-free) with its indirect `golang.org/x/sys`. `go-ruleguard/dsl` is lint-only behind a build tag.
 2. **Be bit-exact with libopus.** Every ported layer, and the encoder's whole packets, are asserted byte-identical to the pinned C reference. The decoder passes all 12 RFC 6716 / RFC 8251 test vectors. Bit-exactness is the correctness contract of the internal codec packages.
 3. **Survive hostile input.** The packet parser, the Ogg readers and the decoder parse untrusted bytes. They must never panic, and allocations driven by a stream's own claims must stay bounded. Consumers are long-running services (BirdNET-Go is the main one).
-4. **Stay fast and allocation-light.** Steady-state encode and decode allocate nothing per frame. Encoders and decoders are poolable through `Reset`.
+4. **Stay fast and allocation-light.** Steady-state encode and decode of the `opus` codec allocate nothing per frame (benchmarked in `opus/bench_test.go`, asserted by test for the multistream encoder). Encoders and decoders are poolable through `Reset`.
 
 Packages:
 
 | Package | Role |
 |---|---|
 | `opus` | Raw packet codec: `Encoder`, `Decoder`, multistream variants, packet inspection, `Version`, sentinel errors. Decoder is the full RFC 6716 decoder; encoder is CELT-only |
-| `oggopus` | RFC 7845 Ogg Opus container: io-based `Encoder` and `Decoder`, `Reader`/`Writer` layers, pages, OpusHead and OpusTags, seek and `Length`, one-shot helpers |
+| `oggopus` | RFC 7845 Ogg Opus container: io-based `Encoder` and `Decoder`, unexported container reader and writer layers (`reader.go`, `writer.go`), pages, OpusHead and OpusTags, seek and `Length`, one-shot helpers |
 | `pcm` | Uniform `<module>/pcm` facade over `oggopus`; its types are aliases, so the two interoperate without conversion |
 | `internal/celt` | CELT codec port (decoder and CELT-only encoder), scalar references and SIMD dispatch |
 | `internal/silk` | SILK decoder port |
@@ -43,7 +43,7 @@ A change that violates one of these is wrong even if tests pass.
 2. **Fixed-point only, bit-exact with libopus v1.6.1.** The frozen config is `FIXED_POINT + DISABLE_FLOAT_API`, so `opus_res` is `int16` throughout. Do not introduce floating point into the codec path, and do not "simplify" a macro helper in `fixedmath` or `silkmath`: the exact integer expression is the contract (wrapping, truncation and shift order included).
 3. **Keep the mapping back to the C.** The transliteration packages keep C names, control flow and per-file provenance comments (e.g. `// celt/rate.c:249`). A refactor that makes them idiomatic at the cost of diffability against libopus is unwanted. Public packages are idiomatic Go.
 4. **The libopus pin is deliberate.** v1.6.1 is a submodule at `internal/reftest/libopus`. Re-pinning is a per-release act (regenerate the oracle wrappers, rerun on amd64 and arm64), never a drive-by.
-5. **SIMD is an optimisation, never a behaviour.** Each `tphakala/simd`-backed kernel (pitch, FFT butterflies, haar1, band-gain, comb filter) keeps an in-tree scalar reference (`*_ref.go`) that the SIMD result is asserted bit-exact against, and output must not depend on the CPU. A new or changed kernel needs a differential test and, where the input space is large, a fuzz target.
+5. **SIMD is an optimisation, never a behaviour.** Each `tphakala/simd`-backed kernel (pitch, haar1, band-gain, comb filter, maxabs) keeps an in-tree scalar reference (`*_ref.go`); the FFT butterflies keep scalar variants in `kiss_fft.go` and a frozen reference in `fft_cint_oracle_test.go`. The SIMD result is asserted bit-exact against each, and output must not depend on the CPU. A new or changed kernel needs a differential test and, where the input space is large, a fuzz target.
 6. **The scratch zeroing contract.** C's stack `ALLOC` is uninitialised, Go's `make` zeroes, and a pooled buffer carries the previous frame's values. Every pooled buffer must be fully written before it is read. `internal/celt/scratch.go` documents the contract and the `poison` tag enforces it; read it before touching any scratch field.
 7. **Decoding untrusted bytes is total and bounded.** Malformed packets and Ogg input return an error, never a panic or an index error. A length or count read from the stream is checked against what is present before it drives a `make`, a loop or an offset. The one-shot `oggopus.DecodeInterleaved` stops at `DefaultMaxDecodedBytes` (1 GiB) with a wrapped `ErrDecodeLimit`, because a tiny DTX stream decodes to far more than its size; `DecodeInterleavedLimit` takes the ceiling and `NewDecoder` streams in bounded memory.
 8. **Typed errors with `%w`.** Map conditions to sentinels so callers can use `errors.Is`:
@@ -54,7 +54,7 @@ A change that violates one of these is wrong even if tests pass.
 9. **Decode output is always 48 kHz interleaved little-endian `int16`.** `Info.InputSampleRate` is informational only; label decoded PCM with the output rate (`OutputSampleRate`). The encoder accepts 8, 12, 16, 24 and 48 kHz, mono or stereo; `Config.Complexity` zero means the default (10), so the useful range is 1..10; frame durations are multiples of 20 ms (20 to 120).
 10. **Container timing is inline.** The Ogg writer carries duration in per-page granule positions, so no seeking is required on the sink. Pre-skip and end trim must decode back to the exact sample (impulse test), and output is validated against ffmpeg, not only the package's own reader.
 11. **The version is single-sourced.** The OpusTags vendor string derives from `opus.Version`; do not restate it as a literal.
-12. **Concurrency.** An `Encoder` or `Decoder` is not safe for concurrent use. There is no mutable package-level state; the SIMD dispatch is decided once at init.
+12. **Concurrency.** An `Encoder` or `Decoder` is not safe for concurrent use. There is no mutable package-level state that affects output: the only package-level mutables are the `oggopus` encoder pool and the two codec-constructor test seams, and the SIMD dispatch is decided once at init.
 13. **Interop and the C reference are the oracle.** Encoder packets are byte-identical to libopus across the gate corpus; decoder output matches the RFC 8251 reference outputs. Do not weaken a differential assertion to make a change pass.
 
 ## Layout
@@ -102,7 +102,7 @@ task check         # build, vet, lint, race tests
 task release VERSION=x.y.z   # bump opus.Version, verify, commit and tag (pushes nothing)
 ```
 
-Run `task check` before pushing, and `task reftest` and `task test:poison` for anything under `internal/`. CI additionally runs the cross-build matrix (linux, darwin, windows on amd64 and arm64), the forced-Go-fallback and dispatch-count jobs, the fuzz smoke job, govulncheck and OpenSSF Scorecard.
+Run `task check` before pushing, and `task reftest` and `task test:poison` for anything under `internal/`. CI additionally runs the cross-build matrix (linux, darwin, windows on amd64 and arm64), the forced-Go-fallback job, a dispatch-count step in the test job, the fuzz smoke job, govulncheck and OpenSSF Scorecard.
 
 ## Conventions
 
@@ -111,8 +111,8 @@ Run `task check` before pushing, and `task reftest` and `task test:poison` for a
 - **Errors.** Error strings carry the package prefix (`opus:`, `oggopus:`). Wrap with `%w`; use `errors.New` for constant messages.
 - **Comments.** Explain why: the C source location, the failure being avoided, the measurement behind a constant. Match the surrounding density.
 - **Docs follow code.** A behaviour change updates the package doc, the README and the sentinel's comment in the same change. A sentence that is false for some mode or rate is a defect.
-- **Commits** use an imperative subject with a type prefix (`feat:`, `fix:`, `docs:`, `build:`, `ci:`, `chore:`, `refactor:`, `test:`), optionally scoped, with `!` for a breaking change. There is no CHANGELOG file; release notes are written on the GitHub release.
-- **Dependencies.** Dependabot keeps Go modules and GitHub Actions current. Workflow actions are pinned.
+- **Commits** use an imperative subject with a type prefix (`feat:`, `fix:`, `docs:`, `build:`, `ci:`, `chore:`, `refactor:`, `perf:`, `deps:`, `test:`), optionally scoped, with `!` for a breaking change. There is no CHANGELOG file; release notes are written on the GitHub release.
+- **Dependencies.** Dependabot keeps Go modules and GitHub Actions current. Workflow actions are pinned to a major version tag (not a SHA).
 
 ## Review guidance
 
