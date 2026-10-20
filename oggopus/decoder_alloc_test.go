@@ -39,7 +39,10 @@ func drainDecoder(t *testing.T, d *Decoder, buf []byte) {
 // show. At the commit before the fix the difference is 5423 (native pages) and
 // 10112 (one segment per page).
 func TestDecoderAllocationDoesNotGrowWithStreamLength(t *testing.T) {
-	const slack = 16 // headroom for one-off buffer growth; measured difference 1 on darwin/arm64
+	// The measured difference is 1 on darwin/arm64, linux/amd64 and linux/386. A
+	// per-page slice that doubles would add several more in the one-packet-per-page
+	// layout, where the 20 s stream has a page for every packet.
+	const slack = 2
 	short := seekFixture(t, 1, 20, 2*48000, 64000)
 	long := seekFixture(t, 1, 20, 20*48000, 64000)
 	layouts := []struct {

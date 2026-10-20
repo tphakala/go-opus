@@ -315,7 +315,10 @@ func TestContainerDroppedArenaIsReleased(t *testing.T) {
 // body makes the arena need two page bodies, whose grown and rounded-up capacity
 // must stay within maxReusedBuf.
 func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
-	const slack = 16 // headroom for one-off buffer growth; measured difference 0 on darwin/arm64
+	// The measured difference is 2 for 61200-byte packets (3 under -race) and 0 for
+	// page-body ones, on darwin/arm64, linux/amd64 and linux/386. A per-page slice
+	// that doubles would add about 3 more.
+	const slack = 4
 	for _, size := range []int{61200, maxPageBodyLen} {
 		read := func(n int) float64 {
 			pkts := make([][]byte, n)
