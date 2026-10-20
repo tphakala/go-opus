@@ -103,6 +103,7 @@ func TestDecoderReset(t *testing.T) {
 	if _, err := io.Copy(io.Discard, d); err != nil {
 		t.Fatalf("drain A: %v", err)
 	}
+	br := d.br
 
 	if err := d.Reset(bytes.NewReader(streamB)); err != nil {
 		t.Fatalf("Reset: %v", err)
@@ -116,6 +117,32 @@ func TestDecoderReset(t *testing.T) {
 	}
 	if want := streamingDecode(t, streamB); !bytes.Equal(got.Bytes(), want) {
 		t.Fatal("decode after Reset differs from a fresh decode of the same stream")
+	}
+	if d.br != br {
+		t.Error("Reset replaced the source read buffer; it must be kept and re-pointed")
+	}
+
+	// Leg C: a one-segment-page layout of the mono stream, smaller than B in every
+	// buffer. The page, packet and PCM buffers that B grew are reused, and none of
+	// B's bytes may show through in C's output. The PCM backing array must survive
+	// the Reset because C needs less than B left in it.
+	pcmBuf := &d.pcmBuf[:1][0]
+	streamC := repage(t, streamA, &repageOpts{maxSegs: 1})
+	if err := d.Reset(bytes.NewReader(streamC)); err != nil {
+		t.Fatalf("Reset to C: %v", err)
+	}
+	got.Reset()
+	if _, err := io.Copy(&got, d); err != nil {
+		t.Fatalf("decode C after Reset: %v", err)
+	}
+	if want := streamingDecode(t, streamC); !bytes.Equal(got.Bytes(), want) {
+		t.Fatal("decode of the smaller stream C after Reset differs from a fresh decode")
+	}
+	if d.br != br {
+		t.Error("Reset replaced the source read buffer; it must be kept and re-pointed")
+	}
+	if &d.pcmBuf[:1][0] != pcmBuf {
+		t.Error("Reset reallocated the PCM buffer; it must be kept across streams")
 	}
 
 	// A failed Reset must leave the decoder uninitialized, not bound to stream B.

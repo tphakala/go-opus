@@ -16,8 +16,8 @@ import (
 // minutes of 48 kHz stereo int16.
 //
 // A caller decoding a stream it did not produce, or one legitimately longer than
-// this, should use NewDecoder and stream the audio instead, which bounds memory
-// to a single reusable buffer regardless of length.
+// this, should use NewDecoder and stream the audio instead, which does not hold
+// the decoded audio in memory.
 const DefaultMaxDecodedBytes = 1 << 30
 
 // ErrDecodeLimit reports that a one-shot decode was stopped because its output
@@ -34,7 +34,7 @@ var ErrDecodeLimit = errors.New("oggopus: decoded size limit exceeded")
 // It stops at DefaultMaxDecodedBytes and returns a wrapped ErrDecodeLimit if the
 // output would exceed it. For a different ceiling use DecodeInterleavedLimit; for
 // a stream of unknown or unbounded length use NewDecoder, which streams the audio
-// in memory proportional to a single buffer.
+// without holding it in memory.
 //
 // A stream whose first packet is not an OpusHead returns an error wrapping
 // ErrNotOpus.

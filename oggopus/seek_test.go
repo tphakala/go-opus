@@ -463,6 +463,18 @@ func TestSeekErrors(t *testing.T) {
 					t.Fatalf("Read after failed seek = %v, want the latched error", rerr)
 				}
 				src.armed = false
+				if target == 100 {
+					// The rewind path failed. A landing seek recovers from it and
+					// needs the parsed state of the container reader the failed
+					// rebuild must not have overwritten.
+					const landing = 90000
+					if _, err := d.SeekToSample(landing); err != nil {
+						t.Fatalf("recovering landing seek: %v", err)
+					}
+					if got := readAll(t, d); len(got) != len(want)-landing*2 {
+						t.Fatalf("landing seek after failed rewind decoded %d bytes, want %d", len(got), len(want)-landing*2)
+					}
+				}
 				if _, err := d.SeekToSample(0); err != nil {
 					t.Fatalf("recovering seek: %v", err)
 				}

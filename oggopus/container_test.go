@@ -1,11 +1,14 @@
 package oggopus
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
 	"math/rand/v2"
+	"runtime"
 	"testing"
+	"weak"
 )
 
 // writeOnly wraps an io.Writer while deliberately NOT implementing io.Seeker.
@@ -62,22 +65,28 @@ func writeContainer(t *testing.T, w io.Writer, head opusHead, tags opusTags, pkt
 
 func readContainer(t *testing.T, r io.Reader) (cr *containerReader, packets [][]byte) {
 	t.Helper()
-	cr, err := newContainerReader(r)
+	cr, err := newContainerReader(bufio.NewReader(r), nil)
 	if err != nil {
 		t.Fatalf("newContainerReader: %v", err)
 	}
+	return cr, drainPackets(t, cr)
+}
+
+// drainPackets returns copies of every remaining packet of cr. The copies are
+// required: packets alias the reader's arena, which the next page overwrites.
+func drainPackets(t *testing.T, cr *containerReader) [][]byte {
+	t.Helper()
 	var got [][]byte
 	for {
 		p, err := cr.nextPacket()
 		if errors.Is(err, io.EOF) {
-			break
+			return got
 		}
 		if err != nil {
 			t.Fatalf("nextPacket: %v", err)
 		}
-		got = append(got, p)
+		got = append(got, bytes.Clone(p))
 	}
-	return cr, got
 }
 
 // TestContainerRoundTrip is the core "Ogg round-trips" gate: a sequence of opus
@@ -169,6 +178,132 @@ func TestContainerPacketSpanningPages(t *testing.T) {
 	assertPageStructure(t, cr)
 }
 
+// TestContainerReleasesOversizedPacketBuffers pins that a packet spanning
+// several pages does not keep the packet arena or the partial-packet buffer at
+// its size for the rest of the stream: once the reader has moved past it, both
+// are back within maxReusedBuf.
+func TestContainerReleasesOversizedPacketBuffers(t *testing.T) {
+	pkts := [][]byte{
+		bytes.Repeat([]byte{0x11}, 30),
+		makeRamp(200000), // spans several pages, well over maxReusedBuf
+		bytes.Repeat([]byte{0x22}, maxPageBodyLen),
+		bytes.Repeat([]byte{0x33}, 17),
+	}
+	const dur, preSkip = 960, 312
+	var buf bytes.Buffer
+	writeContainer(t, &buf, testHead(1, preSkip), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
+
+	cr, got := readContainer(t, &buf)
+	if len(got) != len(pkts) {
+		t.Fatalf("packet count: got %d, want %d", len(got), len(pkts))
+	}
+	for i := range pkts {
+		if !bytes.Equal(got[i], pkts[i]) {
+			t.Fatalf("packet %d differs: got %d bytes, want %d", i, len(got[i]), len(pkts[i]))
+		}
+	}
+	if c := cap(cr.arena); c > maxReusedBuf {
+		t.Errorf("arena capacity %d after the large packet, want at most %d", c, maxReusedBuf)
+	}
+	if c := cap(cr.partial); c > maxReusedBuf {
+		t.Errorf("partial capacity %d after the large packet, want at most %d", c, maxReusedBuf)
+	}
+}
+
+// TestContainerDroppedArenaIsReleased pins that dropping an oversized arena
+// releases it. The page that completes the large packet also completes two small
+// ones; the later pages complete one packet each, so queue slots past the current
+// page's packets would keep the old arena reachable unless they are cleared.
+func TestContainerDroppedArenaIsReleased(t *testing.T) {
+	pkts := [][]byte{
+		makeRamp(200000),
+		bytes.Repeat([]byte{0x11}, 17),
+		bytes.Repeat([]byte{0x22}, 17),
+		bytes.Repeat([]byte{0x33}, maxPageBodyLen),
+		bytes.Repeat([]byte{0x44}, maxPageBodyLen),
+	}
+	const dur, preSkip = 960, 312
+	var buf bytes.Buffer
+	writeContainer(t, &buf, testHead(1, preSkip), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
+
+	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(buf.Bytes())), nil)
+	if err != nil {
+		t.Fatalf("newContainerReader: %v", err)
+	}
+	first, err := cr.nextPacket()
+	if err != nil || len(first) != len(pkts[0]) {
+		t.Fatalf("first packet: %d bytes, err %v; want %d bytes", len(first), err, len(pkts[0]))
+	}
+	queued := len(cr.queue)
+	if queued < 2 {
+		t.Fatalf("the large packet's page queued %d packets, want the small ones too", queued)
+	}
+	if cap(cr.arena) <= maxReusedBuf {
+		t.Fatalf("arena capacity %d after the large packet, want it above maxReusedBuf (%d)", cap(cr.arena), maxReusedBuf)
+	}
+	old := weak.Make(&cr.arena[:1][0])
+	for {
+		if _, err := cr.nextPacket(); err != nil {
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("nextPacket: %v", err)
+			}
+			break
+		}
+	}
+	if cap(cr.arena) > maxReusedBuf {
+		t.Fatalf("arena capacity %d, want the oversized one dropped", cap(cr.arena))
+	}
+	if len(cr.queue) >= queued {
+		t.Fatalf("the last page queued %d packets, want fewer than %d so stale slots remain", len(cr.queue), queued)
+	}
+	for range 3 {
+		runtime.GC()
+	}
+	if old.Value() != nil {
+		t.Error("the dropped arena is still reachable from the container reader")
+	}
+	runtime.KeepAlive(cr)
+}
+
+// TestContainerLargePacketsDoNotReallocate pins that packets up to a page body
+// long, which span two pages, are reassembled in the reused arena and partial
+// buffer: reading 100 of them costs about the same allocations as reading 10.
+// 61200 bytes is the largest Opus packet (48 frames of 1275 bytes); a full page
+// body makes the arena need two page bodies, whose grown and rounded-up capacity
+// must stay within maxReusedBuf.
+func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
+	const slack = 16 // containerReader.pages grows by doubling
+	for _, size := range []int{61200, maxPageBodyLen} {
+		read := func(n int) float64 {
+			pkts := make([][]byte, n)
+			for i := range pkts {
+				pkts[i] = makeRamp(size)
+			}
+			var buf bytes.Buffer
+			writeContainer(t, &buf, testHead(1, 312), opusTags{vendor: "v"}, pkts, 960, int64(n*960-312))
+			data := buf.Bytes()
+			return testing.AllocsPerRun(3, func() {
+				cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(data)), nil)
+				if err != nil {
+					t.Fatalf("newContainerReader: %v", err)
+				}
+				for {
+					if _, err := cr.nextPacket(); err != nil {
+						if !errors.Is(err, io.EOF) {
+							t.Fatalf("nextPacket: %v", err)
+						}
+						return
+					}
+				}
+			})
+		}
+		short, long := read(10), read(100)
+		if long-short > slack {
+			t.Errorf("%d-byte packets: 100 cost %.0f allocations, 10 cost %.0f; want a difference of at most %d", size, long, short, slack)
+		}
+	}
+}
+
 // TestNonSeekableDurationGuard writes a full stream through a write-only sink
 // (no io.Seeker) and asserts the recovered duration equals the exact source
 // sample count. This is the structural proof that oggopus does not depend on
@@ -249,4 +384,55 @@ func makeRamp(n int) []byte {
 		b[i] = byte(i * 7)
 	}
 	return b
+}
+
+// TestNewContainerReaderReuse pins the buffer recycling Reset relies on: a reused
+// reader keeps its page buffer and normal-sized packet buffers, drops packet
+// buffers above maxReusedBuf, and decodes the new stream exactly.
+func TestNewContainerReaderReuse(t *testing.T) {
+	stream := encodeOgg(t, Config{SampleRate: 48000, Channels: 1, Bitrate: 64000}, tone(9600, 1, 330, 48000))
+	prev, _ := readContainer(t, bytes.NewReader(stream))
+	pageBuf := &prev.pg.raw[:1][0]
+	normalArena := &prev.arena[:1][0]
+
+	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(stream)), prev)
+	if err != nil {
+		t.Fatalf("newContainerReader with reuse: %v", err)
+	}
+	if cr != prev {
+		t.Error("reuse did not recycle the reader struct")
+	}
+	if &cr.pg.raw[:1][0] != pageBuf {
+		t.Error("reuse reallocated the page buffer")
+	}
+	if &cr.arena[:1][0] != normalArena {
+		t.Error("reuse dropped a normal-sized arena")
+	}
+
+	// Oversized buffers are not carried over.
+	cr.arena = make([]byte, 0, maxReusedBuf+1)
+	cr.partial = make([]byte, 0, maxReusedBuf+1)
+	next, err := newContainerReader(bufio.NewReader(bytes.NewReader(stream)), cr)
+	if err != nil {
+		t.Fatalf("newContainerReader with oversized buffers: %v", err)
+	}
+	for i, p := range next.queue[len(next.queue):cap(next.queue)] {
+		if p != nil {
+			t.Errorf("recycled queue slot %d still points at the previous stream's arena", len(next.queue)+i)
+			break
+		}
+	}
+	if cap(next.arena) > maxReusedBuf || cap(next.partial) > maxReusedBuf {
+		t.Errorf("oversized buffers carried over: arena cap %d, partial cap %d, limit %d", cap(next.arena), cap(next.partial), maxReusedBuf)
+	}
+	_, want := readContainer(t, bytes.NewReader(stream))
+	got := drainPackets(t, next)
+	if len(got) != len(want) {
+		t.Fatalf("reused reader returned %d packets, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if !bytes.Equal(got[i], want[i]) {
+			t.Fatalf("packet %d differs after reuse", i)
+		}
+	}
 }
