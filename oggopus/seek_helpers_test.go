@@ -249,20 +249,6 @@ func (f *flakySource) Seek(off int64, whence int) (int64, error) {
 	return f.r.Seek(off, whence)
 }
 
-func snr(ref, got []int16) float64 {
-	var sig, noise float64
-	for i := range ref {
-		r := float64(ref[i])
-		d := r - float64(got[i])
-		sig += r * r
-		noise += d * d
-	}
-	if noise == 0 {
-		return math.Inf(1)
-	}
-	return 10 * math.Log10(sig/noise)
-}
-
 func variantName(o *repageOpts) string {
 	return fmt.Sprintf("segs%d_off%d_chain%d_junk%d_dangle%v_tags%v_trim%d_bogus%d", o.maxSegs, o.offset, len(o.chain), len(o.trailing), o.eosDangling, o.audioOnTags, o.trimFinal, o.bogusGran)
 }

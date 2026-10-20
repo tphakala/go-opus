@@ -34,6 +34,9 @@
 // When the source is an io.ReadSeeker, Decoder.Length reports the exact number of
 // per-channel samples the stream decodes to and Decoder.SeekToSample repositions
 // the decoder at a sample index, the same shape as go-flac's and go-mp3's pcm
-// decoders. Other sources return ErrSeekUnsupported from both and decode
+// decoders. SeekToSample lands on the exact sample and is fast, but the audio
+// after it can differ slightly from sequential decoding; Decoder.SeekToSampleExact
+// gives output identical to sequential decoding, at a cost linear in the distance
+// it decodes. Other sources return ErrSeekUnsupported from all three and decode
 // sequentially as before.
 package pcm

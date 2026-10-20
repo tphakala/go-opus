@@ -53,12 +53,17 @@ type Info struct {
 //
 // When the reader given to NewDecoder or Reset is an io.ReadSeeker whose Seek
 // works (the position is queried when the Decoder is bound to the source),
-// Length reports the exact sample count and SeekToSample repositions the decoder
-// at a sample index. Both cover the first logical stream only, matching
-// sequential decoding, which stops at the first end-of-stream page; links are
-// told apart by serial number, as described for Length. For any other source
-// they return ErrSeekUnsupported and the Decoder decodes sequentially as before.
-// Callers that never call them see no change.
+// Length reports the exact sample count, and SeekToSample and SeekToSampleExact
+// reposition the decoder at a sample index. All three cover the first logical
+// stream only, matching sequential decoding, which stops at the first end-of-stream
+// page; links are told apart by serial number, as described for Length. For any
+// other source they return ErrSeekUnsupported and the Decoder decodes sequentially
+// as before. Callers that never call them see no change.
+//
+// Both seek methods land on the exact sample, but SeekToSample rebuilds the codec
+// state from a short stretch of audio before the target, so its output can differ
+// slightly from sequential decoding. SeekToSampleExact yields exactly the samples
+// sequential decoding does, at a cost linear in the distance it decodes.
 type Decoder struct {
 	cr   *containerReader
 	dec  frameDecoder // nil until the codec seam is wired
@@ -72,7 +77,7 @@ type Decoder struct {
 	limit       int64         // total output samples per channel, or -1 until known
 
 	// Seeking state. rs is nil unless the source is a working io.ReadSeeker; base is
-	// its offset at bind time. idx is built lazily by Length or SeekToSample and is
+	// its offset at bind time. idx is built lazily by Length or the first seek and is
 	// valid only for the bound source (Reset clears it). scan is the scratch window
 	// for page scans.
 	rs      io.ReadSeeker
@@ -83,6 +88,12 @@ type Decoder struct {
 	atEnd   bool  // a seek positioned the decoder at end of stream
 	err     error // sticky error latched by a failed seek, cleared by the next successful one
 	tagsBad bool  // audio data shares the OpusTags page (RFC 7845 section 3 violation)
+	// inSequence is true only while the codec and container state equal those of
+	// a sequential decode from the stream start with no error latched and not at a
+	// seek's end of stream. SeekToSampleExact decodes forward from the current
+	// position only while it holds. Every path that latches d.err or sets atEnd
+	// clears it.
+	inSequence bool
 }
 
 // NewDecoder reads and validates the OpusHead and OpusTags headers from r and
@@ -90,7 +101,7 @@ type Decoder struct {
 // real; the PCM output path is stubbed at the codec seam. A stream whose first
 // packet is not an OpusHead returns an error wrapping ErrNotOpus.
 //
-// Whether r supports Length and SeekToSample is decided here: r must implement
+// Whether r supports Length and the seek methods is decided here: r must implement
 // io.Seeker and answer Seek(0, io.SeekCurrent). Offsets are then relative to the
 // position of r at this call, so a stream embedded in a larger source works.
 //
@@ -147,6 +158,7 @@ func (d *Decoder) Reset(r io.Reader) error {
 	d.idx = seekIndex{}
 	d.skipTo = 0
 	d.atEnd = false
+	d.inSequence = false
 	d.err = nil
 	d.scan = nil
 	d.tagsBad = false
@@ -166,7 +178,7 @@ func (d *Decoder) Reset(r io.Reader) error {
 // not nil, is the previous stream's container reader, whose buffers the new one
 // recycles.
 //
-// It also decides seekability: r is kept for Length and SeekToSample only when it
+// It also decides seekability: r is kept for Length and the seek methods only when it
 // is an io.ReadSeeker that reports its position, and the first audio page's offset
 // is recorded from the header pages the container reader consumed.
 func (d *Decoder) init(r io.Reader, reuse *containerReader) error {
@@ -226,6 +238,7 @@ func (d *Decoder) init(r io.Reader, reuse *containerReader) error {
 	d.tagsBad = cr.qi < len(cr.queue) || len(cr.partial) > 0
 	d.skipTo = 0
 	d.atEnd = false
+	d.inSequence = true
 	d.err = nil
 	d.cr = cr
 	d.dec = dec
@@ -253,10 +266,10 @@ func (d *Decoder) Info() Info { return d.info }
 // informational input rate says; label decoded PCM with Info().OutputSampleRate,
 // never with Info().InputSampleRate.
 //
-// After a failed SeekToSample, Read returns the error that seek latched until the
-// next successful SeekToSample or Reset. After a SeekToSample to the end of the
-// stream it returns io.EOF. After Read returns an error wrapping ErrPacketTooLarge
-// it keeps returning it until a successful SeekToSample or Reset.
+// After a failed seek, Read returns the error that seek latched until the next
+// successful SeekToSample, SeekToSampleExact or Reset. After a seek to the end of
+// the stream it returns io.EOF. After Read returns an error wrapping
+// ErrPacketTooLarge it keeps returning it until a successful seek or Reset.
 func (d *Decoder) Read(p []byte) (int, error) {
 	if d.dec == nil {
 		return 0, errUninitialized
@@ -281,7 +294,7 @@ func (d *Decoder) Read(p []byte) (int, error) {
 // WriteTo streams the whole decoded output to w, implementing io.WriterTo so a
 // caller can io.Copy a Decoder to a sink. The PCM written to w is interleaved
 // little-endian int16 at 48 kHz (OutputSampleRate); see Read, which also describes
-// the error a failed SeekToSample leaves behind. It never issues a zero-length
+// the error a failed seek leaves behind. It never issues a zero-length
 // Write: a packet whose samples are all dropped is skipped.
 func (d *Decoder) WriteTo(w io.Writer) (int64, error) {
 	if d.dec == nil {
@@ -324,6 +337,9 @@ func (d *Decoder) fill() (done bool, err error) {
 		if errors.Is(err, io.EOF) {
 			return true, nil
 		}
+		// A packet that failed leaves state a fresh sequential decode would not reach
+		// without hitting the same failure, so an exact seek must restart.
+		d.inSequence = false
 		if errors.Is(err, ErrPacketTooLarge) {
 			// Latched: a later page would continue the packet from its middle.
 			d.err = err
@@ -332,6 +348,7 @@ func (d *Decoder) fill() (done bool, err error) {
 	}
 	samples, err := d.dec.decodeFrame(pkt)
 	if err != nil {
+		d.inSequence = false
 		return false, err
 	}
 	if d.limit < 0 {

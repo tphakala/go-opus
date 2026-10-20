@@ -8,8 +8,8 @@ import (
 
 // Decoder reads an Ogg Opus stream and yields interleaved little-endian int16 PCM
 // at 48 kHz, implementing io.Reader and io.WriterTo. It is an alias of
-// oggopus.Decoder; its methods (Read, WriteTo, Info, Reset, Length, SeekToSample)
-// are documented there.
+// oggopus.Decoder; its methods (Read, WriteTo, Info, Reset, Length, SeekToSample,
+// SeekToSampleExact) are documented there.
 type Decoder = oggopus.Decoder
 
 // Info reports the stream parameters parsed from OpusHead. It is an alias of
