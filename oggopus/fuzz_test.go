@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -79,20 +80,25 @@ func FuzzContainerReader(f *testing.F) {
 	f.Add(goldenHeadPage())
 	f.Add([]byte("OggS garbage"))
 	f.Add(oversizedPacketSeed(f))
+	f.Add(oversizedTagsSeed(f))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(data)), nil)
 		if err != nil {
+			// OpusHead and OpusTags are cut, never failed, for their size.
+			if errors.Is(err, ErrPacketTooLarge) {
+				t.Fatalf("newContainerReader: %v", err)
+			}
 			return
 		}
 		for range 4096 {
-			// Whatever the bytes, the reader never holds more than its limit of a
-			// packet that spans pages.
-			if len(cr.partial) > cr.limit {
-				t.Fatalf("partial holds %d bytes, limit %d", len(cr.partial), cr.limit)
-			}
-			if _, err := cr.nextPacket(); err != nil {
+			p, err := cr.nextPacket()
+			if err != nil {
 				return
+			}
+			// Whatever the bytes, no packet the reader assembles is over its limit.
+			if len(p) > cr.limit {
+				t.Fatalf("packet of %d bytes, limit %d", len(p), cr.limit)
 			}
 		}
 	})
@@ -100,9 +106,17 @@ func FuzzContainerReader(f *testing.F) {
 
 // oversizedPacketSeed returns headers and a mono audio packet one byte over the
 // audio packet limit, split over full pages, so mutations of it reach the
-// continuation, limit and header-cut paths.
+// continuation and limit paths.
 func oversizedPacketSeed(f *testing.F) []byte {
 	f.Helper()
 	return limitStream(f, testHead(1, 312).marshal(), opusTags{vendor: "v"}.marshal(),
 		[][]byte{filled(streamPacketLimit + 1)}, maxPageSegments, false)
+}
+
+// oversizedTagsSeed returns a stream whose OpusTags is longer than the header
+// limit, so the fuzz target starts from the header-cut path.
+func oversizedTagsSeed(f *testing.F) []byte {
+	f.Helper()
+	tags := opusTags{vendor: "v", comments: []string{strings.Repeat("x", maxHeaderPacketLen)}}
+	return limitStream(f, testHead(1, 312).marshal(), tags.marshal(), [][]byte{filled(17)}, maxPageSegments, true)
 }
