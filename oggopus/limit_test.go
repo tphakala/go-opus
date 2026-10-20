@@ -187,10 +187,29 @@ func TestDecoderPacketLimitLengthAndSeek(t *testing.T) {
 	})
 }
 
-// TestDecoderOversizedHeaders pins that OpusHead and OpusTags are cut, not
-// failed, when they are large: a stream never fails on the size of its tags, a
-// cut OpusTags still needs its magic, and a huge first packet that is not an
-// OpusHead is still reported as not Opus.
+// TestContainerHeaderCut pins the header limit: an OpusTags longer than it is
+// returned cut to exactly 61,440 bytes.
+func TestContainerHeaderCut(t *testing.T) {
+	tags := opusTags{vendor: "v", comments: []string{"COVER=" + strings.Repeat("x", 200000)}}.marshal()
+	stream := limitStream(t, testHead(1, 312).marshal(), tags, [][]byte{filled(17)}, maxPageSegments, true)
+	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(stream)), nil)
+	if err != nil {
+		t.Fatalf("newContainerReader: %v", err)
+	}
+	if cr.qi == 0 {
+		t.Fatal("no OpusTags packet in the queue")
+	}
+	// RFC 7845 section 5.2 lets a reader ignore comments past the first 61,440
+	// bytes; the literal pins that figure, not just the constant.
+	if got := len(cr.queue[cr.qi-1]); got != 61440 {
+		t.Fatalf("OpusTags kept %d bytes of %d, want 61440", got, len(tags))
+	}
+}
+
+// TestDecoderOversizedHeaders pins that OpusHead and OpusTags do not fail for
+// their size: a stream never fails on the size of its tags, a cut OpusTags still
+// needs its magic, and a huge first packet that is not an OpusHead is still
+// reported as not Opus.
 func TestDecoderOversizedHeaders(t *testing.T) {
 	cr, audio := readContainer(t, bytes.NewReader(seekFixture(t, 1, 20, 24000, 32000)))
 	head := cr.head.marshal()
