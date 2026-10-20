@@ -151,12 +151,20 @@ func TestDecoderPacketLimitLengthAndSeek(t *testing.T) {
 	tags := opusTags{vendor: "v"}.marshal()
 	big := filled(audioPacketLimit(testHead(1, 312)) + 1)
 
+	_, audio := readContainer(t, bytes.NewReader(seekFixture(t, 1, 20, 2*48000, 64000)))
 	for _, tc := range []struct {
 		name string
+		pkts [][]byte
 		eos  bool
-	}{{"Length/EOS", true}, {"Length/noEOS", false}} {
+	}{
+		{"Length/EOS", [][]byte{big}, true},
+		{"Length/noEOS", [][]byte{big}, false},
+		// The first audio page completes valid packets, so only the pass that
+		// counts the tail reaches the oversized packet.
+		{"Length/noEOS after audio", slices.Concat(audio, [][]byte{big}), false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := seekDecoder(t, limitStream(t, head, tags, [][]byte{big}, maxPageSegments, tc.eos))
+			d := seekDecoder(t, limitStream(t, head, tags, tc.pkts, maxPageSegments, tc.eos))
 			if n, err := d.Length(); !errors.Is(err, ErrPacketTooLarge) {
 				t.Fatalf("Length = %d, %v; want ErrPacketTooLarge", n, err)
 			}
@@ -164,8 +172,7 @@ func TestDecoderPacketLimitLengthAndSeek(t *testing.T) {
 	}
 
 	t.Run("SeekToSample", func(t *testing.T) {
-		_, audio := readContainer(t, bytes.NewReader(seekFixture(t, 1, 20, 2*48000, 64000)))
-		pkts := slices.Insert(audio, len(audio)-1, big)
+		pkts := slices.Insert(slices.Clone(audio), len(audio)-1, big)
 		d := seekDecoder(t, limitStream(t, head, tags, pkts, 8, true))
 		total, err := d.Length()
 		if err != nil {
