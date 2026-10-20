@@ -38,7 +38,8 @@ var (
 	// growing the decoder's memory without bound. Like ErrDecodeLimit it is not a
 	// verdict that the stream is corrupt, and it is distinct from both
 	// ErrDecodeLimit and the corruption errors. Read, WriteTo, DecodeInterleaved,
-	// DecodeInterleavedLimit, Length and SeekToSample return it wrapped. NewDecoder
+	// DecodeInterleavedLimit, Length, SeekToSample and SeekToSampleExact return it
+	// wrapped. NewDecoder
 	// and Reset do not, because OpusHead and OpusTags are cut instead, as the package
 	// documentation describes. After Read or WriteTo return it, they keep returning
 	// it until a successful seek or Reset.
