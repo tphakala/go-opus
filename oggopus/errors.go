@@ -26,6 +26,23 @@ var (
 	// ErrInvalidSeek reports a SeekToSample call with a negative sample index. The
 	// Decoder position is unchanged.
 	ErrInvalidSeek = errors.New("oggopus: invalid seek (negative sample index)")
+	// ErrPacketTooLarge reports that an audio packet reassembled from Ogg pages is
+	// larger than the decoder accepts. The limit is 122,880 bytes per Opus stream,
+	// times the stream count in OpusHead (one for mapping family 0). A packet
+	// without padding is at most 61,298*N - 2 bytes for N streams (RFC 7845
+	// section 6), so only code-3 padding of roughly 61 KB or more per stream goes
+	// past the limit. That is legal Opus, but section 6 says a demuxer should treat
+	// such a packet as invalid, so the stream is not decoded.
+	//
+	// It is a resource limit that keeps a stream whose pages never end a packet from
+	// growing the decoder's memory without bound. Like ErrDecodeLimit it is not a
+	// verdict that the stream is corrupt, and it is distinct from both
+	// ErrDecodeLimit and the corruption errors. Read, WriteTo, DecodeInterleaved,
+	// DecodeInterleavedLimit, Length and SeekToSample return it wrapped. NewDecoder
+	// and Reset do not: OpusHead and OpusTags keep at most 61,440 bytes each and the
+	// rest of a larger one is skipped. After Read or WriteTo return it, they keep
+	// returning it until a successful SeekToSample or Reset.
+	ErrPacketTooLarge = errors.New("oggopus: packet too large")
 )
 
 // errUninitialized guards the zero value. NewEncoder, Reset and NewDecoder each

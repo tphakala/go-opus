@@ -65,7 +65,8 @@ func writeContainer(t *testing.T, w io.Writer, head opusHead, tags opusTags, pkt
 
 func readContainer(t *testing.T, r io.Reader) (cr *containerReader, packets [][]byte) {
 	t.Helper()
-	cr, err := newContainerReader(bufio.NewReader(r), nil)
+	// Pages are recorded only for tests, through the reused reader's flag.
+	cr, err := newContainerReader(bufio.NewReader(r), &containerReader{recordPages: true})
 	if err != nil {
 		t.Fatalf("newContainerReader: %v", err)
 	}
@@ -142,7 +143,8 @@ func TestContainerRoundTrip(t *testing.T) {
 
 // TestContainerPacketSpanningPages exercises a packet larger than one page
 // (> 255*255 bytes) plus enough packets to fill several pages, verifying the
-// continuation flags and reassembly.
+// continuation flags and reassembly. The head has two streams, so the 200000-byte
+// packet is within the audio packet limit.
 func TestContainerPacketSpanningPages(t *testing.T) {
 	pkts := [][]byte{
 		bytes.Repeat([]byte{0x11}, 30),
@@ -154,7 +156,7 @@ func TestContainerPacketSpanningPages(t *testing.T) {
 	source := int64(len(pkts)*dur - preSkip)
 
 	var buf bytes.Buffer
-	writeContainer(t, &buf, testHead(1, preSkip), opusTags{vendor: "v"}, pkts, dur, source)
+	writeContainer(t, &buf, testStreamsHead(2), opusTags{vendor: "v"}, pkts, dur, source)
 
 	cr, got := readContainer(t, &buf)
 	if len(got) != len(pkts) {
@@ -181,7 +183,8 @@ func TestContainerPacketSpanningPages(t *testing.T) {
 // TestContainerReleasesOversizedPacketBuffers pins that a packet spanning
 // several pages does not keep the packet arena or the partial-packet buffer at
 // its size for the rest of the stream: once the reader has moved past it, both
-// are back within maxReusedBuf.
+// are back within maxReusedBuf. The head has two streams, so the 200000-byte
+// packet is within the audio packet limit.
 func TestContainerReleasesOversizedPacketBuffers(t *testing.T) {
 	pkts := [][]byte{
 		bytes.Repeat([]byte{0x11}, 30),
@@ -191,7 +194,7 @@ func TestContainerReleasesOversizedPacketBuffers(t *testing.T) {
 	}
 	const dur, preSkip = 960, 312
 	var buf bytes.Buffer
-	writeContainer(t, &buf, testHead(1, preSkip), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
+	writeContainer(t, &buf, testStreamsHead(2), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
 
 	cr, got := readContainer(t, &buf)
 	if len(got) != len(pkts) {
@@ -213,7 +216,8 @@ func TestContainerReleasesOversizedPacketBuffers(t *testing.T) {
 // TestContainerDroppedArenaIsReleased pins that dropping an oversized arena
 // releases it. The page that completes the large packet also completes two small
 // ones; the later pages complete one packet each, so queue slots past the current
-// page's packets would keep the old arena reachable unless they are cleared.
+// page's packets would keep the old arena reachable unless they are cleared. The
+// head has two streams, so the 200000-byte packet is within the audio packet limit.
 func TestContainerDroppedArenaIsReleased(t *testing.T) {
 	pkts := [][]byte{
 		makeRamp(200000),
@@ -224,7 +228,7 @@ func TestContainerDroppedArenaIsReleased(t *testing.T) {
 	}
 	const dur, preSkip = 960, 312
 	var buf bytes.Buffer
-	writeContainer(t, &buf, testHead(1, preSkip), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
+	writeContainer(t, &buf, testStreamsHead(2), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
 
 	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(buf.Bytes())), nil)
 	if err != nil {
@@ -268,11 +272,11 @@ func TestContainerDroppedArenaIsReleased(t *testing.T) {
 // TestContainerLargePacketsDoNotReallocate pins that packets up to a page body
 // long, which span two pages, are reassembled in the reused arena and partial
 // buffer: reading 100 of them costs about the same allocations as reading 10.
-// 61200 bytes is the largest Opus packet (48 frames of 1275 bytes); a full page
+// 61200 bytes is the largest frame payload (48 frames of 1275 bytes); a full page
 // body makes the arena need two page bodies, whose grown and rounded-up capacity
 // must stay within maxReusedBuf.
 func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
-	const slack = 16 // containerReader.pages grows by doubling
+	const slack = 16
 	for _, size := range []int{61200, maxPageBodyLen} {
 		read := func(n int) float64 {
 			pkts := make([][]byte, n)

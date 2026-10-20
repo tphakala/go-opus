@@ -240,6 +240,9 @@ func TestParityWithOggopus(t *testing.T) {
 	if !errors.Is(pcm.ErrInvalidSeek, oggopus.ErrInvalidSeek) {
 		t.Fatal("pcm.ErrInvalidSeek does not match oggopus.ErrInvalidSeek")
 	}
+	if !errors.Is(pcm.ErrPacketTooLarge, oggopus.ErrPacketTooLarge) {
+		t.Fatal("pcm.ErrPacketTooLarge does not match oggopus.ErrPacketTooLarge")
+	}
 	if pcm.OutputSampleRate != oggopus.OutputSampleRate {
 		t.Fatal("pcm.OutputSampleRate is not oggopus.OutputSampleRate")
 	}

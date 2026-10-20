@@ -262,9 +262,10 @@ func (d *Decoder) Length() (int64, error) {
 // for the same reasons; a negative sampleIndex returns ErrInvalidSeek. Those
 // errors, and any error from reading the stream's tail while indexing it, leave
 // the decoder unchanged, except that a failure to restore the read position is latched like the failures below. A failure after the source has been repositioned (an I/O
-// error, a corrupt page or packet) is latched: Read and WriteTo return it until
-// the next successful SeekToSample or Reset. Seeks trust the stream's granule
-// positions; a malformed stream can land on the wrong sample. Only the first
+// error, a corrupt page or packet, a packet over the size limit) is latched: Read
+// and WriteTo return it until the next successful SeekToSample or Reset. Seeks
+// trust the stream's granule positions; a malformed stream can land on the wrong
+// sample. Only the first
 // logical stream is covered, and links are told apart by serial as described for Length.
 func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 	if d.dec == nil {
@@ -538,7 +539,7 @@ func (d *Decoder) decodedTotal(idx seekIndex, prev pageRef, havePrev bool) (tota
 	// This pass and checkInitialGranule read through their own small buffers, not
 	// d.br: d.br holds the sequential read-ahead that ensureIndex must leave intact.
 	br := bufio.NewReader(io.LimitReader(d.rs, idx.linkEnd-start))
-	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1}
+	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1, audioLimit: d.cr.audioLimit}
 	if havePrev {
 		total = prev.granule
 	}
@@ -576,7 +577,7 @@ func (d *Decoder) checkInitialGranule(idx seekIndex) (cache bool, err error) {
 		return false, err
 	}
 	br := bufio.NewReader(io.LimitReader(d.rs, idx.linkEnd-idx.audioStart))
-	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1}
+	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1, audioLimit: d.cr.audioLimit}
 	for {
 		pg := &cr.pg
 		if err := readPage(br, pg); err != nil {

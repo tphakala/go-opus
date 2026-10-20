@@ -95,9 +95,10 @@ type Decoder struct {
 // position of r at this call, so a stream embedded in a larger source works.
 //
 // A Decoder keeps its page and packet buffers between packets and across Reset;
-// they stay under about 450 KiB. A packet that spans several pages, such as a
-// large OpusTags, needs buffers of its own size until the Decoder has read past
-// it.
+// they stay under about 450 KiB. An audio packet that spans several pages needs
+// buffers of its own size until the Decoder has read past it, at most the limit
+// described for ErrPacketTooLarge. OpusHead and OpusTags keep at most 61,440 bytes
+// each and the rest of a larger one is skipped.
 //
 // Unless r is a *bufio.Reader, it is also read through a 64 KiB buffer that the
 // Decoder allocates once and that Reset reuses, so a program holding many Decoders
@@ -254,7 +255,8 @@ func (d *Decoder) Info() Info { return d.info }
 //
 // After a failed SeekToSample, Read returns the error that seek latched until the
 // next successful SeekToSample or Reset. After a SeekToSample to the end of the
-// stream it returns io.EOF.
+// stream it returns io.EOF. After Read returns an error wrapping ErrPacketTooLarge
+// it keeps returning it until a successful SeekToSample or Reset.
 func (d *Decoder) Read(p []byte) (int, error) {
 	if d.dec == nil {
 		return 0, errUninitialized

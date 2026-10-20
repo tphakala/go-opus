@@ -36,9 +36,8 @@ func drainDecoder(t *testing.T, d *Decoder, buf []byte) {
 // allocate per packet or per page: after Reset, a 20 s stream costs about the same
 // number of allocations as a 2 s one. The one-packet-per-page layout turns a
 // per-page allocation into a per-packet one, which the native layout would not
-// show. The allowance covers containerReader.pages, a test-only diagnostic that
-// doubles as pages are appended (O(log pages) allocations). At the commit before
-// the fix the difference is 5423 (native pages) and 10112 (one segment per page).
+// show. At the commit before the fix the difference is 5423 (native pages) and
+// 10112 (one segment per page).
 func TestDecoderAllocationDoesNotGrowWithStreamLength(t *testing.T) {
 	const slack = 16
 	short := seekFixture(t, 1, 20, 2*48000, 64000)
