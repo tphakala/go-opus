@@ -202,6 +202,30 @@ func TestSeekToSampleExactRestartsOnlyWhenNeeded(t *testing.T) {
 		if !slices.Contains(src.startSeek, 0) {
 			t.Fatalf("seek after SeekToSample did not restart: source seeks to %v", src.startSeek)
 		}
+		// The restart puts the decoder back in sequence: a later target and a sample
+		// still buffered (the read from 170000 left part of sample 175000 read) decode
+		// forward.
+		src.startSeek = nil
+		check(t, d, 170000)
+		check(t, d, 175001)
+		if len(src.startSeek) != 0 {
+			t.Fatalf("seek after an exact restart restarted again: source seeks to %v", src.startSeek)
+		}
+	})
+	t.Run("after a seek to the end restarts", func(t *testing.T) {
+		d, src := newDec(t, stream)
+		length, err := d.Length()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := d.SeekToSampleExact(length + 10); err != nil || got != length {
+			t.Fatalf("SeekToSampleExact past the end = %d, %v; want %d, nil", got, err, length)
+		}
+		src.startSeek = nil
+		check(t, d, 1000)
+		if !slices.Contains(src.startSeek, 0) {
+			t.Fatalf("seek after a seek to the end did not restart: source seeks to %v", src.startSeek)
+		}
 	})
 	t.Run("after a failed seek restarts", func(t *testing.T) {
 		d, src := newDec(t, stream)
