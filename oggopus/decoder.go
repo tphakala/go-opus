@@ -1,9 +1,11 @@
 package oggopus
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"io"
+	"slices"
 )
 
 // Decoder implements io.Reader and io.WriterTo, the go-flac pcm.Decoder shape.
@@ -19,6 +21,12 @@ var (
 // compares directly with Info.OutputSampleRate (uint32) and with int sample
 // rates. Label decoded PCM with this, never with Info.InputSampleRate.
 const OutputSampleRate = 48000
+
+// sourceBufSize is the size of the buffer a Decoder reads its source through. It
+// matches the stream buffers of go-wav and go-mp3 and is larger than the biggest
+// Ogg page (maxPageLen), so a page is never read around the buffer. A Decoder
+// allocates it once and keeps it for its life; Reset only re-points it.
+const sourceBufSize = 64 << 10
 
 // Info reports the stream parameters parsed from OpusHead.
 type Info struct {
@@ -55,10 +63,12 @@ type Decoder struct {
 	dec  frameDecoder // nil until the codec seam is wired
 	info Info
 
-	pcm         []byte // decoded, trimmed PCM awaiting delivery
-	preSkipLeft int    // pre-skip samples per channel still to drop
-	delivered   int64  // samples per channel already produced
-	limit       int64  // total output samples per channel, or -1 until known
+	pcmBuf      []byte        // backing array fill writes into; kept across Reset
+	pcm         []byte        // view of pcmBuf awaiting delivery
+	br          *bufio.Reader // source read buffer, kept across Reset and re-pointed at each source
+	preSkipLeft int           // pre-skip samples per channel still to drop
+	delivered   int64         // samples per channel already produced
+	limit       int64         // total output samples per channel, or -1 until known
 
 	// Seeking state. rs is nil unless the source is a working io.ReadSeeker; base is
 	// its offset at bind time. idx is built lazily by Length or SeekToSample and is
@@ -82,29 +92,36 @@ type Decoder struct {
 // Whether r supports Length and SeekToSample is decided here: r must implement
 // io.Seeker and answer Seek(0, io.SeekCurrent). Offsets are then relative to the
 // position of r at this call, so a stream embedded in a larger source works.
+//
+// r is read through a 64 KiB buffer that the Decoder allocates once and that
+// Reset reuses, so a program holding many Decoders should budget that much for
+// each, plus buffers for the largest Ogg page seen.
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	d := &Decoder{}
-	if err := d.init(r); err != nil {
+	if err := d.init(r, nil); err != nil {
 		return nil, err
 	}
 	return d, nil
 }
 
 // Reset rebinds the Decoder to a new source r, re-parsing its OpusHead and
-// OpusTags headers, so one Decoder can decode many independent streams without
-// re-allocating. It mirrors Encoder.Reset and the sibling pcm.Decoder.Reset in
-// go-wav, go-flac, and go-aac: the pooling path for a "many short clips" workload.
+// OpusTags headers, so one Decoder can decode many independent streams. Its source
+// read buffer, its decoded-PCM buffer and the container's page and packet buffers
+// are reused; the codec is rebuilt for each stream. It mirrors Encoder.Reset and
+// the sibling pcm.Decoder.Reset in go-wav, go-flac, and go-aac: the pooling path
+// for a "many short clips" workload.
 //
 // The codec and container reader are cleared first, so a Reset that fails partway
 // (a nil source, or headers that will not parse) leaves a Decoder that reports its
 // uninitialized error on the next Read rather than one still bound to the previous
-// stream. The decoded-PCM scratch buffer keeps its capacity for reuse. A stream
-// whose first packet is not an OpusHead returns an error wrapping ErrNotOpus.
+// stream. A stream whose first packet is not an OpusHead returns an error wrapping
+// ErrNotOpus.
 //
 // Seekability is re-evaluated for the new source and everything cached about the
 // previous stream (its length and page layout) is discarded, as is any error
 // latched by a failed seek.
 func (d *Decoder) Reset(r io.Reader) error {
+	prev := d.cr
 	d.cr = nil
 	d.dec = nil
 	d.rs = nil
@@ -120,24 +137,26 @@ func (d *Decoder) Reset(r io.Reader) error {
 	// matches go-flac and go-aac, whose decoders zero their info up front.
 	d.info = Info{}
 	d.pcm = d.pcm[:0]
-	return d.init(r)
+	return d.init(r, prev)
 }
 
 // init parses and validates the container headers from r and populates the
 // decoder's per-stream state. It backs both NewDecoder and Reset, so the two agree
-// on header handling and on rejecting a nil source before any read. It does not
-// touch d.pcm, so Reset can retain that buffer's capacity across streams.
+// on header handling and on rejecting a nil source before any read. It leaves
+// d.pcmBuf in place, so Reset retains that buffer across streams, and binds d.br
+// (allocated on first use) to r. reuse, when not nil, is the previous stream's
+// container reader, whose buffers the new one recycles.
 //
 // It also decides seekability: r is kept for Length and SeekToSample only when it
 // is an io.ReadSeeker that reports its position, and the first audio page's offset
 // is recorded from the header pages the container reader consumed.
-func (d *Decoder) init(r io.Reader) error {
+func (d *Decoder) init(r io.Reader, reuse *containerReader) error {
 	// Reject a nil source up front; otherwise the first container read dereferences
 	// a nil io.Reader and panics.
 	if r == nil {
 		return errNilReader
 	}
-	// Capture seekability before the container reader wraps r in a bufio.Reader.
+	// Capture seekability before r is wrapped in the Decoder's read buffer.
 	// An io.Seeker that cannot report its position (a pipe behind *os.File) is not
 	// seekable for our purposes.
 	var rs io.ReadSeeker
@@ -147,12 +166,21 @@ func (d *Decoder) init(r io.Reader) error {
 			rs, base = s, pos
 		}
 	}
-	cr, err := newContainerReader(r)
+	// The buffer is made with a nil source and pointed at r by Reset, so it is
+	// always the Decoder's own: bufio.NewReaderSize(r, n) would hand back a caller's
+	// *bufio.Reader that is already large enough, and a later Reset would rebind it.
+	if d.br == nil {
+		d.br = bufio.NewReaderSize(nil, sourceBufSize)
+	}
+	d.br.Reset(r)
+	cr, err := newContainerReader(d.br, reuse)
 	if err != nil {
+		d.br.Reset(nil) // do not keep a source the Decoder failed to bind reachable
 		return err
 	}
 	dec, err := newFrameDecoder(cr.head)
 	if err != nil {
+		d.br.Reset(nil)
 		return err
 	}
 	d.rs = rs
@@ -296,9 +324,14 @@ func (d *Decoder) fill() (done bool, err error) {
 	}
 	d.delivered += int64(perChan)
 
-	d.pcm = d.pcm[:0]
+	// Build the bytes from the start of pcmBuf, not of d.pcm: Read and WriteTo
+	// advance d.pcm, which would shrink its capacity to the undelivered tail and
+	// reallocate on every packet.
+	buf := slices.Grow(d.pcmBuf[:0], 2*len(samples))
 	for _, s := range samples {
-		d.pcm = binary.LittleEndian.AppendUint16(d.pcm, uint16(s))
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(s))
 	}
+	d.pcmBuf = buf
+	d.pcm = buf
 	return false, nil
 }

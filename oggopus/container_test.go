@@ -1,6 +1,7 @@
 package oggopus
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -62,7 +63,7 @@ func writeContainer(t *testing.T, w io.Writer, head opusHead, tags opusTags, pkt
 
 func readContainer(t *testing.T, r io.Reader) (cr *containerReader, packets [][]byte) {
 	t.Helper()
-	cr, err := newContainerReader(r)
+	cr, err := newContainerReader(bufio.NewReader(r), nil)
 	if err != nil {
 		t.Fatalf("newContainerReader: %v", err)
 	}
@@ -75,7 +76,8 @@ func readContainer(t *testing.T, r io.Reader) (cr *containerReader, packets [][]
 		if err != nil {
 			t.Fatalf("nextPacket: %v", err)
 		}
-		got = append(got, p)
+		// Packets alias the reader's arena, which the next page overwrites.
+		got = append(got, bytes.Clone(p))
 	}
 	return cr, got
 }
@@ -249,4 +251,59 @@ func makeRamp(n int) []byte {
 		b[i] = byte(i * 7)
 	}
 	return b
+}
+
+// TestNewContainerReaderReuse pins the buffer recycling Reset relies on: a reused
+// reader keeps its page buffer and normal-sized packet buffers, drops packet
+// buffers above maxReusedBuf, and decodes the new stream exactly.
+func TestNewContainerReaderReuse(t *testing.T) {
+	stream := encodeOgg(t, Config{SampleRate: 48000, Channels: 1, Bitrate: 64000}, tone(9600, 1, 330, 48000))
+	prev, _ := readContainer(t, bytes.NewReader(stream))
+	pageBuf := &prev.pg.raw[:1][0]
+	normalArena := &prev.arena[:1][0]
+
+	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(stream)), prev)
+	if err != nil {
+		t.Fatalf("newContainerReader with reuse: %v", err)
+	}
+	if cr != prev {
+		t.Error("reuse did not recycle the reader struct")
+	}
+	if &cr.pg.raw[:1][0] != pageBuf {
+		t.Error("reuse reallocated the page buffer")
+	}
+	if &cr.arena[:1][0] != normalArena {
+		t.Error("reuse dropped a normal-sized arena")
+	}
+
+	// Oversized buffers are not carried over.
+	cr.arena = make([]byte, 0, maxReusedBuf+1)
+	cr.partial = make([]byte, 0, maxReusedBuf+1)
+	next, err := newContainerReader(bufio.NewReader(bytes.NewReader(stream)), cr)
+	if err != nil {
+		t.Fatalf("newContainerReader with oversized buffers: %v", err)
+	}
+	if cap(next.arena) > maxReusedBuf || cap(next.partial) > maxReusedBuf {
+		t.Errorf("oversized buffers carried over: arena cap %d, partial cap %d, limit %d", cap(next.arena), cap(next.partial), maxReusedBuf)
+	}
+	_, want := readContainer(t, bytes.NewReader(stream))
+	var got [][]byte
+	for {
+		p, err := next.nextPacket()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("nextPacket: %v", err)
+		}
+		got = append(got, bytes.Clone(p))
+	}
+	if len(got) != len(want) {
+		t.Fatalf("reused reader returned %d packets, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if !bytes.Equal(got[i], want[i]) {
+			t.Fatalf("packet %d differs after reuse", i)
+		}
+	}
 }

@@ -297,7 +297,10 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 		if _, err := d.rs.Seek(d.base, io.SeekStart); err != nil {
 			return d.seekFailed(err)
 		}
-		cr, err := newContainerReader(d.rs)
+		d.br.Reset(d.rs)
+		// A fresh reader, not d.cr reset in place: a failed rebuild must leave d.cr
+		// intact for the landing seek that recovers from it.
+		cr, err := newContainerReader(d.br, nil)
 		if err != nil {
 			return d.seekFailed(err)
 		}
@@ -308,11 +311,10 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 			return d.seekFailed(err)
 		}
 		d.cr.repositionAt(d.rs)
-		pg, err := readPage(d.cr.br)
-		if err != nil {
+		if err := readPage(d.cr.br, &d.cr.pg); err != nil {
 			return d.seekFailed(err)
 		}
-		if err := d.cr.processPage(pg); err != nil {
+		if err := d.cr.processPage(&d.cr.pg); err != nil {
 			return d.seekFailed(err)
 		}
 		// The packets that complete on this page start before its granule; the
@@ -533,14 +535,16 @@ func (d *Decoder) decodedTotal(idx seekIndex, prev pageRef, havePrev bool) (tota
 	if _, err := d.rs.Seek(start, io.SeekStart); err != nil {
 		return 0, false, err
 	}
+	// This pass and checkInitialGranule read through their own small buffers, not
+	// d.br: d.br holds the sequential read-ahead that ensureIndex must leave intact.
 	br := bufio.NewReader(io.LimitReader(d.rs, idx.linkEnd-start))
 	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1}
 	if havePrev {
 		total = prev.granule
 	}
 	for first := true; ; first = false {
-		pg, err := readPage(br)
-		if err != nil {
+		pg := &cr.pg
+		if err := readPage(br, pg); err != nil {
 			if errors.Is(err, io.EOF) {
 				return total, false, nil
 			}
@@ -574,8 +578,8 @@ func (d *Decoder) checkInitialGranule(idx seekIndex) (cache bool, err error) {
 	br := bufio.NewReader(io.LimitReader(d.rs, idx.linkEnd-idx.audioStart))
 	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1}
 	for {
-		pg, err := readPage(br)
-		if err != nil {
+		pg := &cr.pg
+		if err := readPage(br, pg); err != nil {
 			if errors.Is(err, io.EOF) {
 				return false, nil
 			}

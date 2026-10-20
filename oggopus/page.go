@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 )
 
 // Ogg physical bitstream constants (RFC 3533 section 6).
@@ -59,6 +60,8 @@ type page struct {
 	sequence uint32
 	segTable []byte
 	body     []byte
+
+	raw []byte // readPage's reusable backing store; segTable and body alias it. parsePage leaves it nil.
 }
 
 // writePage serialises a single Ogg page to w. segTable must hold 1..255 lacing
@@ -100,62 +103,73 @@ func writePage(w io.Writer, flags headerType, granule int64, serial, sequence ui
 // It is unwrapped by the reader to distinguish resync-worthy framing errors.
 var errBadCapture = errors.New("oggopus: missing OggS capture pattern")
 
-// readPage reads and validates one Ogg page from r. It returns io.EOF only when
-// r is exhausted at a clean page boundary (no bytes buffered for a new page);
+// readPage reads and validates one Ogg page from r into pg. It returns io.EOF only
+// when r is exhausted at a clean page boundary (no bytes buffered for a new page);
 // a truncated page in progress returns io.ErrUnexpectedEOF. The CRC is verified
-// with pageCRC, the same check parsePage applies to an in-memory page.
-func readPage(r *bufio.Reader) (*page, error) {
-	var hdr [pageHeaderFixedLen]byte
+// with pageCRC, the same check parsePage applies to an in-memory page. It accepts
+// exactly the pages parsePage accepts.
+//
+// The page is read into pg.raw, which is reused from call to call, so pg.segTable
+// and pg.body alias it and stay valid only until the next readPage into the same
+// pg. On an error pg.segTable and pg.body are nil.
+func readPage(r *bufio.Reader, pg *page) error {
+	pg.segTable, pg.body = nil, nil
 	// Peek before reading so a clean end-of-stream surfaces as io.EOF rather
 	// than io.ErrUnexpectedEOF.
 	if _, err := r.Peek(1); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, io.EOF
+			return io.EOF
 		}
-		return nil, err
+		return err
 	}
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return nil, unexpectedEOF(err)
+	// The header, segment table and body are read back to back into one buffer,
+	// the layout pageCRC and the writer use. Capacity for the fixed header and the
+	// largest segment table comes first, so the table never reallocates the buffer.
+	buf := slices.Grow(pg.raw[:0], pageHeaderFixedLen+maxPageSegments)[:pageHeaderFixedLen]
+	pg.raw = buf
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return unexpectedEOF(err)
 	}
-	if string(hdr[0:4]) != capturePattern {
-		return nil, errBadCapture
+	if string(buf[0:4]) != capturePattern {
+		return errBadCapture
 	}
-	if hdr[4] != pageVersion {
-		return nil, fmt.Errorf("oggopus: unsupported page version %d", hdr[4])
+	if buf[4] != pageVersion {
+		return fmt.Errorf("oggopus: unsupported page version %d", buf[4])
 	}
 
-	segCount := int(hdr[26])
+	segCount := int(buf[26])
 	if segCount == 0 {
-		return nil, errors.New("oggopus: page has empty segment table")
+		return errors.New("oggopus: page has empty segment table")
 	}
-	segTable := make([]byte, segCount)
-	if _, err := io.ReadFull(r, segTable); err != nil {
-		return nil, unexpectedEOF(err)
+	hdrLen := pageHeaderFixedLen + segCount
+	buf = buf[:hdrLen]
+	if _, err := io.ReadFull(r, buf[pageHeaderFixedLen:]); err != nil {
+		return unexpectedEOF(err)
 	}
 	bodyLen := 0
-	for _, l := range segTable {
+	for _, l := range buf[pageHeaderFixedLen:] {
 		bodyLen += int(l)
 	}
-	body := make([]byte, bodyLen)
-	if _, err := io.ReadFull(r, body); err != nil {
-		return nil, unexpectedEOF(err)
+	buf = slices.Grow(buf, bodyLen)[:hdrLen+bodyLen]
+	pg.raw = buf
+	if _, err := io.ReadFull(r, buf[hdrLen:]); err != nil {
+		return unexpectedEOF(err)
 	}
 
 	// Verify the CRC by recomputing over the assembled page with the CRC field
 	// zeroed, exactly as the writer produced it.
-	stored := binary.LittleEndian.Uint32(hdr[crcFieldOffset : crcFieldOffset+4])
-	if sum := pageCRC(hdr[:], segTable, body); sum != stored {
-		return nil, fmt.Errorf("oggopus: page CRC mismatch (stored %#08x, computed %#08x)", stored, sum)
+	stored := binary.LittleEndian.Uint32(buf[crcFieldOffset : crcFieldOffset+4])
+	if sum := pageCRC(buf[:pageHeaderFixedLen], buf[pageHeaderFixedLen:hdrLen], buf[hdrLen:]); sum != stored {
+		return fmt.Errorf("oggopus: page CRC mismatch (stored %#08x, computed %#08x)", stored, sum)
 	}
 
-	return &page{
-		flags:    headerType(hdr[5]),
-		granule:  int64(binary.LittleEndian.Uint64(hdr[6:14])),
-		serial:   binary.LittleEndian.Uint32(hdr[14:18]),
-		sequence: binary.LittleEndian.Uint32(hdr[18:22]),
-		segTable: segTable,
-		body:     body,
-	}, nil
+	pg.flags = headerType(buf[5])
+	pg.granule = int64(binary.LittleEndian.Uint64(buf[6:14]))
+	pg.serial = binary.LittleEndian.Uint32(buf[14:18])
+	pg.sequence = binary.LittleEndian.Uint32(buf[18:22])
+	pg.segTable = buf[pageHeaderFixedLen:hdrLen]
+	pg.body = buf[hdrLen:]
+	return nil
 }
 
 // pageCRC computes the Ogg CRC of a page from its 27-byte fixed header (whose CRC

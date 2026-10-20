@@ -53,8 +53,8 @@ func TestPageRoundTrip(t *testing.T) {
 	if err := writePage(&buf, flagEOS, 123456, 0xdeadbeef, 42, lacing(len(body)), body); err != nil {
 		t.Fatalf("writePage: %v", err)
 	}
-	pg, err := readPage(bufio.NewReader(&buf))
-	if err != nil {
+	pg := new(page)
+	if err := readPage(bufio.NewReader(&buf), pg); err != nil {
 		t.Fatalf("readPage: %v", err)
 	}
 	if pg.flags != flagEOS || pg.granule != 123456 || pg.serial != 0xdeadbeef || pg.sequence != 42 {
@@ -67,7 +67,7 @@ func TestPageRoundTrip(t *testing.T) {
 
 func TestReadPageCleanEOF(t *testing.T) {
 	var buf bytes.Buffer
-	if _, err := readPage(bufio.NewReader(&buf)); !errors.Is(err, io.EOF) {
+	if err := readPage(bufio.NewReader(&buf), new(page)); !errors.Is(err, io.EOF) {
 		t.Fatalf("empty reader: got %v, want io.EOF", err)
 	}
 }
@@ -78,20 +78,39 @@ func TestReadPageRejectsCorruption(t *testing.T) {
 	t.Run("bad capture", func(t *testing.T) {
 		b := bytes.Clone(good)
 		b[0] = 'X'
-		if _, err := readPage(bufio.NewReader(bytes.NewReader(b))); !errors.Is(err, errBadCapture) {
+		if err := readPage(bufio.NewReader(bytes.NewReader(b)), new(page)); !errors.Is(err, errBadCapture) {
 			t.Fatalf("got %v, want errBadCapture", err)
+		}
+	})
+	t.Run("unsupported version", func(t *testing.T) {
+		b := bytes.Clone(good)
+		b[4] = 1
+		if err := readPage(bufio.NewReader(bytes.NewReader(b)), new(page)); err == nil {
+			t.Fatalf("page version 1 accepted")
+		}
+	})
+	t.Run("empty segment table", func(t *testing.T) {
+		b := bytes.Clone(good)
+		b[26] = 0
+		if err := readPage(bufio.NewReader(bytes.NewReader(b)), new(page)); err == nil {
+			t.Fatalf("page with no segments accepted")
+		}
+	})
+	t.Run("truncated header", func(t *testing.T) {
+		if err := readPage(bufio.NewReader(bytes.NewReader(good[:10])), new(page)); !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("got %v, want io.ErrUnexpectedEOF", err)
 		}
 	})
 	t.Run("bad crc", func(t *testing.T) {
 		b := bytes.Clone(good)
 		b[crcFieldOffset] ^= 0xff
-		if _, err := readPage(bufio.NewReader(bytes.NewReader(b))); err == nil {
+		if err := readPage(bufio.NewReader(bytes.NewReader(b)), new(page)); err == nil {
 			t.Fatalf("corrupt CRC accepted")
 		}
 	})
 	t.Run("truncated body", func(t *testing.T) {
 		b := good[:len(good)-3]
-		if _, err := readPage(bufio.NewReader(bytes.NewReader(b))); !errors.Is(err, io.ErrUnexpectedEOF) {
+		if err := readPage(bufio.NewReader(bytes.NewReader(b)), new(page)); !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Fatalf("got %v, want io.ErrUnexpectedEOF", err)
 		}
 	})
@@ -140,7 +159,10 @@ func drainPages(t *testing.T, r io.Reader) []*page {
 	br := bufio.NewReader(r)
 	var pages []*page
 	for {
-		pg, err := readPage(br)
+		// A fresh page per read: readPage reuses a page's buffer, and the caller
+		// keeps every page.
+		pg := new(page)
+		err := readPage(br, pg)
 		if errors.Is(err, io.EOF) {
 			return pages
 		}
@@ -159,7 +181,8 @@ func TestParsePage(t *testing.T) {
 	if err != nil || n != len(good) || pg.serial != 0x12345678 || pg.flags != flagBOS {
 		t.Fatalf("parsePage(golden + trailing) = %+v, %d, %v", pg, n, err)
 	}
-	ref, err := readPage(bufio.NewReader(bytes.NewReader(good)))
+	ref := new(page)
+	err = readPage(bufio.NewReader(bytes.NewReader(good)), ref)
 	if err != nil || ref.granule != pg.granule || !bytes.Equal(ref.body, pg.body) || !bytes.Equal(ref.segTable, pg.segTable) {
 		t.Fatalf("readPage disagrees with parsePage: %+v, %v", ref, err)
 	}

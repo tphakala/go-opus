@@ -18,9 +18,11 @@ func FuzzReadPage(f *testing.F) {
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		br := bufio.NewReader(bytes.NewReader(data))
+		// One page across iterations, so pages of different sizes exercise the
+		// reuse of its buffer.
+		var pg page
 		for range 64 {
-			pg, err := readPage(br)
-			if err != nil {
+			if err := readPage(br, &pg); err != nil {
 				return
 			}
 			// Sanity: a returned page must have a consistent body length.
@@ -72,7 +74,7 @@ func FuzzContainerReader(f *testing.F) {
 	f.Add([]byte("OggS garbage"))
 
 	f.Fuzz(func(_ *testing.T, data []byte) {
-		cr, err := newContainerReader(bytes.NewReader(data))
+		cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(data)), nil)
 		if err != nil {
 			return
 		}

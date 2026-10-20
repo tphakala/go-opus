@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 )
 
 // pageInfo records the structural facts of one parsed page. It exists so tests
@@ -32,8 +33,11 @@ type containerReader struct {
 	tags      opusTags
 
 	partial []byte   // bytes of a packet still spanning pages
-	queue   [][]byte // completed packets from the current page
+	queue   [][]byte // completed packets from the current page; each aliases arena
 	qi      int      // index of the next packet to serve from queue
+
+	pg    page   // readPage scratch, reused for every page
+	arena []byte // backing store for the packets in queue, rewritten for every page
 
 	lastGranule  int64 // granule of the most recent page that completed a packet
 	finalGranule int64 // granule of the EOS page, or -1 if not yet seen
@@ -47,11 +51,33 @@ type containerReader struct {
 	consumed int64
 }
 
+// maxReusedBuf is the largest capacity of the packet arena or the partial-packet
+// buffer that newContainerReader carries over from a previous reader. A normal
+// stream stays below it: the arena holds at most one page body plus a carried
+// fragment. Larger buffers come from a page-spanning packet or a huge OpusTags and
+// are dropped, so one such stream does not pin its memory in a pooled Decoder.
+const maxReusedBuf = 2 * maxPageBodyLen
+
 // newContainerReader reads and validates the OpusHead and OpusTags header
 // packets, leaving the reader positioned at the first audio packet. A first
 // packet without the OpusHead magic returns an error wrapping ErrNotOpus.
-func newContainerReader(r io.Reader) (*containerReader, error) {
-	cr := &containerReader{br: bufio.NewReader(r), finalGranule: -1}
+//
+// br is the buffered source. reuse, when not nil, is a reader of an earlier stream
+// whose page, packet and queue buffers are recycled and whose struct is
+// overwritten; the caller must not use it afterwards.
+func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerReader, error) {
+	cr := reuse
+	if cr == nil {
+		cr = new(containerReader)
+	}
+	arena, partial := cr.arena[:0], cr.partial[:0]
+	if cap(arena) > maxReusedBuf {
+		arena = nil
+	}
+	if cap(partial) > maxReusedBuf {
+		partial = nil
+	}
+	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: arena, queue: cr.queue[:0], partial: partial}
 	hp, err := cr.nextRawPacket()
 	if err != nil {
 		return nil, headerErr("OpusHead", err)
@@ -73,7 +99,9 @@ func newContainerReader(r io.Reader) (*containerReader, error) {
 	return cr, nil
 }
 
-// nextPacket returns the next audio packet, or io.EOF when the stream ends.
+// nextPacket returns the next audio packet, or io.EOF when the stream ends. The
+// packet aliases the reader's arena and is valid until the next call to nextPacket
+// or nextRawPacket, which may read a page into that arena.
 func (cr *containerReader) nextPacket() ([]byte, error) {
 	return cr.nextRawPacket()
 }
@@ -92,7 +120,8 @@ func (cr *containerReader) totalSamples() (int64, bool) {
 // nextRawPacket returns the next reassembled packet from the logical stream,
 // reading pages as needed and adding the size of each page read to consumed. It
 // serves the OpusHead and OpusTags packets too; newContainerReader consumes those
-// before returning.
+// before returning. Like nextPacket, the returned packet is valid only until the
+// next call.
 func (cr *containerReader) nextRawPacket() ([]byte, error) {
 	for {
 		if cr.qi < len(cr.queue) {
@@ -103,8 +132,8 @@ func (cr *containerReader) nextRawPacket() ([]byte, error) {
 		if cr.sawEOS {
 			return nil, io.EOF
 		}
-		pg, err := readPage(cr.br)
-		if err != nil {
+		pg := &cr.pg
+		if err := readPage(cr.br, pg); err != nil {
 			return nil, err // io.EOF here means a clean end with no EOS page
 		}
 		cr.consumed += int64(pageHeaderFixedLen + len(pg.segTable) + len(pg.body))
@@ -148,14 +177,22 @@ func (cr *containerReader) processPage(pg *page) error {
 
 	cr.queue = cr.queue[:0]
 	cr.qi = 0
+	// Packets are copied into the arena, which is rewritten for every page. Growing
+	// it once up front keeps it from reallocating mid-page, and only a page that
+	// completes a packet writes to it, so a run of continuation-only pages grows
+	// partial alone.
+	cr.arena = cr.arena[:0]
+	if pg.completesPacket() {
+		cr.arena = slices.Grow(cr.arena, len(cr.partial)+len(pg.body))
+	}
 	off := 0
 	for _, l := range pg.segTable {
 		cr.partial = append(cr.partial, pg.body[off:off+int(l)]...)
 		off += int(l)
 		if l < maxSegmentLen {
-			pkt := make([]byte, len(cr.partial))
-			copy(pkt, cr.partial)
-			cr.queue = append(cr.queue, pkt)
+			start := len(cr.arena)
+			cr.arena = append(cr.arena, cr.partial...)
+			cr.queue = append(cr.queue, cr.arena[start:len(cr.arena):len(cr.arena)])
 			cr.partial = cr.partial[:0]
 		}
 	}
