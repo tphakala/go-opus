@@ -533,6 +533,18 @@ func TestSeekErrors(t *testing.T) {
 		if _, err := d.Read(make([]byte, 8)); !errors.Is(err, errInjected) {
 			t.Fatalf("Read err = %v, want the latched error", err)
 		}
+		// The source is no longer where the decoder left it, so an exact seek must
+		// restart rather than decode forward over the latched error.
+		if got, err := d.SeekToSampleExact(1000); err != nil || got != 1000 {
+			t.Fatalf("SeekToSampleExact after the latch = %d, %v", got, err)
+		}
+		buf := make([]byte, 4000)
+		if _, err := io.ReadFull(d, buf); err != nil {
+			t.Fatalf("Read after the exact seek: %v", err)
+		}
+		if !bytes.Equal(buf, want[2000:6000]) {
+			t.Fatal("output after the exact seek differs from sequential decoding")
+		}
 	})
 }
 
