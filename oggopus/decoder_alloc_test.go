@@ -202,3 +202,28 @@ func TestDecoderReadsCallerBufioReaderInPlace(t *testing.T) {
 		t.Fatalf("after both streams the reader holds %d bytes (err %v), want 0", len(rest), err)
 	}
 }
+
+// TestDecoderBufioSourceFailures pins that a header or codec failure on a
+// caller's *bufio.Reader returns an error. A Decoder that has only been given
+// *bufio.Reader sources has no read buffer of its own, so the failure paths must
+// not touch one.
+func TestDecoderBufioSourceFailures(t *testing.T) {
+	garbage := func() *bufio.Reader {
+		return bufio.NewReader(bytes.NewReader([]byte("this is not an Ogg stream")))
+	}
+	if _, err := NewDecoder(garbage()); err == nil {
+		t.Fatal("NewDecoder over garbage: want error")
+	}
+	var d Decoder
+	if err := d.Reset(garbage()); err == nil {
+		t.Fatal("Reset over garbage: want error")
+	}
+
+	stream := seekFixture(t, 1, 20, 48000, 64000)
+	orig := newFrameDecoder
+	t.Cleanup(func() { newFrameDecoder = orig })
+	newFrameDecoder = func(opusHead) (frameDecoder, error) { return nil, errors.New("codec unavailable") }
+	if _, err := NewDecoder(bufio.NewReader(bytes.NewReader(stream))); err == nil {
+		t.Fatal("NewDecoder with a failing codec constructor: want error")
+	}
+}

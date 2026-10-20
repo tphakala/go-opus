@@ -22,8 +22,9 @@ var (
 // rates. Label decoded PCM with this, never with Info.InputSampleRate.
 const OutputSampleRate = 48000
 
-// sourceBufSize is the size of the buffer a Decoder reads its source through. It
-// matches the stream buffers of go-wav and go-mp3 and is larger than the biggest
+// sourceBufSize is the size of the buffer a Decoder reads a source other than a
+// *bufio.Reader through. It matches the 64 KiB stream buffers of go-wav (v1.1.0)
+// and go-mp3 (v0.2.0) and is larger than the biggest
 // Ogg page (maxPageLen), so a page is never read around the buffer. A Decoder
 // allocates it once and keeps it for its life; Reset only re-points it.
 const sourceBufSize = 64 << 10
@@ -99,9 +100,10 @@ type Decoder struct {
 // That buffer reads ahead: the Decoder may take up to 64 KiB from r beyond the
 // pages it has parsed, including bytes after the end of the stream. To decode a
 // stream that other data follows in r, such as a chained stream for a later Reset,
-// pass a *bufio.Reader: the Decoder reads it page by page and leaves the bytes
-// after the end-of-stream page in it. A NewDecoder or Reset that fails may already
-// have consumed bytes from r.
+// pass a *bufio.Reader: the Decoder reads it page by page, so once it has decoded
+// a stream that ends with an end-of-stream page, the bytes after that page are
+// still in the reader. Without that page the Decoder may read into whatever
+// follows. A NewDecoder or Reset that fails may already have consumed bytes from r.
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	d := &Decoder{}
 	if err := d.init(r, nil); err != nil {
@@ -112,8 +114,9 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 
 // Reset rebinds the Decoder to a new source r, re-parsing its OpusHead and
 // OpusTags headers, so one Decoder can decode many independent streams. Its source
-// read buffer, its decoded-PCM buffer and the container's page and packet buffers
-// are reused; the codec is rebuilt for each stream. It mirrors Encoder.Reset and
+// read buffer (used when r is not a *bufio.Reader), its decoded-PCM buffer and the
+// container's page and packet buffers are reused; the codec is rebuilt for each
+// stream. It mirrors Encoder.Reset and
 // the sibling pcm.Decoder.Reset in go-wav, go-flac, and go-aac: the pooling path
 // for a "many short clips" workload.
 //
@@ -166,7 +169,8 @@ func (d *Decoder) init(r io.Reader, reuse *containerReader) error {
 	if r == nil {
 		return errNilReader
 	}
-	// Capture seekability before r is wrapped in the Decoder's read buffer.
+	// Capture seekability from r itself, before it may be wrapped in the Decoder's
+	// read buffer.
 	// An io.Seeker that cannot report its position (a pipe behind *os.File) is not
 	// seekable for our purposes.
 	var rs io.ReadSeeker
