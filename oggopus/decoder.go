@@ -94,16 +94,21 @@ type Decoder struct {
 // io.Seeker and answer Seek(0, io.SeekCurrent). Offsets are then relative to the
 // position of r at this call, so a stream embedded in a larger source works.
 //
-// Unless r is a *bufio.Reader, it is read through a 64 KiB buffer that the
+// A Decoder keeps its page and packet buffers between packets and across Reset;
+// they stay under about 450 KiB. A packet that spans several pages, such as a
+// large OpusTags, needs buffers of its own size until the Decoder has read past
+// it.
+//
+// Unless r is a *bufio.Reader, it is also read through a 64 KiB buffer that the
 // Decoder allocates once and that Reset reuses, so a program holding many Decoders
-// should budget that much for each, plus buffers for the largest Ogg page seen.
-// That buffer reads ahead: the Decoder may take up to 64 KiB from r beyond the
-// pages it has parsed, including bytes after the end of the stream. To decode a
-// stream that other data follows in r, such as a chained stream for a later Reset,
-// pass a *bufio.Reader: the Decoder reads it page by page, so once it has decoded
-// a stream that ends with an end-of-stream page, the bytes after that page are
-// still in the reader. Without that page the Decoder may read into whatever
-// follows. A NewDecoder or Reset that fails may already have consumed bytes from r.
+// should budget that much more for each. That buffer reads ahead: the Decoder may
+// take up to 64 KiB from r beyond the pages it has parsed, including bytes after
+// the end of the stream. To decode a stream that other data follows in r, such as
+// a chained stream for a later Reset, pass a *bufio.Reader: the Decoder reads it
+// page by page, so once it has decoded a stream that ends with an end-of-stream
+// page, the bytes after that page are still in the reader. Without that page the
+// Decoder may read into whatever follows. A NewDecoder or Reset that fails may
+// already have consumed bytes from r.
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	d := &Decoder{}
 	if err := d.init(r, nil); err != nil {

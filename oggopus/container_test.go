@@ -176,6 +176,77 @@ func TestContainerPacketSpanningPages(t *testing.T) {
 	assertPageStructure(t, cr)
 }
 
+// TestContainerReleasesOversizedPacketBuffers pins that a packet spanning
+// several pages does not keep the packet arena or the partial-packet buffer at
+// its size for the rest of the stream: once the reader has moved past it, both
+// are back within maxReusedBuf.
+func TestContainerReleasesOversizedPacketBuffers(t *testing.T) {
+	pkts := [][]byte{
+		bytes.Repeat([]byte{0x11}, 30),
+		makeRamp(200000), // spans several pages, well over maxReusedBuf
+		bytes.Repeat([]byte{0x22}, maxPageBodyLen),
+		bytes.Repeat([]byte{0x33}, 17),
+	}
+	const dur, preSkip = 960, 312
+	var buf bytes.Buffer
+	writeContainer(t, &buf, testHead(1, preSkip), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
+
+	cr, got := readContainer(t, &buf)
+	if len(got) != len(pkts) {
+		t.Fatalf("packet count: got %d, want %d", len(got), len(pkts))
+	}
+	for i := range pkts {
+		if !bytes.Equal(got[i], pkts[i]) {
+			t.Fatalf("packet %d differs: got %d bytes, want %d", i, len(got[i]), len(pkts[i]))
+		}
+	}
+	if c := cap(cr.arena); c > maxReusedBuf {
+		t.Errorf("arena capacity %d after the large packet, want at most %d", c, maxReusedBuf)
+	}
+	if c := cap(cr.partial); c > maxReusedBuf {
+		t.Errorf("partial capacity %d after the large packet, want at most %d", c, maxReusedBuf)
+	}
+}
+
+// TestContainerLargePacketsDoNotReallocate pins that packets up to a page body
+// long, which span two pages, are reassembled in the reused arena and partial
+// buffer: reading 100 of them costs about the same allocations as reading 10.
+// 61200 bytes is the largest Opus packet (48 frames of 1275 bytes); a full page
+// body makes the arena need two page bodies, whose grown and rounded-up capacity
+// must stay within maxReusedBuf.
+func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
+	const slack = 16 // containerReader.pages grows by doubling
+	for _, size := range []int{61200, maxPageBodyLen} {
+		read := func(n int) float64 {
+			pkts := make([][]byte, n)
+			for i := range pkts {
+				pkts[i] = makeRamp(size)
+			}
+			var buf bytes.Buffer
+			writeContainer(t, &buf, testHead(1, 312), opusTags{vendor: "v"}, pkts, 960, int64(n*960-312))
+			data := buf.Bytes()
+			return testing.AllocsPerRun(3, func() {
+				cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(data)), nil)
+				if err != nil {
+					t.Fatalf("newContainerReader: %v", err)
+				}
+				for {
+					if _, err := cr.nextPacket(); err != nil {
+						if !errors.Is(err, io.EOF) {
+							t.Fatalf("nextPacket: %v", err)
+						}
+						return
+					}
+				}
+			})
+		}
+		short, long := read(10), read(100)
+		if long-short > slack {
+			t.Errorf("%d-byte packets: 100 cost %.0f allocations, 10 cost %.0f; want a difference of at most %d", size, long, short, slack)
+		}
+	}
+}
+
 // TestNonSeekableDurationGuard writes a full stream through a write-only sink
 // (no io.Seeker) and asserts the recovered duration equals the exact source
 // sample count. This is the structural proof that oggopus does not depend on

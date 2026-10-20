@@ -52,11 +52,18 @@ type containerReader struct {
 }
 
 // maxReusedBuf is the largest capacity of the packet arena or the partial-packet
-// buffer that newContainerReader carries over from a previous reader. A normal
-// stream stays below it: the arena holds at most one page body plus a carried
-// fragment. Larger buffers come from a page-spanning packet or a huge OpusTags and
-// are dropped, so one such stream does not pin its memory in a pooled Decoder.
-const maxReusedBuf = 2 * maxPageBodyLen
+// buffer that a containerReader keeps. With packets no longer than a page body
+// (an Opus packet is at most 48 frames of 1275 bytes), either buffer needs at most
+// two page bodies: the arena holds one page body plus a carried fragment. Growing
+// a slice can overshoot its need by a quarter plus 192 bytes (nextslicecap,
+// runtime/slice.go:341, Go 1.27.3) and a large allocation is then rounded up to an
+// 8 KiB page (roundupsize, runtime/msize.go:31), so the limit adds that headroom
+// and such a buffer is never dropped. A larger one comes from a packet that spans
+// several pages, such as a huge OpusTags. processPage drops it once that packet is
+// done, and newContainerReader does not carry it over from a previous reader, so
+// one such packet does not pin its memory for the rest of the stream or in a
+// pooled Decoder.
+const maxReusedBuf = 2*maxPageBodyLen + 2*maxPageBodyLen/4 + 16<<10
 
 // newContainerReader reads and validates the OpusHead and OpusTags header
 // packets, leaving the reader positioned at the first audio packet. A first
@@ -183,8 +190,14 @@ func (cr *containerReader) processPage(pg *page) error {
 	// Packets are copied into the arena, which is rewritten for every page. Growing
 	// it once up front keeps it from reallocating mid-page, and only a page that
 	// completes a packet writes to it, so a run of continuation-only pages grows
-	// partial alone.
-	cr.arena = cr.arena[:0]
+	// partial alone. A packet that spanned several pages can leave the arena far
+	// larger than a page; such an arena is dropped rather than held for the rest of
+	// the stream.
+	if cap(cr.arena) > maxReusedBuf {
+		cr.arena = nil
+	} else {
+		cr.arena = cr.arena[:0]
+	}
 	if pg.completesPacket() {
 		cr.arena = slices.Grow(cr.arena, len(cr.partial)+len(pg.body))
 	}
@@ -196,7 +209,11 @@ func (cr *containerReader) processPage(pg *page) error {
 			start := len(cr.arena)
 			cr.arena = append(cr.arena, cr.partial...)
 			cr.queue = append(cr.queue, cr.arena[start:len(cr.arena):len(cr.arena)])
-			cr.partial = cr.partial[:0]
+			if cap(cr.partial) > maxReusedBuf {
+				cr.partial = nil // the multi-page packet it held is complete
+			} else {
+				cr.partial = cr.partial[:0]
+			}
 		}
 	}
 
