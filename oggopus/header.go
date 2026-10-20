@@ -151,7 +151,7 @@ func parseOpusTags(b []byte) (opusTags, error) {
 
 	vendorLen := int(binary.LittleEndian.Uint32(b[pos : pos+4]))
 	pos += 4
-	if vendorLen < 0 || pos+vendorLen > len(b) {
+	if vendorLen < 0 || vendorLen > len(b)-pos {
 		return opusTags{}, fmt.Errorf("oggopus: OpusTags vendor length %d overruns packet", vendorLen)
 	}
 	t := opusTags{vendor: string(b[pos : pos+vendorLen])}
@@ -172,7 +172,7 @@ func parseOpusTags(b []byte) (opusTags, error) {
 		}
 		clen := int(binary.LittleEndian.Uint32(b[pos : pos+4]))
 		pos += 4
-		if clen < 0 || pos+clen > len(b) {
+		if clen < 0 || clen > len(b)-pos {
 			return opusTags{}, fmt.Errorf("oggopus: OpusTags comment %d length %d overruns packet", i, clen)
 		}
 		t.comments = append(t.comments, string(b[pos:pos+clen]))

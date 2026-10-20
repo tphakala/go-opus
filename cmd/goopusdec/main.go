@@ -88,7 +88,7 @@ func run(inPath, outPath string, rate, channels int, verify bool) (err error) {
 			lost++
 			continue
 		}
-		if off+length > len(bitData) {
+		if length < 0 || length > len(bitData)-off {
 			return fmt.Errorf("truncated record at offset %d: want %d bytes, have %d", off, length, len(bitData)-off)
 		}
 		payload := bitData[off : off+length]

@@ -77,3 +77,19 @@ func TestRunRejectsBadConfig(t *testing.T) {
 		t.Error("run with rate 44100 should fail, got nil")
 	}
 }
+
+// TestRunRejectsOversizedRecord feeds a record whose length field is 0xffffffff.
+// On a 32-bit build that length converts to -1, which must still be reported as
+// a truncated record rather than slicing the input backwards.
+func TestRunRejectsOversizedRecord(t *testing.T) {
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "in.bit")
+	rec := binary.BigEndian.AppendUint32(nil, 0xffffffff)
+	rec = append(rec, 0, 0, 0, 0, 1, 2, 3, 4)
+	if err := os.WriteFile(inPath, rec, 0o600); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	if err := run(inPath, filepath.Join(dir, "out.pcm"), 48000, 2, false); err == nil {
+		t.Error("run over a record longer than the input should fail, got nil")
+	}
+}
