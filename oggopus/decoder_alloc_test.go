@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"runtime"
 	"testing"
+	"weak"
 )
 
 // drainDecoder decodes d to EOF with WriteTo when buf is nil, otherwise with Read
@@ -104,4 +106,63 @@ func TestDecoderBuffersSourceReads(t *testing.T) {
 	if limit := len(stream)/sourceBufSize + 3; src.reads > limit {
 		t.Errorf("%d source reads for %d bytes, want at most %d", src.reads, len(stream), limit)
 	}
+}
+
+// TestResetReleasesPreviousSource pins that a pooled Decoder does not keep the
+// last source reachable: the read buffer outlives each stream, so Reset must drop
+// its reference to the source, and so must a bind that fails in the container
+// reader or in the codec constructor.
+func TestResetReleasesPreviousSource(t *testing.T) {
+	stream := seekFixture(t, 1, 20, 48000, 64000)
+	d, err := NewDecoder(bytes.NewReader(stream))
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	// bind resets d onto a new source and returns a weak pointer to the source and
+	// the Reset error.
+	bind := func(data []byte) (weak.Pointer[bytes.Reader], error) {
+		r := bytes.NewReader(data)
+		err := d.Reset(r)
+		return weak.Make(r), err
+	}
+	released := func(p weak.Pointer[bytes.Reader]) bool {
+		for range 3 {
+			runtime.GC()
+			if p.Value() == nil {
+				return true
+			}
+		}
+		return false
+	}
+
+	good, err := bind(stream)
+	if err != nil {
+		t.Fatalf("Reset to a valid stream: %v", err)
+	}
+	if err := d.Reset(nil); err == nil {
+		t.Fatal("Reset(nil): want error")
+	}
+	if !released(good) {
+		t.Error("Decoder still references the previous source after Reset(nil)")
+	}
+
+	bad, err := bind([]byte("this is not an Ogg stream"))
+	if err == nil {
+		t.Fatal("Reset to garbage: want error")
+	}
+	if !released(bad) {
+		t.Error("Decoder still references a source whose headers failed to parse")
+	}
+
+	orig := newFrameDecoder
+	t.Cleanup(func() { newFrameDecoder = orig })
+	newFrameDecoder = func(opusHead) (frameDecoder, error) { return nil, errors.New("codec unavailable") }
+	noCodec, err := bind(stream)
+	if err == nil {
+		t.Fatal("Reset with a failing codec constructor: want error")
+	}
+	if !released(noCodec) {
+		t.Error("Decoder still references a source whose codec could not be built")
+	}
+	runtime.KeepAlive(d) // d must stay reachable, or its collection would release the source too
 }
