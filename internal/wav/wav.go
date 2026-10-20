@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // Format errors. Callers can match these with errors.Is.
@@ -40,6 +41,10 @@ const bitsPerSample = 16
 // declared chunk size is attacker-controlled in the general case; io.CopyN stops
 // at EOF anyway, so this only guards against a silly loop on a crafted header.
 const maxChunkSkip = 1 << 30
+
+// maxFmtSize is the largest fmt chunk parseFmt reads into memory: an 18-byte
+// WAVEFORMATEX whose cbSize field declares the largest extension it can.
+const maxFmtSize = 18 + math.MaxUint16
 
 // Format describes the PCM data in a WAVE stream.
 type Format struct {
@@ -132,12 +137,16 @@ func (w *Reader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// parseFmt reads a fmt chunk of the declared size and validates that it
+// parseFmt reads a fmt chunk of the declared size, rejecting one larger than
+// maxFmtSize before allocating for it, and validates that it
 // describes 16-bit integer PCM.
 func (w *Reader) parseFmt(r io.Reader, size uint32) error {
 	// 16 bytes is the PCM fmt chunk; extensible adds cbSize and a 22-byte tail.
 	if size < 16 {
 		return fmt.Errorf("%w: fmt chunk is %d bytes, want at least 16", ErrMalformed, size)
+	}
+	if size > maxFmtSize {
+		return fmt.Errorf("%w: fmt chunk is %d bytes, want at most %d", ErrMalformed, size, maxFmtSize)
 	}
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(r, buf); err != nil {

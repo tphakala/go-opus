@@ -95,14 +95,14 @@ task test:poison   # codec tests with the scratch poison harness
 task bench         # all benchmarks with allocation counts
 task reftest       # libopus differential harness (tag refc; needs submodule and C toolchain)
 task vectors       # fetch and verify the RFC conformance vectors
-task vet           # go vet for amd64 and arm64
+task vet           # go vet for amd64, arm64 and 386
 task lint          # golangci-lint run ./...
 task tidy          # go mod tidy and verify
 task check         # build, vet, lint, race tests
 task release VERSION=x.y.z   # bump opus.Version, verify, commit and tag (pushes nothing)
 ```
 
-Run `task check` before pushing, and `task reftest` and `task test:poison` for anything under `internal/`. CI additionally runs the cross-build matrix (linux, darwin, windows on amd64 and arm64), the forced-Go-fallback job, a dispatch-count step in the test job, the fuzz smoke job, govulncheck and OpenSSF Scorecard.
+Run `task check` before pushing, and `task reftest` and `task test:poison` for anything under `internal/`. CI additionally runs the cross-build matrix (linux, darwin, windows on amd64 and arm64), the forced-Go-fallback job, a 386 test job (the only leg with a 32-bit int), a dispatch-count step in the test job, the fuzz smoke job, govulncheck and OpenSSF Scorecard.
 
 ## Conventions
 

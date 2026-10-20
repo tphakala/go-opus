@@ -100,8 +100,9 @@ func TestSamplesPerFrame(t *testing.T) {
 		toc := ParseTOC(tc.config << 3)
 		for _, fs := range rates {
 			// Expected samples = fs * duration_seconds. Using microseconds keeps
-			// this exact for all standard rates.
-			want := fs * tc.dur.Microseconds() / 1_000_000
+			// this exact for all standard rates; int64 keeps 48000 * 60000 from
+			// overflowing a 32-bit int.
+			want := int(int64(fs) * int64(tc.dur.Microseconds()) / 1_000_000)
 			if got := toc.SamplesPerFrame(fs); got != want {
 				t.Errorf("config %d fs=%d: SamplesPerFrame=%d want %d", tc.config, fs, got, want)
 			}

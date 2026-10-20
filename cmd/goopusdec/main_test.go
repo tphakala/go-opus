@@ -77,3 +77,22 @@ func TestRunRejectsBadConfig(t *testing.T) {
 		t.Error("run with rate 44100 should fail, got nil")
 	}
 }
+
+// TestRunRejectsOversizedRecord feeds records whose length field exceeds the
+// input. On a 32-bit build 0xffffffff converts to -1, and 0x7ffffff8 stays
+// positive but wraps negative once the 8-byte header offset is added; both must
+// be reported as a truncated record rather than slicing the input backwards.
+func TestRunRejectsOversizedRecord(t *testing.T) {
+	for _, length := range []uint32{0xffffffff, 0x7ffffff8} {
+		dir := t.TempDir()
+		inPath := filepath.Join(dir, "in.bit")
+		rec := binary.BigEndian.AppendUint32(nil, length)
+		rec = append(rec, 0, 0, 0, 0, 1, 2, 3, 4)
+		if err := os.WriteFile(inPath, rec, 0o600); err != nil {
+			t.Fatalf("write input: %v", err)
+		}
+		if err := run(inPath, filepath.Join(dir, "out.pcm"), 48000, 2, false); err == nil {
+			t.Errorf("run over a record of length %#x longer than the input should fail, got nil", length)
+		}
+	}
+}

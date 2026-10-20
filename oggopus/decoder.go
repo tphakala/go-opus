@@ -349,9 +349,11 @@ func (d *Decoder) fill() (done bool, err error) {
 		perChan -= drop
 		d.delivered += int64(drop)
 	}
-	// End-trim so the total delivered equals finalGranule - preSkip.
+	// End-trim so the total delivered equals finalGranule - preSkip. The floor is
+	// taken in int64 before converting: a limit learned only at the EOS page can sit
+	// further below delivered than a 32-bit int holds.
 	if d.limit >= 0 && d.delivered+int64(perChan) > d.limit {
-		keep := max(int(d.limit-d.delivered), 0)
+		keep := int(max(d.limit-d.delivered, 0))
 		samples = samples[:keep*d.info.Channels]
 		perChan = keep
 	}

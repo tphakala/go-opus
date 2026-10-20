@@ -622,13 +622,17 @@ func TestEncoderBitrateDoesNotWrap(t *testing.T) {
 			"this test cannot tell a wrap from a clamp")
 	}
 
-	for _, bitrate := range []int{
-		maxBitrate + 1,     // just over the documented ceiling
-		1 << 31,            // MaxInt32 + 1: the first value that wraps
-		4294966296,         // wraps to -1000 == OPUS_AUTO: the silent case
-		4294967396,         // wraps to 100: would clamp UP to 500, not down to the max
-		math.MaxInt32 * 16, // absurd, still must clamp rather than wrap
+	for _, b := range []int64{
+		int64(maxBitrate) + 1, // just over the documented ceiling
+		1 << 31,               // MaxInt32 + 1: the first value that wraps
+		4294966296,            // wraps to -1000 == OPUS_AUTO: the silent case
+		4294967396,            // wraps to 100: would clamp UP to 500, not down to the max
+		math.MaxInt32 * 16,    // absurd, still must clamp rather than wrap
 	} {
+		if b > math.MaxInt {
+			continue // a 32-bit int cannot hold the value, so it cannot wrap either
+		}
+		bitrate := int(b)
 		got := encodeOneFrame(t, EncoderConfig{SampleRate: 48000, Channels: ch, Bitrate: bitrate})
 		if !bytes.Equal(got, ref) {
 			if bytes.Equal(got, auto) {
@@ -702,7 +706,7 @@ func encodeOneFrame(t *testing.T, cfg EncoderConfig) []byte {
 	}
 	pcm := make([]int16, 960*cfg.Channels)
 	for i := range pcm {
-		pcm[i] = int16((i*2654435761)>>16) % 8192
+		pcm[i] = int16((int64(i)*2654435761)>>16) % 8192
 	}
 	buf := make([]byte, 4000)
 	n, err := e.Encode(pcm, buf)

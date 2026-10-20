@@ -147,6 +147,29 @@ jobs:
       - name: Run the celt differential suite against the forced Go fallback
         run: go test -count=1 -timeout 20m ./internal/celt/...
 
+  # 32-bit int. Every other test leg runs with a 64-bit int, so a length or sample
+  # count that overflows int32 (a stream-supplied length added to an offset, an
+  # int64 gap converted before it is clamped) passes there and panics on 386 or
+  # arm. The amd64 runner executes 386 binaries natively. -short skips only the
+  # exhaustive SIMD sweep, which the forcego leg already runs over the same pure-Go
+  # fallback that 386 dispatches to.
+  test-386:
+    name: Test (386)
+    runs-on: ubuntu-latest
+    env:
+      GOARCH: '386'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Run tests as 386
+        run: go test -short -timeout 20m ./...
+
   # Differential round-trip against the pinned libopus oracle (FIXED_POINT +
   # DISABLE_FLOAT_API). The cgo harness compiles the vendored libopus sources
   # directly, so only a C compiler is needed (no autotools). This job carries the
@@ -292,7 +315,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        goarch: [amd64, arm64]
+        goarch: [amd64, arm64, 386]
     steps:
       - name: Checkout code
         uses: actions/checkout@v7

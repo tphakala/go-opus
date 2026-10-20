@@ -51,10 +51,11 @@ tasks:
       - scripts/fetch-vectors.sh
 
   vet:
-    desc: Run go vet for amd64 and arm64
+    desc: Run go vet for amd64, arm64 and 386
     cmds:
       - GOARCH=amd64 go vet ./...
       - GOARCH=arm64 go vet ./...
+      - GOOS=linux GOARCH=386 go vet ./... # there is no darwin/386
 
   lint:
     desc: Run golangci-lint

@@ -2,6 +2,7 @@ package oggopus
 
 import (
 	"bytes"
+	"io"
 	"testing"
 )
 
@@ -388,4 +389,25 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+// TestEndTrimLimitBelowDelivered pins the end-trim clamp when the sample limit,
+// which the decoder learns only at the EOS page, is below what it has already
+// delivered. The gap is set so that its low 32 bits are a large positive int:
+// converting it to int before clamping wraps on a 32-bit build and slices far
+// past the decoded frame. The decoder must deliver nothing more and end cleanly.
+func TestEndTrimLimitBelowDelivered(t *testing.T) {
+	d, err := NewDecoder(bytes.NewReader(seekFixture(t, 1, 20, 48000, 64000)))
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	d.limit = 1000
+	d.delivered = d.limit + 1<<32 - 1<<20 // limit - delivered is 1<<20 as an int32
+	n, err := d.WriteTo(io.Discard)
+	if err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("delivered %d bytes past a limit already exceeded, want 0", n)
+	}
 }

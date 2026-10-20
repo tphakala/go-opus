@@ -46,7 +46,7 @@ func TestCRC32BitSerialParity(t *testing.T) {
 func TestCRC32KnownPageVector(t *testing.T) {
 	// goldenHeadPage is the byte-exact page with its CRC field already filled.
 	page := goldenHeadPage()
-	const wantCRC = 0xbbc0113d
+	const wantCRC uint32 = 0xbbc0113d
 
 	// Recompute over the page with the CRC field zeroed, exactly as readPage does.
 	zeroed := make([]byte, len(page))
