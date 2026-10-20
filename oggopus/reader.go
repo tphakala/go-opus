@@ -8,19 +8,6 @@ import (
 	"slices"
 )
 
-// pageInfo records the structural facts of one parsed page. It exists so tests
-// can assert granule progression and paging without re-decoding, the
-// container-structure check the go-flac seekability regression argues for. A
-// containerReader records it only when recordPages is set, which production code
-// never does.
-type pageInfo struct {
-	granule   int64
-	flags     headerType
-	sequence  uint32
-	packets   int  // packets that completed on this page
-	continued bool // page begins with the tail of a prior packet
-}
-
 // containerReader parses an Ogg Opus stream from an io.Reader: it reassembles
 // packets across page boundaries, exposes the OpusHead and OpusTags, and tracks
 // the granule accounting needed for pre-skip and end-trim. It is
@@ -44,27 +31,14 @@ type containerReader struct {
 	finalGranule int64 // granule of the EOS page, or -1 if not yet seen
 	sawEOS       bool
 
-	pages []pageInfo // one entry per page, only when recordPages is set
-
-	// audioLimit is the largest audio packet processPage assembles, set from
-	// OpusHead (audioPacketLimit). Zero fails every non-empty audio packet, so a
-	// reader built without it is loud rather than unbounded.
-	audioLimit int
-	// hdrLeft counts the header packets (OpusHead, then OpusTags) still to
-	// complete. While it is above zero processPage keeps at most
-	// maxHeaderPacketLen bytes of the packet and drops the rest. The zero value
-	// means audio, which the private readers in seek.go want.
-	hdrLeft int
-	// tagsCut reports that the OpusTags packet was cut at maxHeaderPacketLen.
-	tagsCut bool
-	// err latches the limit error: once processPage returns it, nextRawPacket
-	// returns it again until repositionAt or a new reader clears it. Without the
-	// latch a later page could complete the stored prefix as a packet, or start a
-	// new one from the middle of the oversized packet.
-	err error
-	// recordPages makes processPage fill pages. Tests set it through the reuse
-	// argument of newContainerReader; production never does.
-	recordPages bool
+	// limit is the largest packet processPage assembles. Zero rejects every
+	// non-empty packet, so a reader built without it fails rather than growing
+	// without bound.
+	limit int
+	// cutLong makes processPage keep the first limit bytes of a longer packet and
+	// drop the rest instead of failing. newContainerReader sets it while it reads
+	// OpusHead and OpusTags.
+	cutLong bool
 
 	// consumed counts the bytes of every page read so far (header, segment table
 	// and body). After newContainerReader it is the length of the header pages, so
@@ -76,28 +50,27 @@ type containerReader struct {
 // bytes for N streams (RFC 7845 section 6): per stream, 48 frames of at most 1275
 // bytes (internal/packet/parse.go:226, :330), a TOC byte, a code-3 count byte, 47
 // two-byte frame lengths and a two-byte self-delimited last length. Section 6 also
-// says a demuxer should treat a packet over 61,440 bytes per stream as invalid
-// unless it has a specific reason to allow extra padding. Code-3 padding is
-// otherwise unbounded (internal/packet/parse.go:251-271), so the audio limit
+// says a demuxer should treat a packet over rfcPacketLen bytes per stream as
+// invalid unless it has a specific reason to allow extra padding. Code-3 padding
+// is otherwise unbounded (internal/packet/parse.go:251-271), so the audio limit
 // allows as much padding again.
 const (
+	rfcPacketLen = 61440
 	// streamPacketLimit is the audio packet limit per Opus stream.
-	streamPacketLimit = 2 * 61440
+	streamPacketLimit = 2 * rfcPacketLen
 	// maxHeaderPacketLen is how much of OpusHead or OpusTags is kept; the rest of
 	// a longer one is read and dropped. RFC 7845 section 5.2 lets a reader ignore
 	// comments not fully inside the first 61,440 bytes of the comment header.
-	maxHeaderPacketLen = 61440
+	maxHeaderPacketLen = rfcPacketLen
 )
 
 // audioPacketLimit returns the largest audio packet processPage accepts for a
 // stream with the given OpusHead: streamPacketLimit per Opus stream. A multistream
 // packet is the concatenation of one sub-packet per stream, so the bound scales
-// with the stream count; family 0 has one stream. The max keeps a malformed head
-// with stream count 0 from producing a zero limit before newFrameDecoder rejects it.
+// with the stream count. parseOpusHead leaves the count at zero for mapping family
+// 0, which has one stream; the max also keeps a malformed head with a count of
+// zero from producing a zero limit before newFrameDecoder rejects it.
 func audioPacketLimit(h opusHead) int {
-	if h.mappingFamily == mappingFamily0 {
-		return streamPacketLimit
-	}
 	return max(int(h.streamCount), 1) * streamPacketLimit
 }
 
@@ -127,7 +100,7 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	if cr == nil {
 		cr = new(containerReader)
 	}
-	arena, partial, record := cr.arena[:0], cr.partial[:0], cr.recordPages
+	arena, partial := cr.arena[:0], cr.partial[:0]
 	if cap(arena) > maxReusedBuf {
 		arena = nil
 	}
@@ -138,7 +111,7 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	queue := cr.queue[:cap(cr.queue)]
 	clear(queue)
 	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: arena, queue: queue[:0], partial: partial,
-		recordPages: record, hdrLeft: 2, audioLimit: streamPacketLimit}
+		limit: maxHeaderPacketLen, cutLong: true}
 	hp, err := cr.nextRawPacket()
 	if err != nil {
 		return nil, headerErr("OpusHead", err)
@@ -147,19 +120,24 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	if err != nil {
 		return nil, err
 	}
-	cr.audioLimit = audioPacketLimit(head)
 	tp, err := cr.nextRawPacket()
 	if err != nil {
 		return nil, headerErr("OpusTags", err)
 	}
+	// Audio packets from here on fail over the limit instead. A stream that puts
+	// audio on the page that completes OpusTags breaks RFC 7845 section 3, and an
+	// audio packet completing there has already been held to the header limit.
+	cr.limit, cr.cutLong = audioPacketLimit(head), false
 	var tags opusTags
-	if cr.tagsCut {
-		// Only the magic is checked: the comments are not exposed, and RFC 7845
-		// section 5.2 lets a reader ignore those past the first 61,440 bytes.
-		if string(tp[:len(opusTagsMagic)]) != opusTagsMagic {
-			return nil, fmt.Errorf("oggopus: bad OpusTags magic %q", tp[:len(opusTagsMagic)])
-		}
-	} else if tags, err = parseOpusTags(tp); err != nil {
+	if len(tp) >= maxHeaderPacketLen {
+		// The packet may have been cut, so only the magic is checked: the comments
+		// are not exposed, and RFC 7845 section 5.2 lets a reader ignore those past
+		// the first 61,440 bytes.
+		err = checkOpusTagsMagic(tp)
+	} else {
+		tags, err = parseOpusTags(tp)
+	}
+	if err != nil {
 		return nil, err
 	}
 	cr.head = head
@@ -189,12 +167,9 @@ func (cr *containerReader) totalSamples() (int64, bool) {
 // reading pages as needed and adding the size of each page read to consumed. It
 // serves the OpusHead and OpusTags packets too; newContainerReader consumes those
 // before returning. Like nextPacket, the returned packet is valid only until the
-// next call. Once a packet has gone over the size limit it returns that error
-// (wrapping ErrPacketTooLarge) on every call, until repositionAt.
+// next call. After an error the reader is not resumable: a later call could read
+// on from the middle of the failed page or packet.
 func (cr *containerReader) nextRawPacket() ([]byte, error) {
-	if cr.err != nil {
-		return nil, cr.err
-	}
 	for {
 		if cr.qi < len(cr.queue) {
 			p := cr.queue[cr.qi]
@@ -217,20 +192,20 @@ func (cr *containerReader) nextRawPacket() ([]byte, error) {
 
 // repositionAt rebinds the reader to r, which must be positioned at a page
 // boundary, and drops all packet state so the next page read starts clean. It
-// keeps the parsed headers and serial, and clears a latched ErrPacketTooLarge.
-// lastGranule is left for the caller to set by processing the page it lands on.
+// keeps the parsed headers and serial. lastGranule is left for the caller to set
+// by processing the page it lands on.
 func (cr *containerReader) repositionAt(r io.Reader) {
 	cr.br.Reset(r)
 	cr.queue = cr.queue[:0]
 	cr.qi = 0
 	cr.partial = cr.partial[:0]
-	cr.err = nil
 	cr.sawEOS = false
 	cr.finalGranule = -1
 }
 
 // processPage reassembles the packets on one page into the queue and updates the
-// granule and end-of-stream accounting.
+// granule and end-of-stream accounting. A packet longer than cr.limit fails with
+// ErrPacketTooLarge, or is cut to cr.limit when cr.cutLong is set.
 func (cr *containerReader) processPage(pg *page) error {
 	if !cr.serialSet {
 		cr.serial = pg.serial
@@ -246,7 +221,6 @@ func (cr *containerReader) processPage(pg *page) error {
 	// previous packet was truncated; drop it rather than fuse across a gap.
 	if pg.flags&flagContinued == 0 && len(cr.partial) > 0 {
 		cr.partial = cr.partial[:0]
-		cr.tagsCut = false // the dropped packet may have been a cut OpusTags
 	}
 
 	cr.queue = cr.queue[:0]
@@ -273,25 +247,15 @@ func (cr *containerReader) processPage(pg *page) error {
 		off += int(l)
 		// The check runs before the append, so partial never exceeds the limit and
 		// acceptance depends on the packet's length alone, not on how pages split it.
-		limit := cr.audioLimit
-		if cr.hdrLeft > 0 {
-			limit = maxHeaderPacketLen
-		}
-		if len(cr.partial) > limit-len(seg) {
-			if cr.hdrLeft == 0 {
-				return cr.packetTooLarge(limit)
+		// The limit only grows once set, so partial is never already past it.
+		if len(cr.partial) > cr.limit-len(seg) {
+			if !cr.cutLong {
+				return cr.packetTooLarge()
 			}
-			// A header packet is cut, not failed: keep the first limit bytes, drop the rest.
-			seg = seg[:max(limit-len(cr.partial), 0)]
-			if cr.hdrLeft == 1 {
-				cr.tagsCut = true
-			}
+			seg = seg[:cr.limit-len(cr.partial)]
 		}
 		cr.partial = append(cr.partial, seg...)
 		if l < maxSegmentLen {
-			if cr.hdrLeft > 0 {
-				cr.hdrLeft--
-			}
 			start := len(cr.arena)
 			cr.arena = append(cr.arena, cr.partial...)
 			cr.queue = append(cr.queue, cr.arena[start:len(cr.arena):len(cr.arena)])
@@ -310,25 +274,22 @@ func (cr *containerReader) processPage(pg *page) error {
 		cr.sawEOS = true
 		cr.finalGranule = cr.lastGranule
 	}
-	if cr.recordPages {
-		cr.pages = append(cr.pages, pageInfo{
-			granule:   pg.granule,
-			flags:     pg.flags,
-			sequence:  pg.sequence,
-			packets:   len(cr.queue),
-			continued: pg.flags&flagContinued != 0,
-		})
-	}
 	return nil
 }
 
-// packetTooLarge latches the limit error and releases the partial packet, so a
-// pooled Decoder does not pin it. Packets that completed earlier on the same page
-// stay in the queue but are not served, because nextRawPacket checks err first.
-func (cr *containerReader) packetTooLarge(limit int) error {
+// auxReader returns a reader over br for the same logical stream as cr, for a pass
+// that must not disturb cr's buffers or position. It holds audio packets to cr's
+// limit and expects br to start at an audio page.
+func (cr *containerReader) auxReader(br *bufio.Reader) *containerReader {
+	return &containerReader{br: br, serial: cr.serial, serialSet: true, finalGranule: -1, limit: cr.limit}
+}
+
+// packetTooLarge returns the limit error and releases the partial packet, so a
+// pooled Decoder does not pin it. The Decoder latches the error, so the reader is
+// not read on from the middle of the packet.
+func (cr *containerReader) packetTooLarge() error {
 	cr.partial = nil
-	cr.err = fmt.Errorf("%w: a packet spanning pages exceeds %d bytes", ErrPacketTooLarge, limit)
-	return cr.err
+	return fmt.Errorf("%w: a packet spanning pages exceeds %d bytes", ErrPacketTooLarge, cr.limit)
 }
 
 // headerErr wraps an error from reading a header packet, mapping a premature EOF

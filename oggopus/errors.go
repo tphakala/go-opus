@@ -39,9 +39,9 @@ var (
 	// verdict that the stream is corrupt, and it is distinct from both
 	// ErrDecodeLimit and the corruption errors. Read, WriteTo, DecodeInterleaved,
 	// DecodeInterleavedLimit, Length and SeekToSample return it wrapped. NewDecoder
-	// and Reset do not: OpusHead and OpusTags keep at most 61,440 bytes each and the
-	// rest of a larger one is skipped. After Read or WriteTo return it, they keep
-	// returning it until a successful SeekToSample or Reset.
+	// and Reset do not, because OpusHead and OpusTags are cut instead, as the package
+	// documentation describes. After Read or WriteTo return it, they keep returning
+	// it until a successful SeekToSample or Reset.
 	ErrPacketTooLarge = errors.New("oggopus: packet too large")
 )
 

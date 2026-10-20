@@ -63,10 +63,49 @@ func writeContainer(t *testing.T, w io.Writer, head opusHead, tags opusTags, pkt
 	}
 }
 
+// pageInfo records the structural facts of one page, so tests can assert granule
+// progression and paging without re-decoding, the container-structure check the
+// go-flac seekability regression argues for.
+type pageInfo struct {
+	granule   int64
+	flags     headerType
+	sequence  uint32
+	packets   int  // packets that completed on this page
+	continued bool // page begins with the tail of a prior packet
+}
+
+// scanPages parses every page of stream without reassembling packets.
+func scanPages(t *testing.T, stream []byte) []pageInfo {
+	t.Helper()
+	br := bufio.NewReader(bytes.NewReader(stream))
+	var pages []pageInfo
+	var pg page
+	for {
+		if err := readPage(br, &pg); err != nil {
+			if errors.Is(err, io.EOF) {
+				return pages
+			}
+			t.Fatalf("readPage: %v", err)
+		}
+		packets := 0
+		for _, l := range pg.segTable {
+			if l < maxSegmentLen {
+				packets++
+			}
+		}
+		pages = append(pages, pageInfo{
+			granule:   pg.granule,
+			flags:     pg.flags,
+			sequence:  pg.sequence,
+			packets:   packets,
+			continued: pg.flags&flagContinued != 0,
+		})
+	}
+}
+
 func readContainer(t *testing.T, r io.Reader) (cr *containerReader, packets [][]byte) {
 	t.Helper()
-	// Pages are recorded only for tests, through the reused reader's flag.
-	cr, err := newContainerReader(bufio.NewReader(r), &containerReader{recordPages: true})
+	cr, err := newContainerReader(bufio.NewReader(r), nil)
 	if err != nil {
 		t.Fatalf("newContainerReader: %v", err)
 	}
@@ -107,7 +146,7 @@ func TestContainerRoundTrip(t *testing.T) {
 	head := testHead(2, preSkip)
 	writeContainer(t, &buf, head, opusTags{vendor: "go-opus", comments: []string{"A=1", "B=2"}}, pkts, dur, source)
 
-	cr, got := readContainer(t, &buf)
+	cr, got := readContainer(t, bytes.NewReader(buf.Bytes()))
 
 	if len(got) != len(pkts) {
 		t.Fatalf("packet count: got %d, want %d", len(got), len(pkts))
@@ -138,7 +177,7 @@ func TestContainerRoundTrip(t *testing.T) {
 		t.Fatalf("final granule: got %d, want %d", cr.finalGranule, preSkip+source)
 	}
 
-	assertPageStructure(t, cr)
+	assertPageStructure(t, scanPages(t, buf.Bytes()))
 }
 
 // TestContainerPacketSpanningPages exercises a packet larger than one page
@@ -156,9 +195,9 @@ func TestContainerPacketSpanningPages(t *testing.T) {
 	source := int64(len(pkts)*dur - preSkip)
 
 	var buf bytes.Buffer
-	writeContainer(t, &buf, testStreamsHead(2), opusTags{vendor: "v"}, pkts, dur, source)
+	writeContainer(t, &buf, testStreamsHead(2, preSkip), opusTags{vendor: "v"}, pkts, dur, source)
 
-	cr, got := readContainer(t, &buf)
+	_, got := readContainer(t, bytes.NewReader(buf.Bytes()))
 	if len(got) != len(pkts) {
 		t.Fatalf("packet count: got %d, want %d", len(got), len(pkts))
 	}
@@ -169,7 +208,7 @@ func TestContainerPacketSpanningPages(t *testing.T) {
 	}
 	// A continuation flag must appear because a packet spanned pages.
 	sawContinued := false
-	for _, pi := range cr.pages {
+	for _, pi := range scanPages(t, buf.Bytes()) {
 		if pi.continued {
 			sawContinued = true
 		}
@@ -177,7 +216,7 @@ func TestContainerPacketSpanningPages(t *testing.T) {
 	if !sawContinued {
 		t.Fatalf("expected a continued page for the spanning packet")
 	}
-	assertPageStructure(t, cr)
+	assertPageStructure(t, scanPages(t, buf.Bytes()))
 }
 
 // TestContainerReleasesOversizedPacketBuffers pins that a packet spanning
@@ -194,9 +233,9 @@ func TestContainerReleasesOversizedPacketBuffers(t *testing.T) {
 	}
 	const dur, preSkip = 960, 312
 	var buf bytes.Buffer
-	writeContainer(t, &buf, testStreamsHead(2), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
+	writeContainer(t, &buf, testStreamsHead(2, preSkip), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
 
-	cr, got := readContainer(t, &buf)
+	cr, got := readContainer(t, bytes.NewReader(buf.Bytes()))
 	if len(got) != len(pkts) {
 		t.Fatalf("packet count: got %d, want %d", len(got), len(pkts))
 	}
@@ -228,7 +267,7 @@ func TestContainerDroppedArenaIsReleased(t *testing.T) {
 	}
 	const dur, preSkip = 960, 312
 	var buf bytes.Buffer
-	writeContainer(t, &buf, testStreamsHead(2), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
+	writeContainer(t, &buf, testStreamsHead(2, preSkip), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
 
 	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(buf.Bytes())), nil)
 	if err != nil {
@@ -276,7 +315,7 @@ func TestContainerDroppedArenaIsReleased(t *testing.T) {
 // body makes the arena need two page bodies, whose grown and rounded-up capacity
 // must stay within maxReusedBuf.
 func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
-	const slack = 16
+	const slack = 16 // headroom for one-off buffer growth; measured difference 0 on darwin/arm64
 	for _, size := range []int{61200, maxPageBodyLen} {
 		read := func(n int) float64 {
 			pkts := make([][]byte, n)
@@ -345,25 +384,25 @@ func TestNonSeekableDurationGuard(t *testing.T) {
 // assertPageStructure checks the invariants the go-flac seekability lesson calls
 // for: header pages at granule 0, BOS on the first page, EOS on the last, and a
 // non-decreasing granule progression across audio pages.
-func assertPageStructure(t *testing.T, cr *containerReader) {
+func assertPageStructure(t *testing.T, pages []pageInfo) {
 	t.Helper()
-	if len(cr.pages) < 3 {
-		t.Fatalf("expected at least 3 pages (head, tags, audio), got %d", len(cr.pages))
+	if len(pages) < 3 {
+		t.Fatalf("expected at least 3 pages (head, tags, audio), got %d", len(pages))
 	}
-	if cr.pages[0].flags&flagBOS == 0 {
+	if pages[0].flags&flagBOS == 0 {
 		t.Fatalf("first page missing BOS")
 	}
-	if cr.pages[0].granule != 0 {
-		t.Fatalf("OpusHead page granule = %d, want 0", cr.pages[0].granule)
+	if pages[0].granule != 0 {
+		t.Fatalf("OpusHead page granule = %d, want 0", pages[0].granule)
 	}
-	if cr.pages[1].granule != 0 {
-		t.Fatalf("OpusTags page granule = %d, want 0", cr.pages[1].granule)
+	if pages[1].granule != 0 {
+		t.Fatalf("OpusTags page granule = %d, want 0", pages[1].granule)
 	}
-	if cr.pages[len(cr.pages)-1].flags&flagEOS == 0 {
+	if pages[len(pages)-1].flags&flagEOS == 0 {
 		t.Fatalf("last page missing EOS")
 	}
 	// Sequence numbers increase by one from zero.
-	for i, pi := range cr.pages {
+	for i, pi := range pages {
 		if pi.sequence != uint32(i) {
 			t.Fatalf("page %d has sequence %d", i, pi.sequence)
 		}
@@ -371,7 +410,7 @@ func assertPageStructure(t *testing.T, cr *containerReader) {
 	// Granule non-decreasing across pages that complete a packet (granuleNone
 	// pages are mid-packet and excluded).
 	var prev int64 = -1
-	for _, pi := range cr.pages {
+	for _, pi := range pages {
 		if pi.granule == granuleNone {
 			continue
 		}

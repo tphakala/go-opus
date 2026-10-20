@@ -49,7 +49,7 @@ A change that violates one of these is wrong even if tests pass.
 8. **Typed errors with `%w`.** Map conditions to sentinels so callers can use `errors.Is`:
    - `opus`: `ErrBadArg`, `ErrBufferTooSmall`, `ErrInvalidPacket`, `ErrInternal`, `ErrUnsupported`.
    - `oggopus`: `ErrInvalidConfig`, `ErrClosed`, `ErrNotOpus` (first packet is not an OpusHead; not returned for non-Ogg input, a corrupt OpusHead or OpusTags errors), `ErrSeekUnsupported`, `ErrInvalidSeek`, `ErrPacketTooLarge`.
-   - `ErrDecodeLimit` and `ErrPacketTooLarge` are resource limits, not verdicts on the stream. Keep it distinct from the corruption errors.
+   - `ErrDecodeLimit` and `ErrPacketTooLarge` are resource limits, not verdicts on the stream. Keep them distinct from the corruption errors.
    - A nil sink or source, and the zero-value encoder or decoder, return plain errors rather than panicking.
 9. **Decode output is always 48 kHz interleaved little-endian `int16`.** `Info.InputSampleRate` is informational only; label decoded PCM with the output rate (`OutputSampleRate`). The encoder accepts 8, 12, 16, 24 and 48 kHz, mono or stereo; `Config.Complexity` zero means the default (10), so the useful range is 1..10; frame durations are multiples of 20 ms (20 to 120).
 10. **Container timing is inline.** The Ogg writer carries duration in per-page granule positions, so no seeking is required on the sink. Pre-skip and end trim must decode back to the exact sample (impulse test), and output is validated against ffmpeg, not only the package's own reader.

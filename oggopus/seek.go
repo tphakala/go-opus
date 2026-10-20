@@ -265,8 +265,8 @@ func (d *Decoder) Length() (int64, error) {
 // error, a corrupt page or packet, a packet over the size limit) is latched: Read
 // and WriteTo return it until the next successful SeekToSample or Reset. Seeks
 // trust the stream's granule positions; a malformed stream can land on the wrong
-// sample. Only the first
-// logical stream is covered, and links are told apart by serial as described for Length.
+// sample. Only the first logical stream is covered, and links are told apart by
+// serial as described for Length.
 func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 	if d.dec == nil {
 		return 0, errUninitialized
@@ -539,7 +539,7 @@ func (d *Decoder) decodedTotal(idx seekIndex, prev pageRef, havePrev bool) (tota
 	// This pass and checkInitialGranule read through their own small buffers, not
 	// d.br: d.br holds the sequential read-ahead that ensureIndex must leave intact.
 	br := bufio.NewReader(io.LimitReader(d.rs, idx.linkEnd-start))
-	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1, audioLimit: d.cr.audioLimit}
+	cr := d.cr.auxReader(br)
 	if havePrev {
 		total = prev.granule
 	}
@@ -577,7 +577,7 @@ func (d *Decoder) checkInitialGranule(idx seekIndex) (cache bool, err error) {
 		return false, err
 	}
 	br := bufio.NewReader(io.LimitReader(d.rs, idx.linkEnd-idx.audioStart))
-	cr := &containerReader{br: br, serial: d.cr.serial, serialSet: true, finalGranule: -1, audioLimit: d.cr.audioLimit}
+	cr := d.cr.auxReader(br)
 	for {
 		pg := &cr.pg
 		if err := readPage(br, pg); err != nil {

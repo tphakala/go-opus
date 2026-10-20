@@ -44,7 +44,7 @@ func testHead(channels int, preSkip uint16) opusHead {
 
 // testStreamsHead is a family-255 OpusHead with the given number of uncoupled
 // mono streams, one output channel per stream.
-func testStreamsHead(streams int) opusHead {
+func testStreamsHead(streams int, preSkip uint16) opusHead {
 	mapping := make([]byte, streams)
 	for i := range mapping {
 		mapping[i] = byte(i)
@@ -52,7 +52,7 @@ func testStreamsHead(streams int) opusHead {
 	return opusHead{
 		version:         opusHeadVersion,
 		channels:        byte(streams),
-		preSkip:         312,
+		preSkip:         preSkip,
 		inputSampleRate: 48000,
 		mappingFamily:   255,
 		streamCount:     byte(streams),

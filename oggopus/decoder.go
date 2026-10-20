@@ -97,8 +97,8 @@ type Decoder struct {
 // A Decoder keeps its page and packet buffers between packets and across Reset;
 // they stay under about 450 KiB. An audio packet that spans several pages needs
 // buffers of its own size until the Decoder has read past it, at most the limit
-// described for ErrPacketTooLarge. OpusHead and OpusTags keep at most 61,440 bytes
-// each and the rest of a larger one is skipped.
+// described for ErrPacketTooLarge. OpusHead and OpusTags are cut as the package
+// documentation describes.
 //
 // Unless r is a *bufio.Reader, it is also read through a 64 KiB buffer that the
 // Decoder allocates once and that Reset reuses, so a program holding many Decoders
@@ -313,7 +313,8 @@ func (d *Decoder) WriteTo(w io.Writer) (int64, error) {
 // fill decodes the next packet into d.pcm, applying the pre-skip drop at the
 // start and the granule end-trim at the end. After a seek it also discards the
 // pre-roll samples before the target index (skipTo). It reports done when the
-// stream is fully consumed or a seek positioned the decoder at its end.
+// stream is fully consumed or a seek positioned the decoder at its end. It latches
+// an ErrPacketTooLarge in d.err.
 func (d *Decoder) fill() (done bool, err error) {
 	if d.atEnd {
 		return true, nil
@@ -322,6 +323,10 @@ func (d *Decoder) fill() (done bool, err error) {
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return true, nil
+		}
+		if errors.Is(err, ErrPacketTooLarge) {
+			// Latched: a later page would continue the packet from its middle.
+			d.err = err
 		}
 		return false, err
 	}
