@@ -266,7 +266,10 @@ input, prints both caveats, and skips any comparator that is not installed.
   checked by decoding an impulse back to the exact sample it went in at, and the
   output is validated against ffmpeg rather than only against our own reader.
   The decoder reports its exact length and seeks to a sample index when the
-  source is an `io.ReadSeeker`. It bounds the memory a packet spanning pages can
+  source is an `io.ReadSeeker`. `SeekToSample` is fast and sample-aligned, but
+  its output can differ slightly from sequential decoding; `SeekToSampleExact`
+  gives output bit-identical to sequential decoding, at a cost linear in the
+  distance it decodes. The decoder bounds the memory a packet spanning pages can
   take: an audio packet over the limit fails with `ErrPacketTooLarge`, and an
   oversized OpusTags is cut rather than rejected.
 - `pcm`: a thin facade over `oggopus` that presents the codec under the uniform

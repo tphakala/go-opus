@@ -188,53 +188,66 @@ func TestSeekSampleAligned(t *testing.T) {
 	}
 }
 
-// TestSeekConvergesToSequential checks that after the pre-roll the decoder output
-// matches sequential decoding closely, on a tonal chirp and on dense noise-like
-// content, with a landing 3840 samples to one packet-pair before the target.
+// TestSeekStaysCloseToSequential checks that SeekToSample output stays within a few
+// LSB of sequential decoding on steady tones, the content where the codec state
+// rebuilt from the pre-roll is slowest to match the sequential one. It does not
+// assert bit-exactness (SeekToSampleExact does that), so a one-LSB residual is not
+// a failure, but a short pre-roll or a broken codec reset is: with seekPreRoll at
+// 80 ms (3840) the same targets differ by thousands of LSB on a 16384 peak tone.
 //
-// Measured on this encoder with -v (minimum SNR over targets 3840 to 150000,
-// comparing the first 48000 samples after the target): the chirp fixture at
-// 96 kbps gives 32.9 dB mono and 33.1 dB stereo; the noise-like fixture is
-// logged by the test. Landings are the worst case at small pages (1 to 3 lacing values).
-// Measured minimums: chirp 32.9 dB (mono) and 33.1 dB (stereo), noise 33.2 dB
-// (mono) and 33.5 dB (stereo, 3-value pages 39.2 dB). The floor below leaves
-// about 13 dB under the lowest measurement.
-func TestSeekConvergesToSequential(t *testing.T) {
-	for _, ch := range []int{1, 2} {
-		fixtures := map[string][]byte{
-			"chirp": seekFixture(t, ch, 20, 4*48000, 96000),
-			"noise": encodeOgg(t, Config{SampleRate: 48000, Channels: ch, Bitrate: 64000}, genInterleavedPCM(4*48000, ch)),
-		}
-		for fname, base := range fixtures {
-			want := bytesToInt16s(streamingDecode(t, base))
-			for _, o := range []*repageOpts{{maxSegs: 3}, {maxSegs: 1}} {
-				stream := applyVariant(t, base, o)
-				minSNR := 1e9
-				for _, n := range []int{3840, 4000, 7777, 20000, 48000, 100001, 150000} {
-					d := seekDecoder(t, stream)
-					if _, err := d.SeekToSample(int64(n)); err != nil {
-						t.Fatalf("SeekToSample(%d): %v", n, err)
-					}
-					got := bytesToInt16s(readAll(t, d))
-					if len(got) != len(want)-n*ch {
-						t.Fatalf("n=%d: got %d samples, want %d", n, len(got)/ch, len(want)/ch-n)
-					}
-					cmp := min(48000*ch, len(got))
-					s := snr(want[n*ch:n*ch+cmp], got[:cmp])
-					minSNR = min(minSNR, s)
-					if s < convergeFloorDB {
-						t.Errorf("%s ch=%d n=%d segs=%d: SNR %.1f dB below floor %.1f", fname, ch, n, o.maxSegs, s, convergeFloorDB)
-					}
+// Measured with -v at seekPreRoll = 61440, comparing everything read after the
+// target: the logged maximum per fixture and page layout. The bound leaves a wide
+// margin over those.
+func TestSeekStaysCloseToSequential(t *testing.T) {
+	const seekCloseMaxDiff = 32
+	fixtures := []struct {
+		name                 string
+		ch, frameMS, bitrate int
+		hz                   float64
+	}{
+		{"stereo20ms", 2, 20, 128000, 1200},
+		{"mono60ms", 1, 60, 96000, 1100},
+	}
+	for _, fx := range fixtures {
+		base := toneBase(t, fx.ch, fx.frameMS, fx.bitrate, 4*48000, fx.hz)
+		want := bytesToInt16s(streamingDecode(t, base))
+		for _, o := range []*repageOpts{{maxSegs: 3}, {maxSegs: 1}} {
+			stream := repage(t, base, o)
+			maxDiff, differing := 0, 0
+			for _, n := range []int{seekPreRoll, seekPreRoll + 1, 100001, 130017, 150000} {
+				d := seekDecoder(t, stream)
+				if _, err := d.SeekToSample(int64(n)); err != nil {
+					t.Fatalf("SeekToSample(%d): %v", n, err)
 				}
-				t.Logf("%s ch=%d segs=%d: min SNR %.1f dB", fname, ch, o.maxSegs, minSNR)
+				got := bytesToInt16s(readAll(t, d))
+				if len(got) != len(want)-n*fx.ch {
+					t.Fatalf("%s n=%d: got %d samples, want %d", fx.name, n, len(got)/fx.ch, len(want)/fx.ch-n)
+				}
+				ref := want[n*fx.ch:]
+				worst := 0
+				for i := range got {
+					worst = max(worst, absDiff16(got[i], ref[i]))
+				}
+				if worst > 0 {
+					differing++
+				}
+				maxDiff = max(maxDiff, worst)
+				if worst > seekCloseMaxDiff {
+					t.Errorf("%s segs=%d n=%d: max abs difference %d from sequential decoding exceeds %d", fx.name, o.maxSegs, n, worst, seekCloseMaxDiff)
+				}
 			}
+			t.Logf("%s segs=%d: max abs diff %d, %d of 5 targets differ from sequential decoding", fx.name, o.maxSegs, maxDiff, differing)
 		}
 	}
 }
 
-// convergeFloorDB is the SNR floor for TestSeekConvergesToSequential; see the
-// measurements in that test's comment.
-const convergeFloorDB float64 = 20
+func absDiff16(a, b int16) int {
+	d := int(a) - int(b)
+	if d < 0 {
+		return -d
+	}
+	return d
+}
 
 // TestSeekNearEndTrims pins I6: the drained count after a seek near the end is
 // exactly Length-n, including when the EOS page carries no granule.
@@ -259,7 +272,7 @@ func TestSeekNearEndTrims(t *testing.T) {
 				if int64(len(rest)) != back*int64(2*ch) {
 					t.Fatalf("variant=%v back=%d: drained %d bytes, want %d", o, back, len(rest), back*int64(2*ch))
 				}
-				if back <= 3840 && !bytes.Equal(rest, want[int(n)*2*ch:]) {
+				if back <= seekPreRoll && !bytes.Equal(rest, want[int(n)*2*ch:]) {
 					// Not bit-identical in general (converged), only the count is exact.
 					t.Logf("variant=%v back=%d: tail differs from sequential (expected after a landing)", o, back)
 				}
@@ -380,6 +393,9 @@ func TestSeekErrors(t *testing.T) {
 		if _, err := d.SeekToSample(10); !errors.Is(err, ErrSeekUnsupported) {
 			t.Fatalf("SeekToSample err = %v", err)
 		}
+		if _, err := d.SeekToSampleExact(10); !errors.Is(err, ErrSeekUnsupported) {
+			t.Fatalf("SeekToSampleExact err = %v", err)
+		}
 		if got := readAll(t, d); !bytes.Equal(got, want) {
 			t.Fatal("decode changed")
 		}
@@ -411,6 +427,9 @@ func TestSeekErrors(t *testing.T) {
 		if _, err := d.SeekToSample(1); !errors.Is(err, ErrSeekUnsupported) {
 			t.Fatalf("SeekToSample err = %v", err)
 		}
+		if _, err := d.SeekToSampleExact(1); !errors.Is(err, ErrSeekUnsupported) {
+			t.Fatalf("SeekToSampleExact err = %v", err)
+		}
 		if got := readAll(t, d); !bytes.Equal(got, want) {
 			t.Fatal("decode changed")
 		}
@@ -422,6 +441,9 @@ func TestSeekErrors(t *testing.T) {
 		}
 		if _, err := d.SeekToSample(-1); !errors.Is(err, ErrInvalidSeek) {
 			t.Fatalf("err = %v, want ErrInvalidSeek", err)
+		}
+		if _, err := d.SeekToSampleExact(-1); !errors.Is(err, ErrInvalidSeek) {
+			t.Fatalf("SeekToSampleExact err = %v, want ErrInvalidSeek", err)
 		}
 		rest := readAll(t, d)
 		if !bytes.Equal(rest, want[1000:]) {
@@ -435,6 +457,9 @@ func TestSeekErrors(t *testing.T) {
 		}
 		if _, err := d.SeekToSample(0); !errors.Is(err, errUninitialized) {
 			t.Fatalf("SeekToSample err = %v", err)
+		}
+		if _, err := d.SeekToSampleExact(0); !errors.Is(err, errUninitialized) {
+			t.Fatalf("SeekToSampleExact err = %v", err)
 		}
 	})
 	t.Run("failure at every operation of a seek is sticky and recoverable", func(t *testing.T) {
@@ -769,7 +794,7 @@ func TestSeekSourceWithPriorOffset(t *testing.T) {
 
 // TestSeekLandingMatchesLinearScan pins the bisection against a brute-force scan:
 // for every target, the chosen landing is the last page whose granule minus the
-// pre-skip lies in [0, target-3840], and none when there is none. The stream is
+// pre-skip lies in [0, target-seekPreRoll], and none when there is none. The stream is
 // longer than the scan window, so the bisection loop (not just the final walk) runs.
 func TestSeekLandingMatchesLinearScan(t *testing.T) {
 	base := seekFixture(t, 1, 20, 8*48000, 256000)
@@ -832,8 +857,9 @@ func TestSeekLandingMatchesLinearScan(t *testing.T) {
 }
 
 // FuzzDecoderSeek feeds arbitrary bytes and a target through NewDecoder, Length,
-// SeekToSample and a bounded drain. It must not panic or hang, and when the seek
-// succeeds the drain must not exceed what Length says remains.
+// SeekToSample, SeekToSampleExact (on a second decoder) and a bounded drain. It
+// must not panic or hang, and when the seek succeeds the drain must not exceed
+// what Length says remains.
 func FuzzDecoderSeek(f *testing.F) {
 	var valid bytes.Buffer
 	cw, _ := newContainerWriter(&valid, 1, testHead(1, 312), opusTags{vendor: "v"})
@@ -848,24 +874,30 @@ func FuzzDecoderSeek(f *testing.F) {
 	f.Add([]byte("OggS garbage"), int64(-1))
 
 	f.Fuzz(func(_ *testing.T, data []byte, target int64) {
-		d, err := NewDecoder(bytes.NewReader(data))
-		if err != nil {
-			return
-		}
-		length, lerr := d.Length()
-		got, serr := d.SeekToSample(target)
-		buf := make([]byte, 4096)
-		var drained int64
-		for range 4096 {
-			n, err := d.Read(buf)
-			drained += int64(n)
+		for _, exact := range []bool{false, true} {
+			d, err := NewDecoder(bytes.NewReader(data))
 			if err != nil {
-				if errors.Is(err, io.EOF) && lerr == nil && serr == nil {
-					if limit := max(length-got, 0) * int64(2*d.Info().Channels); drained > limit {
-						panic("drained more than Length - target")
-					}
-				}
 				return
+			}
+			length, lerr := d.Length()
+			seek := d.SeekToSample
+			if exact {
+				seek = d.SeekToSampleExact
+			}
+			got, serr := seek(target)
+			buf := make([]byte, 4096)
+			var drained int64
+			for range 4096 {
+				n, err := d.Read(buf)
+				drained += int64(n)
+				if err != nil {
+					if errors.Is(err, io.EOF) && lerr == nil && serr == nil {
+						if limit := max(length-got, 0) * int64(2*d.Info().Channels); drained > limit {
+							panic("drained more than Length - target")
+						}
+					}
+					break
+				}
 			}
 		}
 	})
@@ -875,7 +907,16 @@ func FuzzDecoderSeek(f *testing.F) {
 // completes is never a landing, whatever its granule field says (RFC 7845 section
 // 4 and RFC 3533 require -1 there).
 func TestSeekIgnoresGranuleOnPagesWithoutPacket(t *testing.T) {
-	const k = 100000
+	const (
+		k         = 100000
+		bogusGran = 20000
+	)
+	// The bogus position must lie at or below every landing bound (target minus
+	// pre-roll) the test uses, or the page could never be chosen and the test would
+	// pass without exercising the rule.
+	if bogusGran-expectedPreSkip > k-5000-seekPreRoll {
+		t.Fatalf("bogus granule %d lies above the smallest landing bound %d; lower it", bogusGran-expectedPreSkip, k-5000-seekPreRoll)
+	}
 	pcm := make([]int16, 3*48000)
 	rng := rand.New(rand.NewPCG(8, 9))
 	for i := range pcm {
@@ -883,7 +924,7 @@ func TestSeekIgnoresGranuleOnPagesWithoutPacket(t *testing.T) {
 	}
 	pcm[k] = 32767
 	base := encodeOgg(t, Config{SampleRate: 48000, Channels: 1, Bitrate: 510000}, pcm)
-	stream := repage(t, base, &repageOpts{maxSegs: 1, bogusGran: 50000})
+	stream := repage(t, base, &repageOpts{maxSegs: 1, bogusGran: bogusGran})
 	d := seekDecoder(t, stream)
 	length, err := d.Length()
 	if err != nil {
@@ -1012,6 +1053,14 @@ func TestSeekOverClaimingGranules(t *testing.T) {
 	}
 	if _, err := d.Read(make([]byte, 8)); !errors.Is(err, io.EOF) {
 		t.Fatalf("Read after seeking to the decodable end = %v, want io.EOF", err)
+	}
+	d = seekDecoder(t, stream)
+	got, err = d.SeekToSampleExact(length - 10)
+	if err != nil || got != actual {
+		t.Fatalf("SeekToSampleExact = %d, %v; want the decodable end %d", got, err, actual)
+	}
+	if _, err := d.Read(make([]byte, 8)); !errors.Is(err, io.EOF) {
+		t.Fatalf("Read after exact seeking to the decodable end = %v, want io.EOF", err)
 	}
 }
 
@@ -1253,9 +1302,9 @@ func TestScannerWindowEdges(t *testing.T) {
 	}
 }
 
-// TestSeekLeavesAtLeastPreRoll pins the pre-roll against the literal 3840: the page
+// TestSeekLeavesAtLeastPreRoll pins the pre-roll against the literal 61440: the page
 // SeekToSample lands on (the last source seek it issues, since decoding only reads)
-// is the last page whose first new sample lies at most 3840 samples before the
+// is the last page whose first new sample lies at most 61440 samples before the
 // target, found here by walking every page of a small-page stream.
 func TestSeekLeavesAtLeastPreRoll(t *testing.T) {
 	stream := repage(t, seekFixture(t, 1, 20, 6*48000, 128000), &repageOpts{maxSegs: 1})
@@ -1268,14 +1317,14 @@ func TestSeekLeavesAtLeastPreRoll(t *testing.T) {
 	if _, err := d.Length(); err != nil {
 		t.Fatal(err)
 	}
-	// Targets on and next to the page grid: a target whose n-3840 equals a page's
+	// Targets on and next to the page grid: a target whose n-61440 equals a page's
 	// first new sample must land on that page, and one sample earlier on the page
 	// before it.
 	targets := make([]int64, 0, 12)
-	targets = append(targets, 3840, 3841, 4800, 30000, 100001, 200000)
+	targets = append(targets, 30000, 61439, 61440, 61441, 62400, 100001, 200000, 250000)
 	for _, i := range []int{20, 100} {
 		pos := grans[i] - expectedPreSkip
-		targets = append(targets, pos+3840, pos+3840-1, pos+3840+1)
+		targets = append(targets, pos+61440, pos+61440-1, pos+61440+1)
 	}
 	for _, n := range targets {
 		src.startSeek = nil
@@ -1289,7 +1338,7 @@ func TestSeekLeavesAtLeastPreRoll(t *testing.T) {
 				t.Fatal(err)
 			}
 			pos := grans[i] - expectedPreSkip
-			if grans[i] >= 0 && pg.completesPacket() && pos >= 0 && pos <= n-3840 {
+			if grans[i] >= 0 && pg.completesPacket() && pos >= 0 && pos <= n-61440 {
 				want = int64(off)
 			}
 		}
@@ -1301,7 +1350,7 @@ func TestSeekLeavesAtLeastPreRoll(t *testing.T) {
 			continue
 		}
 		if got := src.startSeek[len(src.startSeek)-1]; got != want {
-			t.Fatalf("n=%d: landed at offset %d, want %d (last page at least 3840 samples before the target)", n, got, want)
+			t.Fatalf("n=%d: landed at offset %d, want %d (last page at least 61440 samples before the target)", n, got, want)
 		}
 	}
 }
