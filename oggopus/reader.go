@@ -125,8 +125,8 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 		return nil, headerErr("OpusTags", err)
 	}
 	// Audio packets from here on fail over the limit instead. A stream that puts
-	// audio on the page that completes OpusTags breaks RFC 7845 section 3, and an
-	// audio packet completing there has already been held to the header limit.
+	// audio on the page that completes OpusTags breaks RFC 7845 section 3, and the
+	// audio on that page was read under the header limit.
 	cr.limit, cr.cutLong = audioPacketLimit(head), false
 	var tags opusTags
 	if len(tp) >= maxHeaderPacketLen {
