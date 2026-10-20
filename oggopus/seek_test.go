@@ -214,7 +214,8 @@ func TestSeekStaysCloseToSequential(t *testing.T) {
 		for _, o := range []*repageOpts{{maxSegs: 3}, {maxSegs: 1}} {
 			stream := repage(t, base, o)
 			maxDiff, differing := 0, 0
-			for _, n := range []int{seekPreRoll, seekPreRoll + 1, 100001, 130017, 150000} {
+			targets := []int{seekPreRoll, seekPreRoll + 1, 100001, 130017, 150000}
+			for _, n := range targets {
 				d := seekDecoder(t, stream)
 				if _, err := d.SeekToSample(int64(n)); err != nil {
 					t.Fatalf("SeekToSample(%d): %v", n, err)
@@ -236,7 +237,7 @@ func TestSeekStaysCloseToSequential(t *testing.T) {
 					t.Errorf("%s segs=%d n=%d: max abs difference %d from sequential decoding exceeds %d", fx.name, o.maxSegs, n, worst, seekCloseMaxDiff)
 				}
 			}
-			t.Logf("%s segs=%d: max abs diff %d, %d of 5 targets differ from sequential decoding", fx.name, o.maxSegs, maxDiff, differing)
+			t.Logf("%s segs=%d: max abs diff %d, %d of %d targets differ from sequential decoding", fx.name, o.maxSegs, maxDiff, differing, len(targets))
 		}
 	}
 }
@@ -874,10 +875,15 @@ func FuzzDecoderSeek(f *testing.F) {
 	f.Add([]byte("OggS garbage"), int64(-1))
 
 	f.Fuzz(func(_ *testing.T, data []byte, target int64) {
+		d, err := NewDecoder(bytes.NewReader(data))
+		if err != nil {
+			return
+		}
 		for _, exact := range []bool{false, true} {
-			d, err := NewDecoder(bytes.NewReader(data))
-			if err != nil {
-				return
+			if exact {
+				if err := d.Reset(bytes.NewReader(data)); err != nil {
+					return
+				}
 			}
 			length, lerr := d.Length()
 			seek := d.SeekToSample

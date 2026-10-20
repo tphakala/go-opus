@@ -278,21 +278,17 @@ func (d *Decoder) Length() (int64, error) {
 // logical stream is covered, and links are told apart by serial as described for
 // Length.
 func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
-	if d.dec == nil {
-		return 0, errUninitialized
-	}
-	if d.rs == nil {
-		return 0, ErrSeekUnsupported
-	}
-	if sampleIndex < 0 {
-		return 0, ErrInvalidSeek
-	}
-	if err := d.ensureIndex(); err != nil {
+	if err := d.seekCheck(sampleIndex); err != nil {
 		return 0, err
 	}
 	d.inSequence = false
 	if sampleIndex >= d.idx.length {
 		return d.seekToEnd(d.idx.length), nil
+	}
+	// Sequential decoding trims only after an end-of-stream page.
+	limit := int64(-1)
+	if d.idx.eos {
+		limit = d.idx.length
 	}
 
 	var land pageRef
@@ -309,7 +305,7 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 		if err := d.rewind(); err != nil {
 			return d.seekFailed(err)
 		}
-		d.resetForSeek(sampleIndex, d.info.PreSkip, 0, d.seekLimit())
+		d.resetForSeek(sampleIndex, d.info.PreSkip, 0, limit)
 	} else {
 		if _, err := d.rs.Seek(land.off, io.SeekStart); err != nil {
 			return d.seekFailed(err)
@@ -325,20 +321,10 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 		// partial packet at its end is the first one the decoder needs.
 		d.cr.queue = d.cr.queue[:0]
 		d.cr.qi = 0
-		d.resetForSeek(sampleIndex, 0, land.granule-int64(d.info.PreSkip), d.seekLimit())
+		d.resetForSeek(sampleIndex, 0, land.granule-int64(d.info.PreSkip), limit)
 	}
 
-	for d.delivered < d.skipTo {
-		done, err := d.fill()
-		if err != nil {
-			return d.seekFailed(err)
-		}
-		if done {
-			// The stream ended before the target: its granules over-claimed.
-			return d.seekToEnd(d.delivered), nil
-		}
-	}
-	return sampleIndex, nil
+	return d.decodeToTarget(sampleIndex)
 }
 
 // SeekToSampleExact positions the decoder so the next Read returns the sample at
@@ -349,8 +335,9 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 //
 // It decodes forward from the current position when the decoder is at or before
 // sampleIndex and nothing has disturbed its codec state since it was bound or last
-// seeked exactly: no SeekToSample, no failed seek and no read error. Otherwise it
-// restarts at the first audio page and decodes from there. Either way the cost is
+// seeked exactly: no SeekToSample, no seek to the end of the stream, no failed seek
+// and no read error. Otherwise it restarts at the first audio page and decodes
+// from there. Either way the cost is
 // linear in the samples decoded, up to everything before sampleIndex, unlike
 // SeekToSample, which decodes a bounded pre-roll. The result, whether output,
 // error or position, does not depend on earlier calls.
@@ -361,57 +348,37 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 // error, a corrupt page or packet) is latched like those of SeekToSample. Only the
 // first logical stream is covered, and a Decoder must not be used concurrently.
 func (d *Decoder) SeekToSampleExact(sampleIndex int64) (int64, error) {
-	if d.dec == nil {
-		return 0, errUninitialized
-	}
-	if d.rs == nil {
-		return 0, ErrSeekUnsupported
-	}
-	if sampleIndex < 0 {
-		return 0, ErrInvalidSeek
-	}
-	if err := d.ensureIndex(); err != nil {
+	if err := d.seekCheck(sampleIndex); err != nil {
 		return 0, err
 	}
 	if sampleIndex >= d.idx.length {
-		d.inSequence = false
 		return d.seekToEnd(d.idx.length), nil
 	}
 
 	// delivered is the index just past the samples in d.pcm. A Read that stopped
 	// inside a sample leaves its tail first in d.pcm; the whole samples after it
 	// start at delivered-whole, so earlier indexes are out of reach.
-	whole := int64(len(d.pcm)) / int64(2*d.info.Channels)
-	if d.inSequence && d.err == nil && !d.atEnd && sampleIndex >= d.delivered-whole {
+	frame := int64(2 * d.info.Channels)
+	whole := int64(len(d.pcm)) / frame
+	if d.inSequence && sampleIndex >= d.delivered-whole {
 		if sampleIndex <= d.delivered {
 			// Inside the buffered samples: drop the bytes before sampleIndex.
-			d.pcm = d.pcm[int64(len(d.pcm))-(d.delivered-sampleIndex)*int64(2*d.info.Channels):]
+			d.pcm = d.pcm[int64(len(d.pcm))-(d.delivered-sampleIndex)*frame:]
 			return sampleIndex, nil
 		}
 		d.pcm = d.pcm[:0]
 		d.skipTo = sampleIndex
 	} else {
-		d.inSequence = false
 		if err := d.rewind(); err != nil {
 			return d.seekFailed(err)
 		}
 		// A limit of -1 lets fill learn the end trim from the container, as
-		// sequential decoding does.
+		// sequential decoding does, so the decoder is in sequence again.
 		d.resetForSeek(sampleIndex, d.info.PreSkip, 0, -1)
+		d.inSequence = true
 	}
 
-	for d.delivered < d.skipTo {
-		done, err := d.fill()
-		if err != nil {
-			return d.seekFailed(err)
-		}
-		if done {
-			// The stream ended before the target: its granules over-claimed.
-			return d.seekToEnd(d.delivered), nil
-		}
-	}
-	d.inSequence = true
-	return sampleIndex, nil
+	return d.decodeToTarget(sampleIndex)
 }
 
 // rewind points the container reader at the first audio page of the bound source,
@@ -431,22 +398,41 @@ func (d *Decoder) rewind() error {
 	return nil
 }
 
-// seekLimit is the end-trim limit SeekToSample hands resetForSeek: the stream's
-// length when its last page ends the stream, and unset otherwise, as in sequential
-// decoding.
-func (d *Decoder) seekLimit() int64 {
-	if d.idx.eos {
-		return d.idx.length
+// seekCheck returns the error a seek reports before it moves anything: no codec,
+// a source that cannot seek, a negative index, or a failure to index the stream.
+func (d *Decoder) seekCheck(sampleIndex int64) error {
+	if d.dec == nil {
+		return errUninitialized
 	}
-	return -1
+	if d.rs == nil {
+		return ErrSeekUnsupported
+	}
+	if sampleIndex < 0 {
+		return ErrInvalidSeek
+	}
+	return d.ensureIndex()
+}
+
+// decodeToTarget decodes and discards until the next sample is d.skipTo and
+// returns the index the next Read starts at: sampleIndex, or the decoded end when
+// the stream ends first because its granules over-claimed.
+func (d *Decoder) decodeToTarget(sampleIndex int64) (int64, error) {
+	for d.delivered < d.skipTo {
+		done, err := d.fill()
+		if err != nil {
+			return d.seekFailed(err)
+		}
+		if done {
+			return d.seekToEnd(d.delivered), nil
+		}
+	}
+	return sampleIndex, nil
 }
 
 // resetForSeek puts every piece of decode state in the condition of a decoder
 // that has just been bound to the stream and is about to decode from the packet
-// at sample index delivered, with preSkip samples still to drop. The caller passes
-// the end-trim limit: SeekToSample passes the stream's length after an
-// end-of-stream page, and SeekToSampleExact passes -1 so that fill learns it as
-// sequential decoding does.
+// at sample index delivered, with preSkip samples still to drop. limit is the
+// end-trim limit, or -1 for fill to learn it from the container.
 func (d *Decoder) resetForSeek(target int64, preSkip int, delivered, limit int64) {
 	d.dec.reset()
 	d.preSkipLeft = preSkip
@@ -460,6 +446,7 @@ func (d *Decoder) resetForSeek(target int64, preSkip int, delivered, limit int64
 
 // seekToEnd positions the decoder at end of stream and returns n.
 func (d *Decoder) seekToEnd(n int64) int64 {
+	d.inSequence = false
 	d.atEnd = true
 	d.pcm = d.pcm[:0]
 	d.err = nil
@@ -467,8 +454,7 @@ func (d *Decoder) seekToEnd(n int64) int64 {
 }
 
 // seekFailed latches err, which Read and WriteTo return until the next successful
-// seek, because the source and container reader are no longer in step. It also
-// ends the sequential state SeekToSampleExact relies on.
+// seek, because the source and container reader are no longer in step.
 func (d *Decoder) seekFailed(err error) (int64, error) {
 	d.inSequence = false
 	d.err = err
@@ -491,6 +477,7 @@ func (d *Decoder) ensureIndex() error {
 	if _, err := d.rs.Seek(cur, io.SeekStart); err != nil {
 		d.err = fmt.Errorf("oggopus: restoring the read position: %w", err)
 		d.pcm = d.pcm[:0]
+		d.inSequence = false
 		return d.err
 	}
 	if buildErr != nil {

@@ -88,11 +88,11 @@ type Decoder struct {
 	atEnd   bool  // a seek positioned the decoder at end of stream
 	err     error // sticky error latched by a failed seek, cleared by the next successful one
 	tagsBad bool  // audio data shares the OpusTags page (RFC 7845 section 3 violation)
-	// inSequence reports that the codec and container state equal those of a
-	// sequential decode from the stream start, since the source was bound or the
-	// last successful SeekToSampleExact. SeekToSampleExact decodes forward from the
-	// current position only while it holds; SeekToSample, a failed seek and a failed
-	// packet clear it.
+	// inSequence is true only while the codec and container state equal those of
+	// a sequential decode from the stream start with no error latched and not at a
+	// seek's end of stream. SeekToSampleExact decodes forward from the current
+	// position only while it holds. Every path that latches d.err or sets atEnd
+	// clears it.
 	inSequence bool
 }
 

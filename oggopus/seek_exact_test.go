@@ -235,18 +235,7 @@ func TestSeekToSampleExactRestartsOnlyWhenNeeded(t *testing.T) {
 		// to parse when decoded.
 		pkts[badAt] = []byte{pkts[badAt][0] | 3, 0x41, 0xFF}
 		var buf bytes.Buffer
-		cw, err := newContainerWriter(&buf, 1, cr.head, cr.tags)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, p := range pkts {
-			if err := cw.writePacket(p, 960); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := cw.close(cr.finalGranule - int64(cr.head.preSkip)); err != nil {
-			t.Fatal(err)
-		}
+		writeContainer(t, &buf, cr.head, cr.tags, pkts, 960, cr.finalGranule-int64(cr.head.preSkip))
 		// A page with a bad CRC fails in the container reader instead of the codec.
 		offs, _, _ := pageMetaOf(t, mono)
 		damaged := bytes.Clone(mono)
