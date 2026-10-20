@@ -47,7 +47,7 @@ func TestSeekToSampleExactMatchesSequential(t *testing.T) {
 		name                 string
 		ch, frameMS, bitrate int
 		hz                   float64
-		disc                 [3]int64 // ascending, all above 100000
+		disc                 [3]int64 // ascending; disc[2] above 100000, where the seek after SeekToSample goes
 	}{
 		{"stereo20ms", 2, 20, 128000, 1100, [3]int64{70449, 90469, 130509}},
 		{"mono60ms", 1, 60, 96000, 1100, [3]int64{73879, 95203, 123635}},
@@ -81,7 +81,8 @@ func TestSeekToSampleExactMatchesSequential(t *testing.T) {
 					t.Fatalf("SeekToSampleExact(%d) = %d, %v; want %d, nil", target, got, err, at)
 				}
 				tail := want[at*bps:]
-				if nread < 0 || nread > len(tail) {
+				all := nread < 0 || nread >= len(tail)
+				if all {
 					nread = len(tail)
 				}
 				if nread == 0 {
@@ -96,6 +97,13 @@ func TestSeekToSampleExactMatchesSequential(t *testing.T) {
 				}
 				if !bytes.Equal(buf, tail[:nread]) {
 					t.Fatalf("SeekToSampleExact(%d): %d bytes differ from sequential decoding, first at byte %d", target, nread, firstDiffByte(buf, tail[:nread]))
+				}
+				// Having read the whole tail, the output must end where sequential decoding
+				// does, which pins the end trim after a restart.
+				if all {
+					if n, err := d.Read(make([]byte, 8)); n != 0 || !errors.Is(err, io.EOF) {
+						t.Fatalf("SeekToSampleExact(%d): Read after the tail = %d, %v; want 0, io.EOF", target, n, err)
+					}
 				}
 			}
 
