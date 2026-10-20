@@ -16,6 +16,13 @@ func FuzzReadPage(f *testing.F) {
 	f.Add(goldenHeadPage())
 	f.Add([]byte("OggS"))
 	f.Add([]byte{})
+	// Valid pages of different sizes back to back, so the reused page buffer
+	// regrows and shrinks within one input.
+	var pages bytes.Buffer
+	for _, n := range []int{10, 3000, 20, 40000, 5} {
+		_ = writePage(&pages, 0, 0, 1, 0, lacing(n), make([]byte, n))
+	}
+	f.Add(pages.Bytes())
 	f.Fuzz(func(t *testing.T, data []byte) {
 		br := bufio.NewReader(bytes.NewReader(data))
 		// One page across iterations, so pages of different sizes exercise the

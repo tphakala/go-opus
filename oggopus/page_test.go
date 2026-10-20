@@ -220,3 +220,32 @@ func TestParsePage(t *testing.T) {
 		})
 	}
 }
+
+// TestReadPageReusesPage reads pages of different sizes through one page and
+// requires each to come back intact, so the reused buffer neither keeps a stale
+// tail after a shrink nor loses bytes on a regrow.
+func TestReadPageReusesPage(t *testing.T) {
+	sizes := []int{10, 3000, 20, 40000, 5, 65025}
+	var stream bytes.Buffer
+	want := make([][]byte, len(sizes))
+	for i, n := range sizes {
+		want[i] = bytes.Repeat([]byte{byte(i + 1)}, n)
+		segs := lacing(n)
+		if len(segs) > maxPageSegments { // a full page ends on a 255 lacing value
+			segs = segs[:maxPageSegments]
+		}
+		if err := writePage(&stream, 0, int64(i), 1, uint32(i), segs, want[i]); err != nil {
+			t.Fatalf("writePage %d: %v", i, err)
+		}
+	}
+	br := bufio.NewReader(&stream)
+	var pg page
+	for i := range sizes {
+		if err := readPage(br, &pg); err != nil {
+			t.Fatalf("readPage %d: %v", i, err)
+		}
+		if pg.granule != int64(i) || !bytes.Equal(pg.body, want[i]) {
+			t.Fatalf("page %d: granule %d, body of %d bytes, want granule %d, body of %d bytes", i, pg.granule, len(pg.body), i, len(want[i]))
+		}
+	}
+}
