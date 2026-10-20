@@ -1,6 +1,7 @@
 package oggopus
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -232,6 +233,9 @@ func TestNilSinkAndSourceRejected(t *testing.T) {
 	}
 	if _, err := NewDecoder(nil); err == nil {
 		t.Fatal("NewDecoder(nil): got nil error, want a nil-reader error")
+	}
+	if _, err := NewDecoder((*bufio.Reader)(nil)); err == nil {
+		t.Fatal("NewDecoder(nil *bufio.Reader): got nil error, want a nil-reader error")
 	}
 
 	// A bad config is reported before the nil-writer check on both entry points.

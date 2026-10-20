@@ -1,10 +1,12 @@
 package oggopus
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
 	"runtime"
+	"slices"
 	"testing"
 	"weak"
 )
@@ -165,4 +167,38 @@ func TestResetReleasesPreviousSource(t *testing.T) {
 		t.Error("Decoder still references a source whose codec could not be built")
 	}
 	runtime.KeepAlive(d) // d must stay reachable, or its collection would release the source too
+}
+
+// TestDecoderReadsCallerBufioReaderInPlace pins that a *bufio.Reader source is
+// read directly, page by page, so the decoder stops at the end-of-stream page and
+// the bytes after it stay in the caller's reader. Two chained streams then decode
+// from one reader through NewDecoder and Reset. Wrapping the reader in the
+// Decoder's own read buffer would consume up to sourceBufSize bytes past the
+// first stream and lose the start of the second.
+func TestDecoderReadsCallerBufioReaderInPlace(t *testing.T) {
+	stream := seekFixture(t, 1, 20, 48000, 64000)
+	want := streamingDecode(t, stream)
+	br := bufio.NewReader(bytes.NewReader(slices.Concat(stream, stream)))
+
+	d, err := NewDecoder(br)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	for i := range 2 {
+		if i > 0 {
+			if err := d.Reset(br); err != nil {
+				t.Fatalf("Reset onto the second stream: %v", err)
+			}
+		}
+		var got bytes.Buffer
+		if _, err := d.WriteTo(&got); err != nil {
+			t.Fatalf("stream %d: WriteTo: %v", i, err)
+		}
+		if !bytes.Equal(got.Bytes(), want) {
+			t.Fatalf("stream %d: decoded %d bytes that differ from a fresh decode of %d bytes", i, got.Len(), len(want))
+		}
+	}
+	if rest, err := io.ReadAll(br); err != nil || len(rest) != 0 {
+		t.Fatalf("after both streams the reader holds %d bytes (err %v), want 0", len(rest), err)
+	}
 }

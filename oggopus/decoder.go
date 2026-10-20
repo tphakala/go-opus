@@ -93,9 +93,15 @@ type Decoder struct {
 // io.Seeker and answer Seek(0, io.SeekCurrent). Offsets are then relative to the
 // position of r at this call, so a stream embedded in a larger source works.
 //
-// r is read through a 64 KiB buffer that the Decoder allocates once and that
-// Reset reuses, so a program holding many Decoders should budget that much for
-// each, plus buffers for the largest Ogg page seen.
+// Unless r is a *bufio.Reader, it is read through a 64 KiB buffer that the
+// Decoder allocates once and that Reset reuses, so a program holding many Decoders
+// should budget that much for each, plus buffers for the largest Ogg page seen.
+// That buffer reads ahead: the Decoder may take up to 64 KiB from r beyond the
+// pages it has parsed, including bytes after the end of the stream. To decode a
+// stream that other data follows in r, such as a chained stream for a later Reset,
+// pass a *bufio.Reader: the Decoder reads it page by page and leaves the bytes
+// after the end-of-stream page in it. A NewDecoder or Reset that fails may already
+// have consumed bytes from r.
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	d := &Decoder{}
 	if err := d.init(r, nil); err != nil {
@@ -147,8 +153,9 @@ func (d *Decoder) Reset(r io.Reader) error {
 // decoder's per-stream state. It backs both NewDecoder and Reset, so the two agree
 // on header handling and on rejecting a nil source before any read. It leaves
 // d.pcmBuf in place, so Reset retains that buffer across streams, and binds d.br
-// (allocated on first use) to r. reuse, when not nil, is the previous stream's
-// container reader, whose buffers the new one recycles.
+// (allocated on first use) to r unless r is already a *bufio.Reader. reuse, when
+// not nil, is the previous stream's container reader, whose buffers the new one
+// recycles.
 //
 // It also decides seekability: r is kept for Length and SeekToSample only when it
 // is an io.ReadSeeker that reports its position, and the first audio page's offset
@@ -169,21 +176,35 @@ func (d *Decoder) init(r io.Reader, reuse *containerReader) error {
 			rs, base = s, pos
 		}
 	}
-	// The buffer is made with a nil source and pointed at r by Reset, so it is
-	// always the Decoder's own: bufio.NewReaderSize(r, n) would hand back a caller's
-	// *bufio.Reader that is already large enough, and a later Reset would rebind it.
-	if d.br == nil {
-		d.br = bufio.NewReaderSize(nil, sourceBufSize)
+	// A caller's *bufio.Reader is read directly, so page reads stop after the
+	// end-of-stream page and whatever follows stays in the caller's reader (a chained
+	// stream, a trailer). Any other source is read through d.br. It is made with a
+	// nil source and pointed at r by Reset, so it is always the Decoder's own:
+	// bufio.NewReaderSize(r, n) would hand back a caller's *bufio.Reader that is
+	// already large enough, and a later Reset would rebind it.
+	src, ok := r.(*bufio.Reader)
+	if ok && src == nil {
+		return errNilReader
 	}
-	d.br.Reset(r)
-	cr, err := newContainerReader(d.br, reuse)
+	if !ok {
+		if d.br == nil {
+			d.br = bufio.NewReaderSize(nil, sourceBufSize)
+		}
+		d.br.Reset(r)
+		src = d.br
+	}
+	cr, err := newContainerReader(src, reuse)
 	if err != nil {
-		d.br.Reset(nil) // do not keep a source the Decoder failed to bind reachable
+		if src == d.br {
+			d.br.Reset(nil) // do not keep a source the Decoder failed to bind reachable
+		}
 		return err
 	}
 	dec, err := newFrameDecoder(cr.head)
 	if err != nil {
-		d.br.Reset(nil)
+		if src == d.br {
+			d.br.Reset(nil)
+		}
 		return err
 	}
 	d.rs = rs
