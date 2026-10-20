@@ -246,3 +246,79 @@ func TestDecoderOversizedHeaders(t *testing.T) {
 		}
 	})
 }
+
+// tagsPageAudioStream lays out OpusHead on its own page, then OpusTags and an
+// audio packet of n bytes starting on the same page as OpusTags, which RFC 7845
+// section 3 forbids but a reader still meets. With n above the header limit, more
+// than that limit of the audio packet sits on the OpusTags page.
+func tagsPageAudioStream(t *testing.T, n int) []byte {
+	t.Helper()
+	p := &pager{t: t, serial: 0x1234, max: maxPageSegments}
+	p.add(testHead(1, 312).marshal(), 0)
+	p.flush(false)
+	p.add(opusTags{vendor: "v"}.marshal(), 0)
+	p.add(filled(n), 960)
+	p.flush(true)
+	return p.out.Bytes()
+}
+
+// TestContainerAudioOnTagsPage pins that only OpusHead and OpusTags are cut: an
+// audio packet that starts on the OpusTags page is held to the audio limit, so it
+// comes back whole when it fits and fails with ErrPacketTooLarge when it does not,
+// instead of losing its middle to the header cut.
+func TestContainerAudioOnTagsPage(t *testing.T) {
+	const fits = 100000
+	_, got := readContainer(t, bytes.NewReader(tagsPageAudioStream(t, fits)))
+	if len(got) != 1 {
+		t.Fatalf("got %d packets, want 1", len(got))
+	}
+	if !bytes.Equal(got[0], filled(fits)) {
+		t.Fatalf("got a %d-byte packet, want the %d-byte packet intact", len(got[0]), fits)
+	}
+
+	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(tagsPageAudioStream(t, 122881))), nil)
+	if err != nil {
+		t.Fatalf("newContainerReader: %v", err)
+	}
+	if p, err := cr.nextPacket(); !errors.Is(err, ErrPacketTooLarge) {
+		t.Fatalf("nextPacket: got %d bytes, err %v; want ErrPacketTooLarge", len(p), err)
+	}
+}
+
+// TestDecoderAudioOnHeadPage pins that audio sharing the OpusHead page (also an
+// RFC 7845 section 3 violation) is read as audio, not failed: NewDecoder never
+// returns ErrPacketTooLarge, so the packet must not meet a zero limit while the
+// headers are still being read.
+func TestDecoderAudioOnHeadPage(t *testing.T) {
+	_, audio := readContainer(t, bytes.NewReader(seekFixture(t, 1, 20, 24000, 32000)))
+	p := &pager{t: t, serial: 0x1234, max: maxPageSegments}
+	p.add(testHead(1, 312).marshal(), 0)
+	p.add(opusTags{vendor: "v"}.marshal(), 0)
+	var cum int64
+	for _, pk := range audio {
+		n, err := packetSamples48k(pk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cum += int64(n)
+		p.add(pk, cum)
+	}
+	p.flush(true)
+	d, err := NewDecoder(bytes.NewReader(p.out.Bytes()))
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	got, err := io.ReadAll(d)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	// The same audio behind headers on their own pages, with the same granules.
+	head, tags := testHead(1, 312).marshal(), opusTags{vendor: "v"}.marshal()
+	want, err := io.ReadAll(seekDecoder(t, limitStream(t, head, tags, audio, maxPageSegments, true)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) || len(got) == 0 {
+		t.Fatalf("decoded %d bytes with audio on the OpusHead page, want the %d bytes decoded with ordinary pages", len(got), len(want))
+	}
+}
