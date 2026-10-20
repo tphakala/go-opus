@@ -123,6 +123,9 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 func (d *Decoder) Reset(r io.Reader) error {
 	prev := d.cr
 	d.cr = nil
+	if d.br != nil {
+		d.br.Reset(nil) // drop the previous source now; init binds the new one
+	}
 	d.dec = nil
 	d.rs = nil
 	d.base = 0

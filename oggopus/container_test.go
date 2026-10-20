@@ -67,19 +67,24 @@ func readContainer(t *testing.T, r io.Reader) (cr *containerReader, packets [][]
 	if err != nil {
 		t.Fatalf("newContainerReader: %v", err)
 	}
+	return cr, drainPackets(t, cr)
+}
+
+// drainPackets returns copies of every remaining packet of cr. The copies are
+// required: packets alias the reader's arena, which the next page overwrites.
+func drainPackets(t *testing.T, cr *containerReader) [][]byte {
+	t.Helper()
 	var got [][]byte
 	for {
 		p, err := cr.nextPacket()
 		if errors.Is(err, io.EOF) {
-			break
+			return got
 		}
 		if err != nil {
 			t.Fatalf("nextPacket: %v", err)
 		}
-		// Packets alias the reader's arena, which the next page overwrites.
 		got = append(got, bytes.Clone(p))
 	}
-	return cr, got
 }
 
 // TestContainerRoundTrip is the core "Ogg round-trips" gate: a sequence of opus
@@ -287,17 +292,7 @@ func TestNewContainerReaderReuse(t *testing.T) {
 		t.Errorf("oversized buffers carried over: arena cap %d, partial cap %d, limit %d", cap(next.arena), cap(next.partial), maxReusedBuf)
 	}
 	_, want := readContainer(t, bytes.NewReader(stream))
-	var got [][]byte
-	for {
-		p, err := next.nextPacket()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			t.Fatalf("nextPacket: %v", err)
-		}
-		got = append(got, bytes.Clone(p))
-	}
+	got := drainPackets(t, next)
 	if len(got) != len(want) {
 		t.Fatalf("reused reader returned %d packets, want %d", len(got), len(want))
 	}
