@@ -8,18 +8,6 @@ import (
 	"slices"
 )
 
-// pageInfo records the structural facts of one parsed page. It exists so tests
-// (and future diagnostics) can assert granule progression and paging without
-// re-decoding, the container-structure check the go-flac seekability regression
-// argues for.
-type pageInfo struct {
-	granule   int64
-	flags     headerType
-	sequence  uint32
-	packets   int  // packets that completed on this page
-	continued bool // page begins with the tail of a prior packet
-}
-
 // containerReader parses an Ogg Opus stream from an io.Reader: it reassembles
 // packets across page boundaries, exposes the OpusHead and OpusTags, and tracks
 // the granule accounting needed for pre-skip and end-trim. It is
@@ -43,7 +31,15 @@ type containerReader struct {
 	finalGranule int64 // granule of the EOS page, or -1 if not yet seen
 	sawEOS       bool
 
-	pages []pageInfo
+	// limit is the largest audio packet processPage assembles. newContainerReader
+	// starts it at one stream's limit, which no single page reaches, and raises it
+	// from OpusHead. Zero rejects every non-empty packet, so a reader built without
+	// it fails rather than growing without bound.
+	limit int
+	// headers counts the header packets (OpusHead, then OpusTags) still to
+	// complete. processPage keeps at most maxHeaderPacketLen bytes of each and drops
+	// the rest instead of failing. Zero means every packet is audio.
+	headers int
 
 	// consumed counts the bytes of every page read so far (header, segment table
 	// and body). After newContainerReader it is the length of the header pages, so
@@ -51,18 +47,46 @@ type containerReader struct {
 	consumed int64
 }
 
+// Packet size limits. An Opus packet without padding is at most 61,298*N - 2
+// bytes for N streams (RFC 7845 section 6): per stream, 48 frames of at most 1275
+// bytes (internal/packet/parse.go:226, :330), a TOC byte, a code-3 count byte, 47
+// two-byte frame lengths and a two-byte self-delimited last length. Section 6 also
+// says a demuxer should treat a packet over rfcPacketLen bytes per stream as
+// invalid unless it has a specific reason to allow extra padding. Code-3 padding
+// is otherwise unbounded (internal/packet/parse.go:251-271), so the audio limit
+// allows as much padding again.
+const (
+	rfcPacketLen = 61440
+	// streamPacketLimit is the audio packet limit per Opus stream.
+	streamPacketLimit = 2 * rfcPacketLen
+	// maxHeaderPacketLen is how much of OpusHead or OpusTags is kept; the rest of
+	// a longer one is read and dropped. RFC 7845 section 5.2 lets a reader ignore
+	// comments not fully inside the first 61,440 bytes of the comment header.
+	maxHeaderPacketLen = rfcPacketLen
+)
+
+// audioPacketLimit returns the largest audio packet processPage accepts for a
+// stream with the given OpusHead: streamPacketLimit per Opus stream. A multistream
+// packet is the concatenation of one sub-packet per stream, so the bound scales
+// with the stream count. parseOpusHead leaves the count at zero for mapping family
+// 0, which has one stream; the max also keeps a malformed head with a count of
+// zero from producing a zero limit before newFrameDecoder rejects it.
+func audioPacketLimit(h opusHead) int {
+	return max(int(h.streamCount), 1) * streamPacketLimit
+}
+
 // maxReusedBuf is the largest capacity of the packet arena or the partial-packet
 // buffer that a containerReader keeps. With packets no longer than a page body
-// (an Opus packet is at most 48 frames of 1275 bytes), either buffer needs at most
-// two page bodies: the arena holds one page body plus a carried fragment. Growing
-// a slice can overshoot its need by a quarter plus 192 bytes (nextslicecap,
-// runtime/slice.go:341, Go 1.27.3) and a large allocation is then rounded up to an
-// 8 KiB page (roundupsize, runtime/msize.go:31), so the limit adds that headroom
-// and such a buffer is never dropped. A larger one comes from a packet that spans
-// several pages, such as a huge OpusTags. processPage drops it once that packet is
-// done, and newContainerReader does not carry it over from a previous reader, so
-// one such packet does not pin its memory for the rest of the stream or in a
-// pooled Decoder.
+// (an unpadded Opus packet is at most 61,298 bytes per stream), either buffer
+// needs at most two page bodies: the arena holds one page body plus a carried
+// fragment. Growing a slice can overshoot its need by a quarter plus 192 bytes
+// (nextslicecap, runtime/slice.go:341, Go 1.27.3) and a large allocation is then
+// rounded up to an 8 KiB page (roundupsize, runtime/msize.go:31), so the limit
+// adds that headroom and such a buffer is never dropped. A larger one comes from a
+// packet that spans several pages, such as a multistream or padded audio packet.
+// processPage drops it once that packet is done, and newContainerReader does not
+// carry it over from a previous reader, so one such packet does not pin its memory
+// for the rest of the stream or in a pooled Decoder.
 const maxReusedBuf = 2*maxPageBodyLen + 2*maxPageBodyLen/4 + 16<<10
 
 // newContainerReader reads and validates the OpusHead and OpusTags header
@@ -87,7 +111,8 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	// Stale queue slots would keep a dropped arena reachable.
 	queue := cr.queue[:cap(cr.queue)]
 	clear(queue)
-	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: arena, queue: queue[:0], partial: partial}
+	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: arena, queue: queue[:0], partial: partial,
+		limit: streamPacketLimit, headers: 2}
 	hp, err := cr.nextRawPacket()
 	if err != nil {
 		return nil, headerErr("OpusHead", err)
@@ -96,11 +121,22 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	if err != nil {
 		return nil, err
 	}
+	// Set before OpusTags is read, so audio sharing its page (which RFC 7845
+	// section 3 forbids) is held to the audio limit too.
+	cr.limit = audioPacketLimit(head)
 	tp, err := cr.nextRawPacket()
 	if err != nil {
 		return nil, headerErr("OpusTags", err)
 	}
-	tags, err := parseOpusTags(tp)
+	var tags opusTags
+	if len(tp) >= maxHeaderPacketLen {
+		// The packet may have been cut, so only the magic is checked: the comments
+		// are not exposed, and RFC 7845 section 5.2 lets a reader ignore those past
+		// the first 61,440 bytes.
+		err = checkOpusTagsMagic(tp)
+	} else {
+		tags, err = parseOpusTags(tp)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +167,8 @@ func (cr *containerReader) totalSamples() (int64, bool) {
 // reading pages as needed and adding the size of each page read to consumed. It
 // serves the OpusHead and OpusTags packets too; newContainerReader consumes those
 // before returning. Like nextPacket, the returned packet is valid only until the
-// next call.
+// next call. After an error the reader is not resumable: a later call could read
+// on from the middle of the failed page or packet.
 func (cr *containerReader) nextRawPacket() ([]byte, error) {
 	for {
 		if cr.qi < len(cr.queue) {
@@ -167,7 +204,8 @@ func (cr *containerReader) repositionAt(r io.Reader) {
 }
 
 // processPage reassembles the packets on one page into the queue and updates the
-// granule and end-of-stream accounting.
+// granule and end-of-stream accounting. An audio packet longer than cr.limit fails
+// with ErrPacketTooLarge; a header packet is cut to maxHeaderPacketLen instead.
 func (cr *containerReader) processPage(pg *page) error {
 	if !cr.serialSet {
 		cr.serial = pg.serial
@@ -205,9 +243,25 @@ func (cr *containerReader) processPage(pg *page) error {
 	}
 	off := 0
 	for _, l := range pg.segTable {
-		cr.partial = append(cr.partial, pg.body[off:off+int(l)]...)
+		seg := pg.body[off : off+int(l)]
 		off += int(l)
+		// The check runs before the append, so partial never exceeds the limit and
+		// acceptance depends on the packet's length alone, not on how pages split it.
+		limit := cr.limit
+		if cr.headers > 0 {
+			limit = maxHeaderPacketLen
+		}
+		if len(cr.partial) > limit-len(seg) {
+			if cr.headers == 0 {
+				return cr.packetTooLarge()
+			}
+			seg = seg[:limit-len(cr.partial)] // a header packet is cut, not failed
+		}
+		cr.partial = append(cr.partial, seg...)
 		if l < maxSegmentLen {
+			if cr.headers > 0 {
+				cr.headers--
+			}
 			start := len(cr.arena)
 			cr.arena = append(cr.arena, cr.partial...)
 			cr.queue = append(cr.queue, cr.arena[start:len(cr.arena):len(cr.arena)])
@@ -226,14 +280,22 @@ func (cr *containerReader) processPage(pg *page) error {
 		cr.sawEOS = true
 		cr.finalGranule = cr.lastGranule
 	}
-	cr.pages = append(cr.pages, pageInfo{
-		granule:   pg.granule,
-		flags:     pg.flags,
-		sequence:  pg.sequence,
-		packets:   len(cr.queue),
-		continued: pg.flags&flagContinued != 0,
-	})
 	return nil
+}
+
+// auxReader returns a reader over br for the same logical stream as cr, for a pass
+// that must not disturb cr's buffers or position. It holds audio packets to cr's
+// limit and expects br to start at an audio page.
+func (cr *containerReader) auxReader(br *bufio.Reader) *containerReader {
+	return &containerReader{br: br, serial: cr.serial, serialSet: true, finalGranule: -1, limit: cr.limit}
+}
+
+// packetTooLarge returns the limit error and releases the partial packet, so a
+// pooled Decoder does not pin it. The Decoder latches the error, so the reader is
+// not read on from the middle of the packet.
+func (cr *containerReader) packetTooLarge() error {
+	cr.partial = nil
+	return fmt.Errorf("%w: a packet spanning pages exceeds %d bytes", ErrPacketTooLarge, cr.limit)
 }
 
 // headerErr wraps an error from reading a header packet, mapping a premature EOF

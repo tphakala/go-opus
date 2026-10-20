@@ -31,4 +31,8 @@ var (
 	// ErrInvalidSeek reports a SeekToSample call with a negative sample index. Same
 	// value as oggopus.ErrInvalidSeek.
 	ErrInvalidSeek = oggopus.ErrInvalidSeek
+	// ErrPacketTooLarge reports an audio packet larger than the decoder accepts
+	// (a resource limit, not a corruption verdict). Same value as
+	// oggopus.ErrPacketTooLarge.
+	ErrPacketTooLarge = oggopus.ErrPacketTooLarge
 )

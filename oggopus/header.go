@@ -135,6 +135,14 @@ func (t opusTags) marshal() []byte {
 	return b
 }
 
+// checkOpusTagsMagic reports an error unless b starts with the OpusTags magic.
+func checkOpusTagsMagic(b []byte) error {
+	if m := b[:min(len(b), len(opusTagsMagic))]; string(m) != opusTagsMagic {
+		return fmt.Errorf("oggopus: bad OpusTags magic %q", m)
+	}
+	return nil
+}
+
 // parseOpusTags decodes an OpusTags packet. Every length field is bounds-checked
 // against the remaining input so a corrupt count cannot trigger an out-of-range
 // read; trailing bytes after the declared comment list are ignored (RFC 7845
@@ -144,8 +152,8 @@ func parseOpusTags(b []byte) (opusTags, error) {
 	if len(b) < magicLen+4 {
 		return opusTags{}, fmt.Errorf("oggopus: OpusTags too short (%d bytes)", len(b))
 	}
-	if string(b[0:magicLen]) != opusTagsMagic {
-		return opusTags{}, fmt.Errorf("oggopus: bad OpusTags magic %q", b[0:magicLen])
+	if err := checkOpusTagsMagic(b); err != nil {
+		return opusTags{}, err
 	}
 	pos := magicLen
 

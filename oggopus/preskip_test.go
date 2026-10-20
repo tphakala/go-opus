@@ -255,7 +255,7 @@ func TestOggOpusGranuleRFC7845(t *testing.T) {
 						len(pkts), naturalFrames)
 				}
 
-				checkPageGranules(t, cr, len(pkts), frame48k)
+				checkPageGranules(t, scanPages(t, stream), len(pkts), frame48k)
 
 				// The decoded stream must be exactly as long as the input.
 				got, info := decodeOgg(t, stream)
@@ -316,7 +316,7 @@ func TestOggOpusGranuleRFC7845AllRates(t *testing.T) {
 					t.Fatalf("at %d Hz, n=%d (r=%d, overshoot %d coded samples): padded=%v, want %v",
 						rate, n, r, overshoot, gotPad, wantPad)
 				}
-				checkPageGranules(t, cr, len(pkts), frame48k)
+				checkPageGranules(t, scanPages(t, stream), len(pkts), frame48k)
 
 				got, _ := decodeOgg(t, stream)
 				if int64(len(got)) != n48 {
@@ -328,24 +328,24 @@ func TestOggOpusGranuleRFC7845AllRates(t *testing.T) {
 	}
 }
 
-// checkPageGranules walks the parsed pages and asserts the container-level granule
+// checkPageGranules walks the pages and asserts the container-level granule
 // invariants: header pages carry granule 0, audio granules never regress, no page
 // claims more samples than the packets that have completed by then could hold, and
 // the last page is flagged end-of-stream.
-func checkPageGranules(t *testing.T, cr *containerReader, audioPackets, frameLen48k int) {
+func checkPageGranules(t *testing.T, pages []pageInfo, audioPackets, frameLen48k int) {
 	t.Helper()
-	if len(cr.pages) < 3 {
-		t.Fatalf("expected at least 3 pages (OpusHead, OpusTags, audio), got %d", len(cr.pages))
+	if len(pages) < 3 {
+		t.Fatalf("expected at least 3 pages (OpusHead, OpusTags, audio), got %d", len(pages))
 	}
 	// Pages 0 and 1 carry the two header packets, each forced onto its own page.
 	for i := range 2 {
-		if cr.pages[i].granule != 0 {
-			t.Fatalf("header page %d has granule %d, want 0", i, cr.pages[i].granule)
+		if pages[i].granule != 0 {
+			t.Fatalf("header page %d has granule %d, want 0", i, pages[i].granule)
 		}
 	}
 	cumPkts := 0
 	prev := int64(0)
-	for i, pg := range cr.pages {
+	for i, pg := range pages {
 		cumPkts += pg.packets
 		if i < 2 {
 			continue
@@ -366,12 +366,12 @@ func checkPageGranules(t *testing.T, cr *containerReader, audioPackets, frameLen
 	if got := cumPkts - 2; got != audioPackets {
 		t.Fatalf("pages account for %d audio packets, reader returned %d", got, audioPackets)
 	}
-	last := cr.pages[len(cr.pages)-1]
+	last := pages[len(pages)-1]
 	if last.flags&flagEOS == 0 {
 		t.Fatalf("last page is not flagged end-of-stream (flags %#x)", last.flags)
 	}
-	if cr.pages[0].flags&flagBOS == 0 {
-		t.Fatalf("first page is not flagged beginning-of-stream (flags %#x)", cr.pages[0].flags)
+	if pages[0].flags&flagBOS == 0 {
+		t.Fatalf("first page is not flagged beginning-of-stream (flags %#x)", pages[0].flags)
 	}
 }
 

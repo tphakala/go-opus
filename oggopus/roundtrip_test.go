@@ -41,7 +41,7 @@ func TestOggOpusRoundTripAllRates(t *testing.T) {
 				if coded := int64(len(pkts)) * frame48k; cr.finalGranule > coded {
 					t.Fatalf("final granule %d exceeds the %d coded samples", cr.finalGranule, coded)
 				}
-				checkPageGranules(t, cr, len(pkts), frame48k)
+				checkPageGranules(t, scanPages(t, stream), len(pkts), frame48k)
 
 				got, info := decodeOgg(t, stream)
 				if info.Channels != ch {
@@ -112,7 +112,7 @@ func TestOggOpusRoundTripAllDurations(t *testing.T) {
 					if coded := int64(len(pkts)) * int64(frameLen48k); cr.finalGranule > coded {
 						t.Fatalf("final granule %d exceeds the %d coded samples", cr.finalGranule, coded)
 					}
-					checkPageGranules(t, cr, len(pkts), frameLen48k)
+					checkPageGranules(t, scanPages(t, stream), len(pkts), frameLen48k)
 
 					got, info := decodeOgg(t, stream)
 					if info.Channels != ch {
@@ -330,7 +330,8 @@ func TestEncoderEmptyInput(t *testing.T) {
 	if int(cr.head.preSkip) != expectedPreSkip {
 		t.Fatalf("pre-skip = %d, want %d", cr.head.preSkip, expectedPreSkip)
 	}
-	last := cr.pages[len(cr.pages)-1]
+	pages := scanPages(t, buf.Bytes())
+	last := pages[len(pages)-1]
 	if last.flags&flagEOS == 0 {
 		t.Fatalf("empty stream: last page is not flagged end-of-stream (flags %#x)", last.flags)
 	}

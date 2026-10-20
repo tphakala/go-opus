@@ -26,7 +26,7 @@ type repageOpts struct {
 
 type pager struct {
 	out    bytes.Buffer
-	t      *testing.T
+	t      testing.TB
 	serial uint32
 	seq    uint32
 	max    int
