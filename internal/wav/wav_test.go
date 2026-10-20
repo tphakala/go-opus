@@ -227,3 +227,19 @@ func TestNewReaderUndeclaredDataSizeReadsToEOF(t *testing.T) {
 		}
 	}
 }
+
+// A fmt chunk header can claim up to 4 GiB. The reader must reject an
+// implausible size before allocating for it; on a 32-bit build the allocation
+// itself would panic.
+func TestNewReaderRejectsOversizedFmtChunk(t *testing.T) {
+	var raw bytes.Buffer
+	raw.WriteString("RIFF")
+	_ = binary.Write(&raw, binary.LittleEndian, uint32(0xFFFFFFFF))
+	raw.WriteString("WAVEfmt ")
+	_ = binary.Write(&raw, binary.LittleEndian, uint32(0xFFFFFFF0))
+	raw.Write(pcmFmt(formatPCM, 2, 48000, 16))
+
+	if _, err := NewReader(bytes.NewReader(raw.Bytes())); !errors.Is(err, ErrMalformed) {
+		t.Errorf("NewReader error = %v, want ErrMalformed", err)
+	}
+}
