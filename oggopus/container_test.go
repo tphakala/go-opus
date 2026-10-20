@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"math/rand/v2"
+	"runtime"
 	"testing"
+	"weak"
 )
 
 // writeOnly wraps an io.Writer while deliberately NOT implementing io.Seeker.
@@ -206,6 +208,61 @@ func TestContainerReleasesOversizedPacketBuffers(t *testing.T) {
 	if c := cap(cr.partial); c > maxReusedBuf {
 		t.Errorf("partial capacity %d after the large packet, want at most %d", c, maxReusedBuf)
 	}
+}
+
+// TestContainerDroppedArenaIsReleased pins that dropping an oversized arena
+// releases it. The page that completes the large packet also completes two small
+// ones; the later pages complete one packet each, so queue slots past the current
+// page's packets would keep the old arena reachable unless they are cleared.
+func TestContainerDroppedArenaIsReleased(t *testing.T) {
+	pkts := [][]byte{
+		makeRamp(200000),
+		bytes.Repeat([]byte{0x11}, 17),
+		bytes.Repeat([]byte{0x22}, 17),
+		bytes.Repeat([]byte{0x33}, maxPageBodyLen),
+		bytes.Repeat([]byte{0x44}, maxPageBodyLen),
+	}
+	const dur, preSkip = 960, 312
+	var buf bytes.Buffer
+	writeContainer(t, &buf, testHead(1, preSkip), opusTags{vendor: "v"}, pkts, dur, int64(len(pkts)*dur-preSkip))
+
+	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(buf.Bytes())), nil)
+	if err != nil {
+		t.Fatalf("newContainerReader: %v", err)
+	}
+	first, err := cr.nextPacket()
+	if err != nil || len(first) != len(pkts[0]) {
+		t.Fatalf("first packet: %d bytes, err %v; want %d bytes", len(first), err, len(pkts[0]))
+	}
+	queued := len(cr.queue)
+	if queued < 2 {
+		t.Fatalf("the large packet's page queued %d packets, want the small ones too", queued)
+	}
+	if cap(cr.arena) <= maxReusedBuf {
+		t.Fatalf("arena capacity %d after the large packet, want it above maxReusedBuf (%d)", cap(cr.arena), maxReusedBuf)
+	}
+	old := weak.Make(&cr.arena[:1][0])
+	for {
+		if _, err := cr.nextPacket(); err != nil {
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("nextPacket: %v", err)
+			}
+			break
+		}
+	}
+	if cap(cr.arena) > maxReusedBuf {
+		t.Fatalf("arena capacity %d, want the oversized one dropped", cap(cr.arena))
+	}
+	if len(cr.queue) >= queued {
+		t.Fatalf("the last page queued %d packets, want fewer than %d so stale slots remain", len(cr.queue), queued)
+	}
+	for range 3 {
+		runtime.GC()
+	}
+	if old.Value() != nil {
+		t.Error("the dropped arena is still reachable from the container reader")
+	}
+	runtime.KeepAlive(cr)
 }
 
 // TestContainerLargePacketsDoNotReallocate pins that packets up to a page body

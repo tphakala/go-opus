@@ -192,8 +192,10 @@ func (cr *containerReader) processPage(pg *page) error {
 	// completes a packet writes to it, so a run of continuation-only pages grows
 	// partial alone. A packet that spanned several pages can leave the arena far
 	// larger than a page; such an arena is dropped rather than held for the rest of
-	// the stream.
+	// the stream. Queue slots past the current length still alias it, so they are
+	// cleared too.
 	if cap(cr.arena) > maxReusedBuf {
+		clear(cr.queue[:cap(cr.queue)])
 		cr.arena = nil
 	} else {
 		cr.arena = cr.arena[:0]
