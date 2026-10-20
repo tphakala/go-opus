@@ -243,3 +243,18 @@ func TestNewReaderRejectsOversizedFmtChunk(t *testing.T) {
 		t.Errorf("NewReader error = %v, want ErrMalformed", err)
 	}
 }
+
+// TestNewReaderFmtChunkSizeLimit pins the fmt chunk cap at its boundary: a PCM
+// fmt body zero-padded to maxFmtSize bytes is accepted, one byte more is not.
+func TestNewReaderFmtChunkSizeLimit(t *testing.T) {
+	padded := func(n int) []byte { return append(pcmFmt(formatPCM, 2, 48000, 16), make([]byte, n-16)...) }
+
+	// maxFmtSize is odd, so the RIFF pad byte follows the chunk; buildWAV writes
+	// extra chunk bytes verbatim, so it carries the pad.
+	if _, err := NewReader(bytes.NewReader(buildWAV(padded(maxFmtSize), []byte{0, 0, 0, 0}, []byte{0}))); err != nil {
+		t.Errorf("fmt chunk of maxFmtSize (%d) bytes: NewReader error %v, want nil", maxFmtSize, err)
+	}
+	if _, err := NewReader(bytes.NewReader(buildWAV(padded(maxFmtSize+1), []byte{0, 0, 0, 0}))); !errors.Is(err, ErrMalformed) {
+		t.Errorf("fmt chunk of maxFmtSize+1 bytes: NewReader error %v, want ErrMalformed", err)
+	}
+}
