@@ -288,6 +288,12 @@ func TestNewContainerReaderReuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newContainerReader with oversized buffers: %v", err)
 	}
+	for i, p := range next.queue[len(next.queue):cap(next.queue)] {
+		if p != nil {
+			t.Errorf("recycled queue slot %d still points at the previous stream's arena", len(next.queue)+i)
+			break
+		}
+	}
 	if cap(next.arena) > maxReusedBuf || cap(next.partial) > maxReusedBuf {
 		t.Errorf("oversized buffers carried over: arena cap %d, partial cap %d, limit %d", cap(next.arena), cap(next.partial), maxReusedBuf)
 	}

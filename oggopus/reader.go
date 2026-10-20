@@ -77,7 +77,10 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	if cap(partial) > maxReusedBuf {
 		partial = nil
 	}
-	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: arena, queue: cr.queue[:0], partial: partial}
+	// Stale queue slots would keep a dropped arena reachable.
+	queue := cr.queue[:cap(cr.queue)]
+	clear(queue)
+	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: arena, queue: queue[:0], partial: partial}
 	hp, err := cr.nextRawPacket()
 	if err != nil {
 		return nil, headerErr("OpusHead", err)
