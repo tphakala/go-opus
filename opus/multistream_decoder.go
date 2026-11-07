@@ -6,8 +6,10 @@ import (
 	"github.com/tphakala/go-opus/internal/opusdec"
 )
 
-// MultistreamDecoder decodes multistream Opus packets (RFC 7845 channel mapping
-// families 0 and 1) to interleaved 16-bit PCM. A multistream packet concatenates
+// MultistreamDecoder decodes multistream Opus packets described by an RFC 7845
+// channel mapping table (container families 1, 2 and 255; family 2 yields the raw
+// ambisonic channels, and family 3 needs a demixing step this decoder does not
+// apply) to interleaved 16-bit PCM. A multistream packet concatenates
 // one Opus sub-packet per stream; the first CoupledStreams streams are stereo,
 // the rest mono, and each decoded stream channel is routed to the API channels a
 // mapping table names. This is the surround-capable counterpart to Decoder and
