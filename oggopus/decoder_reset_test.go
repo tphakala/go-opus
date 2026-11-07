@@ -16,23 +16,38 @@ func TestResetMatchesFreshDecoder(t *testing.T) {
 	ms2 := func(streams, coupled int, mapping ...byte) []byte {
 		return msStream(t, 1, 2, streams, coupled, mapping, 40)
 	}
+	seekedAndRead := func(t *testing.T, d *Decoder) {
+		t.Helper()
+		if _, err := d.SeekToSample(20000); err != nil {
+			t.Fatalf("SeekToSample: %v", err)
+		}
+		if _, err := io.ReadFull(d, make([]byte, 3000)); err != nil {
+			t.Fatalf("read after seek: %v", err)
+		}
+	}
 	rows := []struct {
 		name    string
 		a, b    []byte
 		partial int // bytes read from a before Reset; 0 decodes it fully
+		// dirty, when set, leaves a in another state before Reset instead of the read above.
+		dirty func(t *testing.T, d *Decoder)
 	}{
-		{"mono->mono", mono, mono, 0},
-		{"stereo->stereo partial", stereo, stereo, 5000},
-		{"family1->family1", family1Stream(t, 40), family1Stream(t, 30), 5000},
-		{"mono->stereo", mono, stereo, 0},
-		{"stereo->family1 2ch", stereo, ms2(2, 0, 0, 1), 5000},
-		{"family1 2 streams->1 coupled stream", ms2(2, 0, 0, 1), ms2(1, 1, 0, 1), 5000},
-		{"family1 mapping 0,1->1,0", ms2(2, 0, 0, 1), ms2(2, 0, 1, 0), 5000},
+		{"mono->mono", mono, mono, 0, nil},
+		{"stereo->stereo partial", stereo, stereo, 5000, nil},
+		{"family1->family1", family1Stream(t, 40), family1Stream(t, 30), 5000, nil},
+		{"mono->stereo", mono, stereo, 0, nil},
+		{"stereo->family1 2ch", stereo, ms2(2, 0, 0, 1), 5000, nil},
+		{"family1 2 streams->1 coupled stream", ms2(2, 0, 0, 1), ms2(1, 1, 0, 1), 5000, nil},
+		{"family1 mapping 0,1->1,0", ms2(2, 0, 0, 1), ms2(2, 0, 1, 0), 5000, nil},
+		{"stereo->stereo after seek", stereo, stereo, 0, seekedAndRead},
+		{"family1->family1 after seek", family1Stream(t, 40), family1Stream(t, 30), 0, seekedAndRead},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			d := seekDecoder(t, row.a)
-			if row.partial == 0 {
+			if row.dirty != nil {
+				row.dirty(t, d)
+			} else if row.partial == 0 {
 				drainDecoder(t, d, nil)
 			} else if _, err := io.ReadFull(d, make([]byte, row.partial)); err != nil {
 				t.Fatalf("partial read: %v", err)
