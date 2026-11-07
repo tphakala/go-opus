@@ -207,9 +207,9 @@ func TestContainerHeaderCut(t *testing.T) {
 }
 
 // TestDecoderOversizedHeaders pins that OpusHead and OpusTags under the span
-// ceiling do not fail for their size: a stream never fails on the size of its tags, a cut OpusTags still
-// needs its magic, and a huge first packet that is not an OpusHead is still
-// reported as not Opus.
+// ceiling do not fail for their size: a stream never fails on the size of its
+// tags, a cut OpusTags still needs its magic, and a huge first packet that is not
+// an OpusHead is still reported as not Opus.
 func TestDecoderOversizedHeaders(t *testing.T) {
 	cr, audio := readContainer(t, bytes.NewReader(seekFixture(t, 1, 20, 24000, 32000)))
 	head := cr.head.marshal()

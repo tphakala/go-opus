@@ -192,8 +192,9 @@ func (d *opusMSFrameDecoder) close() {}
 
 // newFrameDecoder builds the per-stream decoder from the parsed OpusHead. Channel
 // mapping family 0 (mono/stereo) decodes through a single opus.Decoder; families
-// 1, 2 and 255 (parseOpusHead rejects the rest) decode through opus.MultistreamDecoder, driven by the OpusHead stream count,
-// coupled-stream count and channel mapping the container parsed.
+// 1, 2 and 255 (parseOpusHead rejects the rest) decode through
+// opus.MultistreamDecoder, driven by the OpusHead stream count, coupled-stream
+// count and channel mapping the container parsed.
 //
 // The decoder always runs at 48 kHz, whatever OpusHead's input-sample-rate field
 // says: RFC 7845 section 5.1 makes that field informational ("the sample rate of
