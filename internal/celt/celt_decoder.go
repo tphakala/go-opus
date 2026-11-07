@@ -275,11 +275,49 @@ func tfDecode(start, end, isTransient int, tfRes []int, LM int, dec *rangecoding
 	}
 }
 
+// deemphasisStereoSimple is deemphasis_stereo_simple (celt_decoder.c:288),
+// compiled in under !CUSTOM_MODES && !ENABLE_OPUS_CUSTOM_API && !ENABLE_QEXT
+// (celt_decoder.c:284), which the frozen config satisfies. It is the special
+// case for stereo with no downsampling and no accumulation: both channels' IIR
+// run in one loop, so the CPU overlaps two independent dependency chains. Per
+// channel the arithmetic is the general loop's, so output and mem are identical.
+func deemphasisStereoSimple(in [][]int32, pcm []int16, N int, coef0 int16, mem *[2]int32) {
+	// Slice once so the x0/x1 reads carry no bounds check. The store window
+	// keeps one check per sample pair (the prover cannot relate 2*j+2 to
+	// len(y)), down from one per store on the strided general loop. The max
+	// index bounds the reslice by len(pcm), not cap(pcm), so a short pcm still
+	// panics as the strided stores would instead of writing into spare capacity.
+	x0 := in[0][:N]
+	x1 := in[1][:N]
+	y := pcm[: 2*N : len(pcm)]
+	m0 := mem[0]
+	m1 := mem[1]
+	for j := range x0 {
+		tmp0 := fixedmath.SATURATE(x0[j]+m0, sigSat) // VERY_SMALL == 0
+		tmp1 := fixedmath.SATURATE(x1[j]+m1, sigSat)
+		m0 = fixedmath.MULT16_32_Q15(coef0, tmp0)
+		m1 = fixedmath.MULT16_32_Q15(coef0, tmp1)
+		p := y[2*j : 2*j+2]
+		p[0] = sig2word16(tmp0)
+		p[1] = sig2word16(tmp1)
+	}
+	mem[0] = m0
+	mem[1] = m1
+}
+
 // deemphasis is celt_decoder.c:318 for the frozen config (non-CUSTOM_MODES so
 // coef[1] is unused, non-RES24 so opus_res is int16). It runs the preemphasis
 // inverse (a 1-tap IIR) over each channel of out_syn, optional integer
 // downsampling, and writes interleaved int16 PCM. mem carries preemph_memD.
+// Stereo with downsample 1 and no accumulation dispatches to
+// deemphasisStereoSimple; the loop below handles mono, accum (hybrid) and
+// downsampling.
 func deemphasis(outSyn [][]int32, pcm []int16, N, C, downsample int, coef [4]int16, mem *[2]int32, accum int, sc *scratch) {
+	// Short version for the common case (celt_decoder.c:327-334).
+	if downsample == 1 && C == 2 && accum == 0 {
+		deemphasisStereoSimple(outSyn, pcm, N, coef[0], mem)
+		return
+	}
 	coef0 := coef[0]
 	Nd := N / downsample
 	// dScratch is C's VARDECL(celt_sig, scratch) (celt_decoder.c:335), pooled here.
