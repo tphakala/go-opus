@@ -79,7 +79,7 @@ type Decoder struct {
 	// Seeking state. rs is nil unless the source is a working io.ReadSeeker; base is
 	// its offset at bind time. idx is built lazily by Length or the first seek and is
 	// valid only for the bound source (Reset clears it). scan is the scratch window
-	// for page scans.
+	// for page scans, kept across Reset and rebound to each source.
 	rs      io.ReadSeeker
 	base    int64
 	idx     seekIndex
@@ -111,6 +111,8 @@ type Decoder struct {
 // described for ErrPacketTooLarge. OpusHead and OpusTags are cut as the package
 // documentation describes, which also covers the header packet size and the
 // channel mapping families that make NewDecoder fail.
+// Length and the seek methods read through a further window of about 128 KiB,
+// allocated by the first such call and kept across Reset.
 //
 // Unless r is a *bufio.Reader, it is also read through a 64 KiB buffer that the
 // Decoder allocates once and that Reset reuses, so a program holding many Decoders
@@ -124,7 +126,7 @@ type Decoder struct {
 // already have consumed bytes from r.
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	d := &Decoder{}
-	if err := d.init(r, nil); err != nil {
+	if err := d.init(r, nil, nil); err != nil {
 		return nil, err
 	}
 	return d, nil
@@ -133,22 +135,26 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 // Reset rebinds the Decoder to a new source r, re-parsing its OpusHead and
 // OpusTags headers, so one Decoder can decode many independent streams. Its source
 // read buffer (used when r is not a *bufio.Reader), its decoded-PCM buffer and the
-// container's page and packet buffers are reused; the codec is rebuilt for each
-// stream. It mirrors Encoder.Reset and
+// container's page and packet buffers are reused, and so is the page-scan window
+// that Length and the seek methods read through. The codec is reset and reused
+// when the new stream has the same layout (the same channel count for mapping
+// family 0; the same family, channel count, stream count, coupled count and
+// mapping table otherwise) and rebuilt when it does not; the output is the same as
+// from a new Decoder either way. It mirrors Encoder.Reset and
 // the sibling pcm.Decoder.Reset in go-wav, go-flac, and go-aac: the pooling path
 // for a "many short clips" workload.
 //
 // The codec and container reader are cleared first, so a Reset that fails partway
 // (a nil source, or headers that will not parse) leaves a Decoder that reports its
 // uninitialized error on the next Read rather than one still bound to the previous
-// stream. A stream whose first packet is not an OpusHead returns an error wrapping
-// ErrNotOpus.
+// stream, and the next Reset builds a new codec. A stream whose first packet is not
+// an OpusHead returns an error wrapping ErrNotOpus.
 //
 // Seekability is re-evaluated for the new source and everything cached about the
 // previous stream (its length and page layout) is discarded, as is any error
 // latched by a failed seek.
 func (d *Decoder) Reset(r io.Reader) error {
-	prev := d.cr
+	prev, prevDec := d.cr, d.dec
 	d.cr = nil
 	if d.br != nil {
 		d.br.Reset(nil) // drop the previous source now; init binds the new one
@@ -161,14 +167,16 @@ func (d *Decoder) Reset(r io.Reader) error {
 	d.atEnd = false
 	d.inSequence = false
 	d.err = nil
-	d.scan = nil
+	if d.scan != nil {
+		d.scan.rebind(nil) // invalidate the window and drop the previous source
+	}
 	d.tagsBad = false
 	// Clear info too, so a Reset that fails partway does not leave Info reporting
 	// the previous stream's parameters (init only repopulates it on success). This
 	// matches go-flac and go-aac, whose decoders zero their info up front.
 	d.info = Info{}
 	d.pcm = d.pcm[:0]
-	return d.init(r, prev)
+	return d.init(r, prev, prevDec)
 }
 
 // init parses and validates the container headers from r and populates the
@@ -177,12 +185,13 @@ func (d *Decoder) Reset(r io.Reader) error {
 // d.pcmBuf in place, so Reset retains that buffer across streams, and binds d.br
 // (allocated on first use) to r unless r is already a *bufio.Reader. reuse, when
 // not nil, is the previous stream's container reader, whose buffers the new one
-// recycles.
+// recycles; reuseDec, when not nil, is the previous stream's codec, which is reset
+// and kept when the new stream has the same layout.
 //
 // It also decides seekability: r is kept for Length and the seek methods only when it
 // is an io.ReadSeeker that reports its position, and the first audio page's offset
 // is recorded from the header pages the container reader consumed.
-func (d *Decoder) init(r io.Reader, reuse *containerReader) error {
+func (d *Decoder) init(r io.Reader, reuse *containerReader, reuseDec frameDecoder) error {
 	// Reject a nil source up front; otherwise the first container read dereferences
 	// a nil io.Reader and panics.
 	if r == nil {
@@ -223,7 +232,7 @@ func (d *Decoder) init(r io.Reader, reuse *containerReader) error {
 		}
 		return err
 	}
-	dec, err := newFrameDecoder(cr.head)
+	dec, err := frameDecoderFor(reuseDec, cr.head)
 	if err != nil {
 		if src == d.br {
 			d.br.Reset(nil)
@@ -231,6 +240,9 @@ func (d *Decoder) init(r io.Reader, reuse *containerReader) error {
 		return err
 	}
 	d.rs = rs
+	if d.scan != nil {
+		d.scan.rebind(rs)
+	}
 	d.base = base
 	d.idx = seekIndex{audioStart: base + cr.consumed}
 	// Audio packets sharing the OpusTags page break the granule arithmetic the

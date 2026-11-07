@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"math/rand/v2"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -100,16 +101,21 @@ func TestLengthFamily1(t *testing.T) {
 
 func family1Stream(t *testing.T, nFrames int) []byte {
 	t.Helper()
+	return msStream(t, 1, 3, 2, 1, []byte{0, 1, 2}, nFrames)
+}
+
+// msStream encodes nFrames 20 ms frames of a multistream layout and wraps them in
+// an Ogg Opus stream whose OpusHead carries the given mapping family.
+func msStream(t *testing.T, family byte, channels, streams, coupled int, mapping []byte, nFrames int) []byte {
+	t.Helper()
 	const (
 		frameSize = 960
 		preSkip   = 312
-		channels  = 3
 	)
-	mapping := []byte{0, 1, 2}
-	packets := encodeMultistreamSeq(t, channels, 2, 1, mapping, frameSize, nFrames)
+	packets := encodeMultistreamSeq(t, channels, streams, coupled, mapping, frameSize, nFrames)
 	head := opusHead{
-		version: opusHeadVersion, channels: channels, preSkip: preSkip, inputSampleRate: 48000,
-		mappingFamily: 1, streamCount: 2, coupledCount: 1, channelMapping: mapping,
+		version: opusHeadVersion, channels: uint8(channels), preSkip: preSkip, inputSampleRate: 48000,
+		mappingFamily: family, streamCount: uint8(streams), coupledCount: uint8(coupled), channelMapping: mapping,
 	}
 	var buf bytes.Buffer
 	writeContainer(t, &buf, head, opusTags{vendor: "go-opus"}, packets, frameSize, int64(nFrames*frameSize-preSkip-77))
@@ -737,6 +743,63 @@ func TestResetReevaluatesSeekability(t *testing.T) {
 	}
 	if _, err := d.Length(); !errors.Is(err, errUninitialized) {
 		t.Fatalf("after failed Reset: Length err = %v, want errUninitialized", err)
+	}
+}
+
+// TestResetReusesSeekWindow pins that Reset keeps the page-scan window but never
+// serves bytes cached from the previous source: the window is keyed on offset only,
+// so a re-pointed reader holding different bytes must read afresh.
+func TestResetReusesSeekWindow(t *testing.T) {
+	a := seekFixture(t, 1, 20, 2*48000, 64000)
+	b := seekFixture(t, 1, 20, 48000, 64000)
+	r := bytes.NewReader(a)
+	d, err := NewDecoder(r)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	if _, err := d.Length(); err != nil {
+		t.Fatalf("Length of A: %v", err)
+	}
+
+	r.Reset(b)
+	if err := d.Reset(r); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	fresh := seekDecoder(t, b)
+	wantLen, err := fresh.Length()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Length(); err != nil || got != wantLen {
+		t.Fatalf("Length after Reset = %d, %v; want %d", got, err, wantLen)
+	}
+	const k = 30000
+	if _, err := d.SeekToSample(k); err != nil {
+		t.Fatalf("SeekToSample: %v", err)
+	}
+	if _, err := fresh.SeekToSample(k); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(readAll(t, d), readAll(t, fresh)) {
+		t.Fatal("output after Reset and SeekToSample differs from a new Decoder's")
+	}
+
+	// A new window alone is scanWindow bytes, so a Reset that keeps it allocates less.
+	const rounds = 5
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range rounds {
+		r.Reset(b)
+		if err := d.Reset(r); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.Length(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if per := (after.TotalAlloc - before.TotalAlloc) / rounds; per >= scanWindow {
+		t.Errorf("Reset + Length allocated %d bytes per round, want less than the %d-byte window", per, scanWindow)
 	}
 }
 

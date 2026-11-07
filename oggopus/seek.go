@@ -54,6 +54,11 @@ type pageScanner struct {
 	valid bool
 }
 
+// rebind points s at a new source and drops everything it cached but the buffer.
+// The window is keyed on offset alone, so any cached bytes would be served for the
+// new stream, even when rs is the same reader re-pointed at different data.
+func (s *pageScanner) rebind(rs io.ReadSeeker) { *s = pageScanner{rs: rs, buf: s.buf} }
+
 func (d *Decoder) scanner() *pageScanner {
 	if d.scan == nil {
 		d.scan = &pageScanner{rs: d.rs}
