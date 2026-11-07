@@ -265,8 +265,10 @@ func (cr *containerReader) processPage(pg *page) error {
 	for _, l := range pg.segTable {
 		seg := pg.body[off : off+int(l)]
 		off += int(l)
-		// The check runs before the append, so partial never exceeds the limit and
-		// acceptance depends on the packet's length alone, not on how pages split it.
+		// The check runs before the append, so partial never exceeds the limit.
+		// Acceptance of an audio packet depends on its length alone, not on how pages
+		// split it; a header packet is cut instead, and only its total span
+		// (headerSpan) can fail it.
 		limit := cr.limit
 		if cr.headers > 0 {
 			limit = maxHeaderPacketLen
