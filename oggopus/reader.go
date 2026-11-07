@@ -38,8 +38,14 @@ type containerReader struct {
 	limit int
 	// headers counts the header packets (OpusHead, then OpusTags) still to
 	// complete. processPage keeps at most maxHeaderPacketLen bytes of each and drops
-	// the rest instead of failing. Zero means every packet is audio.
+	// the rest, up to maxHeaderSpan, instead of failing. Zero means every packet is
+	// audio.
 	headers int
+	// headerSpan counts the header bytes seen, kept or dropped, since the previous
+	// header packet completed. It is reset only on completion, not when a page that
+	// does not continue the packet drops a dangling fragment: resetting there would
+	// let pages that each drop the last restart the count forever.
+	headerSpan int
 
 	// consumed counts the bytes of every page read so far (header, segment table
 	// and body). After newContainerReader it is the length of the header pages, so
@@ -60,9 +66,20 @@ const (
 	// streamPacketLimit is the audio packet limit per Opus stream.
 	streamPacketLimit = 2 * rfcPacketLen
 	// maxHeaderPacketLen is how much of OpusHead or OpusTags is kept; the rest of
-	// a longer one is read and dropped. RFC 7845 section 5.2 lets a reader ignore
-	// comments not fully inside the first 61,440 bytes of the comment header.
+	// a longer one is read and dropped, up to maxHeaderSpan. RFC 7845 section 5.2
+	// lets a reader ignore comments not fully inside the first 61,440 bytes of the
+	// comment header.
 	maxHeaderPacketLen = rfcPacketLen
+	// maxHeaderSpan is how many bytes one header packet may span before reading
+	// fails. It bounds read time, not memory (memory stays at maxHeaderPacketLen):
+	// without it a header continued by endless full pages is read forever. Cover
+	// art in OpusTags is a base64 METADATA_BLOCK_PICTURE, and a FLAC picture block
+	// has a 24-bit length (under 16 MiB), which base64-encodes to under 22.4 MB, so
+	// a picture copied from a FLAC file fits. opusfile and ffmpeg set no fixed
+	// ceiling (ffmpeg libavformat/oggdec.c:306-314 doubles a buffer up to
+	// UINT_MAX/2), so this is a policy bound above realistic tags. Dropped fragments
+	// of a truncated header count toward it (see containerReader.headerSpan).
+	maxHeaderSpan = 32 << 20
 )
 
 // audioPacketLimit returns the largest audio packet processPage accepts for a
@@ -91,7 +108,9 @@ const maxReusedBuf = 2*maxPageBodyLen + 2*maxPageBodyLen/4 + 16<<10
 
 // newContainerReader reads and validates the OpusHead and OpusTags header
 // packets, leaving the reader positioned at the first audio packet. A first
-// packet without the OpusHead magic returns an error wrapping ErrNotOpus.
+// packet without the OpusHead magic returns an error wrapping ErrNotOpus. A header
+// packet spanning more than maxHeaderSpan bytes returns an error wrapping
+// ErrPacketTooLarge.
 //
 // br is the buffered source. reuse, when not nil, is a reader of an earlier stream
 // whose page, packet and queue buffers are recycled and whose struct is
@@ -205,7 +224,8 @@ func (cr *containerReader) repositionAt(r io.Reader) {
 
 // processPage reassembles the packets on one page into the queue and updates the
 // granule and end-of-stream accounting. An audio packet longer than cr.limit fails
-// with ErrPacketTooLarge; a header packet is cut to maxHeaderPacketLen instead.
+// with ErrPacketTooLarge; a header packet is cut to maxHeaderPacketLen instead,
+// and fails with ErrPacketTooLarge only once it spans more than maxHeaderSpan.
 func (cr *containerReader) processPage(pg *page) error {
 	if !cr.serialSet {
 		cr.serial = pg.serial
@@ -245,22 +265,29 @@ func (cr *containerReader) processPage(pg *page) error {
 	for _, l := range pg.segTable {
 		seg := pg.body[off : off+int(l)]
 		off += int(l)
-		// The check runs before the append, so partial never exceeds the limit and
-		// acceptance depends on the packet's length alone, not on how pages split it.
+		// The check runs before the append, so partial never exceeds the limit.
+		// Acceptance of an audio packet depends on its length alone, not on how pages
+		// split it; a header packet is cut instead, and only its total span
+		// (headerSpan) can fail it.
 		limit := cr.limit
 		if cr.headers > 0 {
 			limit = maxHeaderPacketLen
+			cr.headerSpan += len(seg)
+			if cr.headerSpan > maxHeaderSpan {
+				return fmt.Errorf("%w: a header packet spans more than %d bytes", ErrPacketTooLarge, maxHeaderSpan)
+			}
 		}
 		if len(cr.partial) > limit-len(seg) {
 			if cr.headers == 0 {
 				return cr.packetTooLarge()
 			}
-			seg = seg[:limit-len(cr.partial)] // a header packet is cut, not failed
+			seg = seg[:limit-len(cr.partial)] // a header packet is cut; only its span can fail it
 		}
 		cr.partial = append(cr.partial, seg...)
 		if l < maxSegmentLen {
 			if cr.headers > 0 {
 				cr.headers--
+				cr.headerSpan = 0
 			}
 			start := len(cr.arena)
 			cr.arena = append(cr.arena, cr.partial...)

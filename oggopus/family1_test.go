@@ -3,6 +3,8 @@ package oggopus
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"testing"
 
@@ -10,23 +12,26 @@ import (
 	"github.com/tphakala/go-opus/opus"
 )
 
-// TestDecodeFamily1SurroundRoundTrip verifies the container decode wiring for
-// channel mapping family 1 (surround). It hand-builds a family-1 Ogg Opus stream
-// whose audio packets are real multistream packets (each sub-stream encoded with
-// the single-stream encoder, then concatenated with self-delimited framing for
-// every stream but the last, the RFC 7845 multistream payload layout), decodes it
-// through oggopus.Decoder, and checks the PCM equals what opus.MultistreamDecoder
-// produces from the same packets. Both paths share the same multistream decoder,
-// so any difference is in the container wiring: the family-1 OpusHead parse,
-// newFrameDecoder routing to the multistream decoder, and the pre-skip drop.
-// End-trim is zero here (sourceSamples is the full post-pre-skip count); the
-// mapping-family-independent end-trim path is covered by TestContainerRoundTrip.
-func TestDecodeFamily1SurroundRoundTrip(t *testing.T) {
+// TestDecodeMultistreamFamilies verifies the container decode wiring for the
+// channel mapping families that carry a mapping table: 1 (surround), 2
+// (ambisonics, channels returned as stored) and 255 (unidentified). It hand-builds
+// a multistream Ogg Opus stream whose audio packets are real multistream packets
+// (each sub-stream encoded with the single-stream encoder, then concatenated with
+// self-delimited framing for every stream but the last, the RFC 7845 multistream
+// payload layout), decodes it through oggopus.Decoder, and checks the PCM equals
+// what opus.MultistreamDecoder produces from the same packets. Both paths share
+// the same multistream decoder, so any difference is in the container wiring: the
+// OpusHead parse, newFrameDecoder routing to the multistream decoder, and the
+// pre-skip drop. End-trim is zero here (sourceSamples is the full post-pre-skip
+// count); the mapping-family-independent end-trim path is covered by
+// TestContainerRoundTrip. Family 3 needs a projection decoder and must fail with
+// opus.ErrUnsupported.
+func TestDecodeMultistreamFamilies(t *testing.T) {
 	const (
 		frameSize = 960 // 20 ms at 48 kHz
 		nFrames   = 8
 		preSkip   = 312
-		channels  = 3
+		channels  = 3 // also a valid family-2 count, (0+1)^2 + 2
 		streams   = 2
 		coupled   = 1
 	)
@@ -38,10 +43,72 @@ func TestDecodeFamily1SurroundRoundTrip(t *testing.T) {
 
 	packets := encodeMultistreamSeq(t, channels, streams, coupled, mapping, frameSize, nFrames)
 
+	build := func(family byte) *bytes.Buffer {
+		head := opusHead{
+			version:         opusHeadVersion,
+			channels:        channels,
+			preSkip:         preSkip,
+			inputSampleRate: 48000,
+			mappingFamily:   family,
+			streamCount:     streams,
+			coupledCount:    coupled,
+			channelMapping:  mapping,
+		}
+		var buf bytes.Buffer
+		writeContainer(t, &buf, head, opusTags{vendor: "go-opus"}, packets, frameSize, int64(nFrames*frameSize-preSkip))
+		return &buf
+	}
+
+	for _, family := range []byte{1, 2, 255} {
+		t.Run(fmt.Sprintf("family %d", family), func(t *testing.T) {
+			dec, err := NewDecoder(build(family))
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			if got := dec.Info().Channels; got != channels {
+				t.Fatalf("Info().Channels = %d want %d", got, channels)
+			}
+			got, err := io.ReadAll(dec)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
+
+			want := referenceMSDecode(t, channels, streams, coupled, mapping, frameSize, packets, preSkip)
+			if len(want) == 0 {
+				t.Fatal("reference produced no PCM; the test would be vacuous")
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("family-%d container decode mismatch: got %d bytes, want %d bytes, first diff at byte %d",
+					family, len(got), len(want), firstDiffByte(got, want))
+			}
+		})
+	}
+	t.Run("family 3", func(t *testing.T) {
+		if _, err := NewDecoder(build(3)); !errors.Is(err, opus.ErrUnsupported) {
+			t.Fatalf("NewDecoder = %v, want an error wrapping opus.ErrUnsupported", err)
+		}
+	})
+}
+
+// TestDecoderFamily1CorruptPacket pins that a multistream packet too short for
+// its stream layout surfaces as opus.ErrInvalidPacket from Read, not as a panic or
+// silence.
+func TestDecoderFamily1CorruptPacket(t *testing.T) {
+	const (
+		frameSize = 960
+		nFrames   = 8
+		channels  = 3
+		streams   = 2
+		coupled   = 1
+	)
+	mapping := []byte{0, 1, 2}
+	packets := encodeMultistreamSeq(t, channels, streams, coupled, mapping, frameSize, nFrames)
+	// 0xF8 is a code-0 TOC byte with no frame, so the first stream's
+	// self-delimited length is missing.
+	packets[nFrames/2] = []byte{0xF8}
 	head := opusHead{
 		version:         opusHeadVersion,
 		channels:        channels,
-		preSkip:         preSkip,
 		inputSampleRate: 48000,
 		mappingFamily:   1,
 		streamCount:     streams,
@@ -49,27 +116,13 @@ func TestDecodeFamily1SurroundRoundTrip(t *testing.T) {
 		channelMapping:  mapping,
 	}
 	var buf bytes.Buffer
-	writeContainer(t, &buf, head, opusTags{vendor: "go-opus"}, packets, frameSize, int64(nFrames*frameSize-preSkip))
-
+	writeContainer(t, &buf, head, opusTags{vendor: "go-opus"}, packets, frameSize, int64(nFrames*frameSize))
 	dec, err := NewDecoder(&buf)
 	if err != nil {
 		t.Fatalf("NewDecoder: %v", err)
 	}
-	if got := dec.Info().Channels; got != channels {
-		t.Fatalf("Info().Channels = %d want %d", got, channels)
-	}
-	got, err := io.ReadAll(dec)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-
-	want := referenceMSDecode(t, channels, streams, coupled, mapping, frameSize, packets, preSkip)
-	if len(want) == 0 {
-		t.Fatal("reference produced no PCM; the test would be vacuous")
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("family-1 container decode mismatch: got %d bytes, want %d bytes, first diff at byte %d",
-			len(got), len(want), firstDiffByte(got, want))
+	if _, err := io.ReadAll(dec); !errors.Is(err, opus.ErrInvalidPacket) {
+		t.Fatalf("ReadAll = %v, want an error wrapping opus.ErrInvalidPacket", err)
 	}
 }
 

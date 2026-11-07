@@ -26,10 +26,10 @@ var (
 	// ErrInvalidSeek reports a SeekToSample or SeekToSampleExact call with a negative
 	// sample index. The Decoder position is unchanged.
 	ErrInvalidSeek = errors.New("oggopus: invalid seek (negative sample index)")
-	// ErrPacketTooLarge reports that an audio packet reassembled from Ogg pages is
-	// larger than the decoder accepts. The limit is 122,880 bytes per Opus stream,
-	// times the stream count in OpusHead (one for mapping family 0). A packet
-	// without padding is at most 61,298*N - 2 bytes for N streams (RFC 7845
+	// ErrPacketTooLarge reports that a packet reassembled from Ogg pages is larger
+	// than the decoder accepts. For an audio packet the limit is 122,880 bytes per
+	// Opus stream, times the stream count in OpusHead (one for mapping family 0). A
+	// packet without padding is at most 61,298*N - 2 bytes for N streams (RFC 7845
 	// section 6), so only code-3 padding of roughly 61 KB or more per stream goes
 	// past the limit. That is legal Opus, but section 6 says a demuxer should treat
 	// such a packet as invalid, so the stream is not decoded.
@@ -39,9 +39,11 @@ var (
 	// verdict that the stream is corrupt, and it is distinct from both
 	// ErrDecodeLimit and the corruption errors. Read, WriteTo, DecodeInterleaved,
 	// DecodeInterleavedLimit, Length, SeekToSample and SeekToSampleExact return it
-	// wrapped. NewDecoder
-	// and Reset do not, because OpusHead and OpusTags are cut instead, as the package
-	// documentation describes. After Read or WriteTo return it, they keep returning
+	// wrapped for an audio packet. OpusHead and OpusTags keep their first 61,440
+	// bytes and drop the rest, and fail only when one header packet spans more than
+	// 32 MiB, which stops a stream whose header never ends from being read forever;
+	// NewDecoder, Reset, DecodeInterleaved and DecodeInterleavedLimit return it
+	// wrapped for such a header. After Read or WriteTo return it, they keep returning
 	// it until a successful seek or Reset.
 	ErrPacketTooLarge = errors.New("oggopus: packet too large")
 )

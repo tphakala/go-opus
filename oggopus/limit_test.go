@@ -206,10 +206,10 @@ func TestContainerHeaderCut(t *testing.T) {
 	}
 }
 
-// TestDecoderOversizedHeaders pins that OpusHead and OpusTags do not fail for
-// their size: a stream never fails on the size of its tags, a cut OpusTags still
-// needs its magic, and a huge first packet that is not an OpusHead is still
-// reported as not Opus.
+// TestDecoderOversizedHeaders pins that OpusHead and OpusTags under the span
+// ceiling do not fail for their size: a stream never fails on the size of its
+// tags, a cut OpusTags still needs its magic, and a huge first packet that is not
+// an OpusHead is still reported as not Opus.
 func TestDecoderOversizedHeaders(t *testing.T) {
 	cr, audio := readContainer(t, bytes.NewReader(seekFixture(t, 1, 20, 24000, 32000)))
 	head := cr.head.marshal()
@@ -286,9 +286,9 @@ func TestContainerAudioOnTagsPage(t *testing.T) {
 }
 
 // TestDecoderAudioOnHeadPage pins that audio sharing the OpusHead page (also an
-// RFC 7845 section 3 violation) is read as audio, not failed: NewDecoder never
-// returns ErrPacketTooLarge, so the packet must not meet a zero limit while the
-// headers are still being read.
+// RFC 7845 section 3 violation) is read as audio, not failed: the packet must meet
+// the per-stream audio limit, not a zero limit, while the headers are still being
+// read.
 func TestDecoderAudioOnHeadPage(t *testing.T) {
 	_, audio := readContainer(t, bytes.NewReader(seekFixture(t, 1, 20, 24000, 32000)))
 	p := &pager{t: t, serial: 0x1234, max: maxPageSegments}
@@ -320,5 +320,117 @@ func TestDecoderAudioOnHeadPage(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) || len(got) == 0 {
 		t.Fatalf("decoded %d bytes with audio on the OpusHead page, want the %d bytes decoded with ordinary pages", len(got), len(want))
+	}
+}
+
+// repeatReader serves page n times, then reports io.EOF, without holding n copies.
+type repeatReader struct {
+	page []byte
+	n    int
+	off  int
+}
+
+func (r *repeatReader) Read(p []byte) (int, error) {
+	if r.n == 0 {
+		return 0, io.EOF
+	}
+	c := copy(p, r.page[r.off:])
+	r.off += c
+	if r.off == len(r.page) {
+		r.off = 0
+		r.n--
+	}
+	return c, nil
+}
+
+// byteCountingReader counts the bytes served from r.
+type byteCountingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *byteCountingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// TestDecoderHeaderSpanLimit pins the ceiling on how long NewDecoder reads one
+// header packet: a header that never ends fails with ErrPacketTooLarge after a
+// bounded number of source bytes instead of reading forever, and a header packet
+// of exactly maxHeaderSpan bytes still opens. The source is built lazily, so the
+// test does not allocate the ceiling.
+func TestDecoderHeaderSpanLimit(t *testing.T) {
+	// full is a page of 255 segments of 255 bytes: it never completes a packet.
+	full := func(flags headerType, magic string) []byte {
+		body := bytes.Repeat([]byte{'x'}, maxPageBodyLen)
+		copy(body, magic)
+		segs := bytes.Repeat([]byte{maxSegmentLen}, maxPageSegments)
+		var b bytes.Buffer
+		if err := writePage(&b, flags, 0, 0x1234, 1, segs, body); err != nil {
+			t.Fatal(err)
+		}
+		return b.Bytes()
+	}
+	headPage := func() []byte {
+		var b bytes.Buffer
+		pkt := testHead(1, 312).marshal()
+		if err := writePage(&b, flagBOS, 0, 0x1234, 0, lacing(len(pkt)), pkt); err != nil {
+			t.Fatal(err)
+		}
+		return b.Bytes()
+	}()
+	tailPage := func(rem int) []byte {
+		var b bytes.Buffer
+		if err := writePage(&b, flagContinued, 0, 0x1234, 2, lacing(rem), bytes.Repeat([]byte{'x'}, rem)); err != nil {
+			t.Fatal(err)
+		}
+		return b.Bytes()
+	}
+
+	// endless is the headers' source: prefix, the first page of the header packet
+	// under test, pages-1 continuation pages and an optional completing page.
+	endless := func(prefix []byte, first, cont []byte, pages int, tail []byte) *byteCountingReader {
+		return &byteCountingReader{r: io.MultiReader(bytes.NewReader(prefix), bytes.NewReader(first),
+			&repeatReader{page: cont, n: pages - 1}, bytes.NewReader(tail))}
+	}
+	pages := maxHeaderSpan/maxPageBodyLen + 16
+	atCeiling := maxHeaderSpan / maxPageBodyLen // full pages of a header packet of maxHeaderSpan bytes, less the tail
+	tests := []struct {
+		name   string
+		src    *byteCountingReader
+		prefix int // bytes of the source before the header packet under test
+		tooBig bool
+	}{
+		{"OpusHead never ends", endless(nil, full(flagBOS, "OpusHead"), full(flagContinued, ""), pages, nil), 0, true},
+		{"OpusTags never ends", endless(headPage, full(0, "OpusTags"), full(flagContinued, ""), pages, nil), len(headPage), true},
+		// Without flagContinued every page drops the previous fragment; the span
+		// must still add up, or this stream would restart the count forever.
+		{"OpusTags never ends, pages not continued", endless(headPage, full(0, "OpusTags"), full(0, ""), pages, nil), len(headPage), true},
+		{"OpusTags of maxHeaderSpan bytes", endless(headPage, full(0, "OpusTags"), full(flagContinued, ""),
+			atCeiling, tailPage(maxHeaderSpan%maxPageBodyLen)), len(headPage), false},
+		{"OpusTags of maxHeaderSpan+1 bytes", endless(headPage, full(0, "OpusTags"), full(flagContinued, ""),
+			atCeiling, tailPage(maxHeaderSpan%maxPageBodyLen+1)), len(headPage), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewDecoder(tc.src)
+			if !tc.tooBig {
+				if err != nil {
+					t.Fatalf("NewDecoder: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrPacketTooLarge) {
+				t.Fatalf("NewDecoder = %v, want ErrPacketTooLarge", err)
+			}
+			// The ceiling, the page overhead of the pages that reach it, one page more
+			// and the read-ahead buffer.
+			bound := tc.prefix + maxHeaderSpan + (maxHeaderSpan/maxPageBodyLen+2)*(pageHeaderFixedLen+maxPageSegments) +
+				maxPageBodyLen + sourceBufSize
+			if tc.src.n > bound {
+				t.Fatalf("NewDecoder read %d bytes before failing, want at most %d", tc.src.n, bound)
+			}
+		})
 	}
 }

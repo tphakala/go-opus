@@ -50,8 +50,17 @@ func FuzzParseOpusHead(f *testing.F) {
 	f.Add([]byte("Opus"))
 	f.Add(vorbisIdentHeader())
 	f.Add(oggFLACMappingHeader())
+	f.Add(opusHead{version: opusHeadVersion, channels: 4, inputSampleRate: 48000, mappingFamily: 3, streamCount: 1,
+		channelMapping: []byte{0, 1, 2, 3}}.marshal())
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, err := parseOpusHead(data)
+		h, err := parseOpusHead(data)
+		if err == nil {
+			switch h.mappingFamily {
+			case mappingFamily0, mappingFamily1, mappingFamily2, mappingFamily255:
+			default:
+				t.Fatalf("parseOpusHead accepted unsupported mapping family %d", h.mappingFamily)
+			}
+		}
 		hasMagic := len(data) >= len(opusHeadMagic) && string(data[:len(opusHeadMagic)]) == opusHeadMagic
 		isNotOpus := errors.Is(err, ErrNotOpus)
 		if !hasMagic && !isNotOpus {
@@ -85,8 +94,9 @@ func FuzzContainerReader(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(data)), nil)
 		if err != nil {
-			// OpusHead and OpusTags are cut, never failed, for their size.
-			if errors.Is(err, ErrPacketTooLarge) {
+			// OpusHead and OpusTags are cut for their size and fail only when one
+			// spans more than maxHeaderSpan, which a shorter input cannot.
+			if errors.Is(err, ErrPacketTooLarge) && len(data) <= maxHeaderSpan {
 				t.Fatalf("newContainerReader: %v", err)
 			}
 			return

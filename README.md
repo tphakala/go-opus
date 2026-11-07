@@ -271,7 +271,11 @@ input, prints both caveats, and skips any comparator that is not installed.
   gives output bit-identical to sequential decoding, at a cost linear in the
   distance it decodes. The decoder bounds the memory a packet spanning pages can
   take: an audio packet over the limit fails with `ErrPacketTooLarge`, and an
-  oversized OpusTags is cut rather than rejected.
+  oversized OpusHead or OpusTags is cut rather than rejected, unless it spans
+  more than 32 MiB. The decoder reads channel mapping families 0, 1, 2 and 255
+  (family 2 returns the raw ambisonic channels, and channel counts are not
+  validated); family 3 and the reserved families fail with a wrapped
+  `opus.ErrUnsupported`.
 - `pcm`: a thin facade over `oggopus` that presents the codec under the uniform
   `<module>/pcm` import path, matching
   [go-flac](https://github.com/tphakala/go-flac)'s and
