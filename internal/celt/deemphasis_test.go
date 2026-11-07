@@ -80,6 +80,22 @@ func TestDeemphasisStereoMatchesPerChannel(t *testing.T) {
 	}
 }
 
+// TestDeemphasisStereoShortPCMPanics checks that the stereo path bounds its
+// output by len(pcm), not cap(pcm): a pcm one sample short must panic like the
+// general loop's strided stores, not write into spare capacity.
+func TestDeemphasisStereoShortPCMPanics(t *testing.T) {
+	const n = 120
+	in := [][]int32{make([]int32, n), make([]int32, n)}
+	pcm := make([]int16, 2*n-1, 2*n+8)
+	var mem [2]int32
+	defer func() {
+		if recover() == nil {
+			t.Fatal("deemphasis with len(pcm) < 2*N did not panic")
+		}
+	}()
+	deemphasis(in, pcm, n, 2, 1, mode48000_960.preemph, &mem, 0, new(scratch))
+}
+
 func BenchmarkDeemphasisStereo(b *testing.B) {
 	coef := mode48000_960.preemph
 	for _, n := range []int{120, 960} {

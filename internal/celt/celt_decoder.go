@@ -284,10 +284,12 @@ func tfDecode(start, end, isTransient int, tfRes []int, LM int, dec *rangecoding
 func deemphasisStereoSimple(in [][]int32, pcm []int16, N int, coef0 int16, mem *[2]int32) {
 	// Slice once so the x0/x1 reads carry no bounds check. The store window
 	// keeps one check per sample pair (the prover cannot relate 2*j+2 to
-	// len(y)), down from one per store on the strided general loop.
+	// len(y)), down from one per store on the strided general loop. The max
+	// index bounds the reslice by len(pcm), not cap(pcm), so a short pcm still
+	// panics as the strided stores would instead of writing into spare capacity.
 	x0 := in[0][:N]
 	x1 := in[1][:N]
-	y := pcm[:2*N]
+	y := pcm[: 2*N : len(pcm)]
 	m0 := mem[0]
 	m1 := mem[1]
 	for j := range x0 {
