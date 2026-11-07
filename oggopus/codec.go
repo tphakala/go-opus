@@ -182,10 +182,9 @@ type opusMSFrameDecoder struct {
 	channels int
 	buf      []int16
 
-	// The layout dec was built for, kept for fits. mapping is the OpusHead's own
-	// slice, which nothing writes after parseOpusHead.
-	family, streams, coupled byte
-	mapping                  []byte
+	// The header dec was built from, kept for fits. Its channelMapping is the
+	// parsed slice, which nothing writes after parseOpusHead.
+	head opusHead
 }
 
 // decodeFrame decodes one multistream packet into interleaved int16 PCM for all
@@ -207,9 +206,9 @@ func (d *opusMSFrameDecoder) reset() { d.dec.Reset() }
 // mapping table d was built for. The family is compared too, because
 // newFrameDecoder validates families 1, 2 and 255 differently.
 func (d *opusMSFrameDecoder) fits(head opusHead) bool {
-	return head.mappingFamily == d.family && int(head.channels) == d.channels &&
-		head.streamCount == d.streams && head.coupledCount == d.coupled &&
-		bytes.Equal(head.channelMapping, d.mapping)
+	return head.mappingFamily == d.head.mappingFamily && head.channels == d.head.channels &&
+		head.streamCount == d.head.streamCount && head.coupledCount == d.head.coupledCount &&
+		bytes.Equal(head.channelMapping, d.head.channelMapping)
 }
 
 // close releases codec resources; see opusFrameEncoder.close.
@@ -263,10 +262,7 @@ var newFrameDecoder = func(head opusHead) (frameDecoder, error) {
 		dec:      dec,
 		channels: channels,
 		buf:      make([]int16, maxFrameSamples48k*channels),
-		family:   head.mappingFamily,
-		streams:  head.streamCount,
-		coupled:  head.coupledCount,
-		mapping:  head.channelMapping,
+		head:     head,
 	}, nil
 }
 
