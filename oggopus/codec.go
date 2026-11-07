@@ -1,6 +1,7 @@
 package oggopus
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/tphakala/go-opus/opus"
@@ -44,8 +45,13 @@ type frameDecoder interface {
 	decodeFrame(packet []byte) (pcm []int16, err error)
 	// reset returns the decoder to its initial state, as if freshly built, so a
 	// seek decodes from a new position without cross-packet state left over from
-	// the previous one.
+	// the previous one, and Decoder.Reset can reuse the codec for a new stream.
 	reset()
+	// fits reports whether the decoder was built for a layout identical to head's,
+	// so that a reset decoder can stand in for newFrameDecoder(head). It must
+	// compare every field newFrameDecoder reads, so reuse never accepts a head the
+	// constructor would reject.
+	fits(head opusHead) bool
 	// close releases codec resources.
 	close()
 }
@@ -159,6 +165,11 @@ func (d *opusFrameDecoder) decodeFrame(packet []byte) ([]int16, error) {
 // reset clears the cross-packet decoder state; see opus.Decoder.Reset.
 func (d *opusFrameDecoder) reset() { d.dec.Reset() }
 
+// fits reports whether head is a family-0 header with the channel count d was built for.
+func (d *opusFrameDecoder) fits(head opusHead) bool {
+	return head.mappingFamily == mappingFamily0 && int(head.channels) == d.channels
+}
+
 // close releases codec resources; see opusFrameEncoder.close.
 func (d *opusFrameDecoder) close() {}
 
@@ -170,6 +181,10 @@ type opusMSFrameDecoder struct {
 	dec      *opus.MultistreamDecoder
 	channels int
 	buf      []int16
+
+	// The header dec was built from, kept for fits. Its channelMapping is the
+	// parsed slice, which nothing writes after parseOpusHead.
+	head opusHead
 }
 
 // decodeFrame decodes one multistream packet into interleaved int16 PCM for all
@@ -186,6 +201,15 @@ func (d *opusMSFrameDecoder) decodeFrame(packet []byte) ([]int16, error) {
 
 // reset clears the cross-packet decoder state; see opus.MultistreamDecoder.Reset.
 func (d *opusMSFrameDecoder) reset() { d.dec.Reset() }
+
+// fits reports whether head names the same family, channel count, stream layout and
+// mapping table d was built for. The family is compared too, because
+// newFrameDecoder validates families 1, 2 and 255 differently.
+func (d *opusMSFrameDecoder) fits(head opusHead) bool {
+	return head.mappingFamily == d.head.mappingFamily && head.channels == d.head.channels &&
+		head.streamCount == d.head.streamCount && head.coupledCount == d.head.coupledCount &&
+		bytes.Equal(head.channelMapping, d.head.channelMapping)
+}
 
 // close releases codec resources; see opusFrameEncoder.close.
 func (d *opusMSFrameDecoder) close() {}
@@ -238,7 +262,19 @@ var newFrameDecoder = func(head opusHead) (frameDecoder, error) {
 		dec:      dec,
 		channels: channels,
 		buf:      make([]int16, maxFrameSamples48k*channels),
+		head:     head,
 	}, nil
+}
+
+// frameDecoderFor returns the decoder for head: prev, reset, when it was built for
+// the same layout (so a pooled Decoder keeps its codec across streams), otherwise
+// a new one from newFrameDecoder. prev may be nil.
+func frameDecoderFor(prev frameDecoder, head opusHead) (frameDecoder, error) {
+	if prev != nil && prev.fits(head) {
+		prev.reset()
+		return prev, nil
+	}
+	return newFrameDecoder(head)
 }
 
 // packetSamples48k reports how many samples per channel at 48 kHz the Opus packet

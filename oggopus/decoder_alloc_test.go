@@ -143,6 +143,11 @@ func TestResetReleasesPreviousSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reset to a valid stream: %v", err)
 	}
+	// Length makes the Decoder build its page-scan window, which Reset keeps; it
+	// must not keep the source with it.
+	if _, err := d.Length(); err != nil {
+		t.Fatalf("Length: %v", err)
+	}
 	if err := d.Reset(nil); err == nil {
 		t.Fatal("Reset(nil): want error")
 	}
@@ -158,15 +163,24 @@ func TestResetReleasesPreviousSource(t *testing.T) {
 		t.Error("Decoder still references a source whose headers failed to parse")
 	}
 
+	// Bind a valid mono stream so the Decoder holds a codec, then fail the build for
+	// a stereo one: the shape change forces the constructor call, and the failed
+	// Reset must not keep the previous codec.
+	if _, err := bind(stream); err != nil {
+		t.Fatalf("Reset to a valid stream: %v", err)
+	}
 	orig := newFrameDecoder
 	t.Cleanup(func() { newFrameDecoder = orig })
 	newFrameDecoder = func(opusHead) (frameDecoder, error) { return nil, errors.New("codec unavailable") }
-	noCodec, err := bind(stream)
+	noCodec, err := bind(seekFixture(t, 2, 20, 48000, 64000))
 	if err == nil {
 		t.Fatal("Reset with a failing codec constructor: want error")
 	}
 	if !released(noCodec) {
 		t.Error("Decoder still references a source whose codec could not be built")
+	}
+	if _, err := d.Read(make([]byte, 16)); !errors.Is(err, errUninitialized) {
+		t.Errorf("Read after a failed Reset: err = %v, want errUninitialized", err)
 	}
 	runtime.KeepAlive(d) // d must stay reachable, or its collection would release the source too
 }
@@ -227,5 +241,35 @@ func TestDecoderBufioSourceFailures(t *testing.T) {
 	newFrameDecoder = func(opusHead) (frameDecoder, error) { return nil, errors.New("codec unavailable") }
 	if _, err := NewDecoder(bufio.NewReader(bytes.NewReader(stream))); err == nil {
 		t.Fatal("NewDecoder with a failing codec constructor: want error")
+	}
+}
+
+// TestDecoderResetReusesCodecAllocs pins that Reset onto a stream of the same layout
+// keeps the codec instead of rebuilding it. Measured on linux/amd64 and linux/386:
+// 2 allocations for the mono stream and 3 for the family-1 stream; before the
+// change they took 46 and 87. The bound is the larger measurement plus 2.
+func TestDecoderResetReusesCodecAllocs(t *testing.T) {
+	rows := []struct {
+		name   string
+		stream []byte
+		bound  float64
+	}{
+		{"mono", seekFixture(t, 1, 20, 48000, 64000), 5},
+		{"family1", family1Stream(t, 40), 5},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			d := seekDecoder(t, row.stream)
+			drainDecoder(t, d, nil)
+			got := testing.AllocsPerRun(5, func() {
+				if err := d.Reset(bytes.NewReader(row.stream)); err != nil {
+					t.Fatalf("Reset: %v", err)
+				}
+				drainDecoder(t, d, nil)
+			})
+			if got > row.bound {
+				t.Errorf("Reset + decode: %v allocs, want at most %v", got, row.bound)
+			}
+		})
 	}
 }

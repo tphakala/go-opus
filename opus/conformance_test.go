@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/tphakala/go-opus/internal/opuscompare"
@@ -69,17 +70,13 @@ func readRefInt16(t *testing.T, path string) []int16 {
 	return out
 }
 
-// decodeVector decodes every packet of recs through a fresh channels-channel
-// decoder at 48 kHz and returns the concatenated interleaved PCM plus, for the
+// decodeVector decodes every packet of recs through dec, a channels-channel
+// decoder at 48 kHz, and returns the concatenated interleaved PCM plus, for the
 // stereo decode, the per-packet final-range match count. The final range is a
 // property of the entropy decode and is independent of the output channel count,
 // so it is only asserted on the stereo pass.
-func decodeVector(t *testing.T, recs []bitRecord, channels int) (pcm []int16, packets, rangeMatches int, firstMismatch string) {
+func decodeVector(t *testing.T, dec *opus.Decoder, recs []bitRecord, channels int) (pcm []int16, packets, rangeMatches int, firstMismatch string) {
 	t.Helper()
-	dec, err := opus.NewDecoder(48000, channels)
-	if err != nil {
-		t.Fatalf("NewDecoder(48000,%d): %v", channels, err)
-	}
 	buf := make([]int16, 5760*channels) // 120 ms at 48 kHz: max packet
 	for i, rec := range recs {
 		if rec.packet == nil { // opus_demo lost-frame marker (none in the RFC vectors)
@@ -130,7 +127,11 @@ func TestConformance(t *testing.T) {
 			recs := readBitRecords(t, bitData)
 
 			// Stereo decode: final-range check + opus_compare vs the stereo .dec.
-			stereoPCM, packets, rangeMatches, firstMismatch := decodeVector(t, recs, 2)
+			stereoDec, err := opus.NewDecoder(48000, 2)
+			if err != nil {
+				t.Fatalf("NewDecoder(48000,2): %v", err)
+			}
+			stereoPCM, packets, rangeMatches, firstMismatch := decodeVector(t, stereoDec, recs, 2)
 			if rangeMatches != packets {
 				t.Errorf("final-range match %d/%d packets (first mismatch %s)", rangeMatches, packets, firstMismatch)
 			} else {
@@ -148,7 +149,22 @@ func TestConformance(t *testing.T) {
 			}
 
 			// Mono decode: opus_compare vs the mono .m.dec reference.
-			monoPCM, _, _, _ := decodeVector(t, recs, 1)
+			// Reset after a full decode must equal a fresh decoder: oggopus.Decoder.Reset
+			// reuses its codec across streams, including SILK and hybrid ones. The first
+			// packets are enough to cover the mode the vector starts in.
+			stereoDec.Reset()
+			head := recs[:min(50, len(recs))]
+			rePCM, rePackets, reMatches, _ := decodeVector(t, stereoDec, head, 2)
+			if reMatches != rePackets || len(rePCM) > len(stereoPCM) || !slices.Equal(rePCM, stereoPCM[:len(rePCM)]) {
+				t.Errorf("vector %s: decoding after Reset differs from a fresh decoder (final range %d/%d, %d samples)",
+					name, reMatches, rePackets, len(rePCM))
+			}
+
+			monoDec, err := opus.NewDecoder(48000, 1)
+			if err != nil {
+				t.Fatalf("NewDecoder(48000,1): %v", err)
+			}
+			monoPCM, _, _, _ := decodeVector(t, monoDec, recs, 1)
 			monoRef := readRefInt16(t, filepath.Join(vectorsDir, "testvector"+name+"m.dec"))
 			monoRes, err := opuscompare.CompareInt16(monoRef, monoPCM, opuscompare.Config{Channels: 1})
 			if err != nil {
