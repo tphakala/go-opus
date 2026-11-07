@@ -3,6 +3,7 @@ package celt
 import (
 	"math"
 	"math/rand/v2"
+	"strconv"
 	"testing"
 )
 
@@ -49,7 +50,7 @@ func TestDeemphasisStereoMatchesPerChannel(t *testing.T) {
 				mem[c] = deemphSample(r, class, c)
 				wantMem[c] = mem[c]
 			}
-			for f := 0; f < frames; f++ {
+			for f := range frames {
 				in := [][]int32{deemphInput(r, class, n), deemphInput(r, class, n)}
 				got := make([]int16, 2*n+8)
 				want := make([]int16, 2*n+8)
@@ -82,7 +83,7 @@ func TestDeemphasisStereoMatchesPerChannel(t *testing.T) {
 func BenchmarkDeemphasisStereo(b *testing.B) {
 	coef := mode48000_960.preemph
 	for _, n := range []int{120, 960} {
-		b.Run(map[int]string{120: "N=120", 960: "N=960"}[n], func(b *testing.B) {
+		b.Run("N="+strconv.Itoa(n), func(b *testing.B) {
 			r := rand.New(rand.NewPCG(uint64(n), 105))
 			in := [][]int32{deemphInput(r, "within-sigsat", n), deemphInput(r, "within-sigsat", n)}
 			pcm := make([]int16, 2*n)
