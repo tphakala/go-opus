@@ -11,7 +11,8 @@ import (
 // page layer, the RFC 7845 headers, the packet-level writer and reader) is
 // codec-independent and is tested without one. The two constructor variables
 // below are the only place oggopus depends on the codec, and they depend on it
-// only through the public opus package, never on its internals.
+// only through the public opus package, never on its internals. Header parsing
+// borrows the opus.ErrUnsupported sentinel (header.go) but not the codec.
 
 // frameEncoder turns one frame of interleaved int16 PCM into one opus packet
 // (a multiframe packet for the 40 ms and longer durations). It is the minimal
@@ -162,8 +163,8 @@ func (d *opusFrameDecoder) reset() { d.dec.Reset() }
 func (d *opusFrameDecoder) close() {}
 
 // opusMSFrameDecoder adapts the public opus.MultistreamDecoder to the frameDecoder
-// seam for channel mapping family 1 (surround) and any other family that carries a
-// mapping table. It mirrors opusFrameDecoder but routes each packet through the N
+// seam for channel mapping families 1 (surround), 2 and 255, which carry a mapping
+// table. It mirrors opusFrameDecoder but routes each packet through the N
 // sub-streams the multistream decoder schedules onto the API channels.
 type opusMSFrameDecoder struct {
 	dec      *opus.MultistreamDecoder
@@ -190,9 +191,8 @@ func (d *opusMSFrameDecoder) reset() { d.dec.Reset() }
 func (d *opusMSFrameDecoder) close() {}
 
 // newFrameDecoder builds the per-stream decoder from the parsed OpusHead. Channel
-// mapping family 0 (mono/stereo) decodes through a single opus.Decoder; a non-zero
-// family (family 1 surround, and any other family that carries a mapping table)
-// decodes through opus.MultistreamDecoder, driven by the OpusHead stream count,
+// mapping family 0 (mono/stereo) decodes through a single opus.Decoder; families
+// 1, 2 and 255 (parseOpusHead rejects the rest) decode through opus.MultistreamDecoder, driven by the OpusHead stream count,
 // coupled-stream count and channel mapping the container parsed.
 //
 // The decoder always runs at 48 kHz, whatever OpusHead's input-sample-rate field
@@ -217,12 +217,12 @@ var newFrameDecoder = func(head opusHead) (frameDecoder, error) {
 	}
 	// RFC 7845 section 5.1.1 defines channel mapping family 1 for 1 to 8 channels; a
 	// family-1 header declaring more is malformed, so reject it rather than build a
-	// decoder for a layout the format does not permit. Other families that carry a
-	// mapping table are not bound by this limit.
-	if head.mappingFamily == 1 && channels > 8 {
+	// decoder for a layout the format does not permit. Families 2 and 255 are not bound
+	// by this limit.
+	if head.mappingFamily == mappingFamily1 && channels > 8 {
 		return nil, fmt.Errorf("oggopus: channel mapping family 1 allows at most 8 channels, got %d (RFC 7845)", channels)
 	}
-	// A non-zero mapping family carries an OpusHead mapping table (stream count,
+	// Families 1, 2 and 255 carry an OpusHead mapping table (stream count,
 	// coupled count, and one mapping byte per channel); route the N sub-streams
 	// through the multistream decoder. NewMultistreamDecoder validates the layout
 	// and returns ErrBadArg for an inconsistent table, so a hostile header is

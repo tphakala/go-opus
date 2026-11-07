@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"testing"
+
+	"github.com/tphakala/go-opus/opus"
 )
 
 func TestOpusHeadGoldenBytes(t *testing.T) {
@@ -85,20 +87,36 @@ func TestOpusTagsRoundTrip(t *testing.T) {
 
 func TestParseOpusHeadRejectsBad(t *testing.T) {
 	full := testHead(2, 312).marshal()
+	// withFamily is a head of the given family and channel count followed by
+	// tableLen table bytes.
+	withFamily := func(family, channels byte, tableLen int) []byte {
+		b := append(bytes.Clone(full[:opusHeadFamily0Len]), make([]byte, tableLen)...)
+		b[9], b[18] = channels, family
+		return b
+	}
 	tests := []struct {
 		name    string
 		in      []byte
 		notOpus bool
+		// unsupported marks a well-formed head this package cannot decode.
+		unsupported bool
 	}{
-		{"empty", nil, true},
-		{"truncated", full[:10], false},
-		{"bad magic", append([]byte("XpusHead"), full[8:]...), true},
-		{"zero channels", func() []byte { b := bytes.Clone(full); b[9] = 0; return b }(), false},
-		{"family0 too many channels", func() []byte { b := bytes.Clone(full); b[9] = 3; return b }(), false},
-		{"bad major version", func() []byte { b := bytes.Clone(full); b[8] = 0x10; return b }(), false},
-		{"vorbis identification header", vorbisIdentHeader(), true},
-		{"ogg flac mapping header", oggFLACMappingHeader(), true},
-		{"foreign 7 bytes", []byte("\x01vorbis"), true},
+		{"empty", nil, true, false},
+		{"truncated", full[:10], false, false},
+		{"bad magic", append([]byte("XpusHead"), full[8:]...), true, false},
+		{"zero channels", func() []byte { b := bytes.Clone(full); b[9] = 0; return b }(), false, false},
+		{"family0 too many channels", func() []byte { b := bytes.Clone(full); b[9] = 3; return b }(), false, false},
+		{"bad major version", func() []byte { b := bytes.Clone(full); b[8] = 0x10; return b }(), false, false},
+		{"vorbis identification header", vorbisIdentHeader(), true, false},
+		{"ogg flac mapping header", oggFLACMappingHeader(), true, false},
+		{"foreign 7 bytes", []byte("\x01vorbis"), true, false},
+		{"family 3", withFamily(3, 4, 6), false, true},
+		// The family check precedes the mapping table check, so a short head of a
+		// reserved family is unsupported, not truncated.
+		{"family 4 without table", withFamily(4, 2, 0), false, true},
+		{"family 254 without table", withFamily(254, 2, 0), false, true},
+		// A corrupt head is corruption even when its family is unsupported.
+		{"family 3 with zero channels", withFamily(3, 0, 2), false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,6 +126,9 @@ func TestParseOpusHeadRejectsBad(t *testing.T) {
 			}
 			if got := errors.Is(err, ErrNotOpus); got != tc.notOpus {
 				t.Fatalf("parseOpusHead(%s) errors.Is(ErrNotOpus) = %v, want %v (err %v)", tc.name, got, tc.notOpus, err)
+			}
+			if got := errors.Is(err, opus.ErrUnsupported); got != tc.unsupported {
+				t.Fatalf("parseOpusHead(%s) errors.Is(opus.ErrUnsupported) = %v, want %v (err %v)", tc.name, got, tc.unsupported, err)
 			}
 		})
 	}

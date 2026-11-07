@@ -109,7 +109,8 @@ type Decoder struct {
 // they stay under about 450 KiB. An audio packet that spans several pages needs
 // buffers of its own size until the Decoder has read past it, at most the limit
 // described for ErrPacketTooLarge. OpusHead and OpusTags are cut as the package
-// documentation describes.
+// documentation describes, which also covers the header packet size and the
+// channel mapping families that make NewDecoder fail.
 //
 // Unless r is a *bufio.Reader, it is also read through a 64 KiB buffer that the
 // Decoder allocates once and that Reset reuses, so a program holding many Decoders

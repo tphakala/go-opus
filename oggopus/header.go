@@ -3,6 +3,8 @@ package oggopus
 import (
 	"encoding/binary"
 	"fmt"
+
+	"github.com/tphakala/go-opus/opus"
 )
 
 // RFC 7845 identification and comment header magic signatures.
@@ -18,12 +20,21 @@ const (
 	// mappingFamily0 is the mono/stereo mapping family: no mapping table, 1 or 2
 	// channels only.
 	mappingFamily0 = 0
+	// mappingFamily1 is the surround family with a mapping table (RFC 7845 section
+	// 5.1.1.2).
+	mappingFamily1 = 1
+	// mappingFamily2 is the ambisonics family with a mapping table (RFC 8486
+	// section 3.1).
+	mappingFamily2 = 2
+	// mappingFamily255 is the family of unidentified channels with a mapping table
+	// (RFC 7845 section 5.1.1.3).
+	mappingFamily255 = 255
 )
 
 // opusHead is the parsed RFC 7845 identification header. go-opus emits channel
-// mapping family 0 only; the parser additionally accepts family > 0 headers so
+// mapping family 0 only; the parser additionally accepts families 1, 2 and 255 so
 // it does not choke on third-party streams, retaining the mapping table for
-// callers that inspect it.
+// callers that inspect it. It rejects family 3 and the reserved families.
 type opusHead struct {
 	version         byte
 	channels        byte
@@ -67,8 +78,9 @@ func (h opusHead) marshal() []byte {
 // parseOpusHead decodes an OpusHead packet. It validates the magic, a supported
 // major version, and channel/mapping consistency, and never reads out of bounds
 // on a truncated or hostile packet. A packet that lacks the OpusHead magic
-// (including one shorter than the magic) returns an error wrapping ErrNotOpus;
-// every other failure is a plain error.
+// (including one shorter than the magic) returns an error wrapping ErrNotOpus; an
+// unsupported channel mapping family (3, or reserved 4 to 254) returns one
+// wrapping opus.ErrUnsupported; every other failure is a plain error.
 func parseOpusHead(b []byte) (opusHead, error) {
 	if len(b) < len(opusHeadMagic) || string(b[:len(opusHeadMagic)]) != opusHeadMagic {
 		return opusHead{}, fmt.Errorf("%w: bad OpusHead magic %q", ErrNotOpus, b[:min(len(b), len(opusHeadMagic))])
@@ -92,13 +104,23 @@ func parseOpusHead(b []byte) (opusHead, error) {
 	if h.channels == 0 {
 		return opusHead{}, fmt.Errorf("oggopus: OpusHead channel count is zero")
 	}
+	// Family 3 carries a demixing matrix where the other families carry a mapping
+	// table, and needs a projection decoder (libopus opus_projection_decoder.c)
+	// that go-opus does not have. Families 4 to 254 are reserved and a demuxer
+	// SHOULD NOT decode them (RFC 7845 section 5.1.1.4). Checked before the table is
+	// read, so such a head is never misread as a mapping or reported as truncated.
+	switch h.mappingFamily {
+	case mappingFamily0, mappingFamily1, mappingFamily2, mappingFamily255:
+	default:
+		return opusHead{}, fmt.Errorf("oggopus: channel mapping family %d is not supported: %w", h.mappingFamily, opus.ErrUnsupported)
+	}
 	if h.mappingFamily == mappingFamily0 {
 		if h.channels > 2 {
 			return opusHead{}, fmt.Errorf("oggopus: mapping family 0 requires 1 or 2 channels, got %d", h.channels)
 		}
 		return h, nil
 	}
-	// Family > 0 carries a mapping table: stream count, coupled count, and one
+	// Families 1, 2 and 255 carry a mapping table: stream count, coupled count, and one
 	// mapping byte per channel.
 	if len(b) < opusHeadFamily0Len+2+int(h.channels) {
 		return opusHead{}, fmt.Errorf("oggopus: OpusHead mapping table truncated for family %d", h.mappingFamily)

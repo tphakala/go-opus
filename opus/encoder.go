@@ -20,6 +20,9 @@ import (
 // build cannot do it yet" from ErrBadArg. Frames longer than 20 ms are NOT
 // unsupported: they are coded as multiframe packets (opus_encoder.c splits them
 // into 20 ms sub-frames and reassembles them with the repacketizer).
+//
+// The oggopus decoder also returns it, wrapped, for an OpusHead whose channel
+// mapping family it cannot decode.
 var ErrUnsupported = errors.New("opus: unsupported configuration")
 
 const (
