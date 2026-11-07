@@ -188,3 +188,29 @@ func BenchmarkDecodeStream(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkDecodeStreamPooled is BenchmarkDecodeStream with one Decoder reused
+// through Reset, the pooling path for a many-short-clips workload.
+func BenchmarkDecodeStreamPooled(b *testing.B) {
+	for _, ch := range []int{1, 2} {
+		b.Run(fmt.Sprintf("ch%d", ch), func(b *testing.B) {
+			stream := benchStream(b, ch)
+			d, err := NewDecoder(bytes.NewReader(stream))
+			if err != nil {
+				b.Fatalf("NewDecoder: %v", err)
+			}
+
+			b.ReportAllocs()
+			b.SetBytes(int64(len(stream)))
+			for b.Loop() {
+				if err := d.Reset(bytes.NewReader(stream)); err != nil {
+					b.Fatalf("Reset: %v", err)
+				}
+				if _, err := d.WriteTo(io.Discard); err != nil {
+					b.Fatalf("WriteTo: %v", err)
+				}
+			}
+			reportRealtime(b, benchClipSeconds)
+		})
+	}
+}
