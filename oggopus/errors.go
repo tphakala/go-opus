@@ -29,8 +29,7 @@ var (
 	// ErrPacketTooLarge reports that a packet reassembled from Ogg pages is larger
 	// than the decoder accepts. For an audio packet the limit is 122,880 bytes per
 	// Opus stream, times the stream count in OpusHead (one for mapping family 0). A
-	// packet
-	// without padding is at most 61,298*N - 2 bytes for N streams (RFC 7845
+	// packet without padding is at most 61,298*N - 2 bytes for N streams (RFC 7845
 	// section 6), so only code-3 padding of roughly 61 KB or more per stream goes
 	// past the limit. That is legal Opus, but section 6 says a demuxer should treat
 	// such a packet as invalid, so the stream is not decoded.
