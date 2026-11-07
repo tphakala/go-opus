@@ -13,12 +13,15 @@ import (
 func TestResetMatchesFreshDecoder(t *testing.T) {
 	mono := seekFixture(t, 1, 20, 48000, 64000)
 	stereo := seekFixture(t, 2, 20, 48000, 64000)
+	// The seek rows need a target past the pre-roll (seekPreRoll, seek.go) so that the
+	// seek lands on a page instead of rewinding to the start.
+	longStereo := seekFixture(t, 2, 20, 3*48000, 64000)
 	ms2 := func(streams, coupled int, mapping ...byte) []byte {
 		return msStream(t, 1, 2, streams, coupled, mapping, 40)
 	}
 	seekedAndRead := func(t *testing.T, d *Decoder) {
 		t.Helper()
-		if _, err := d.SeekToSample(20000); err != nil {
+		if _, err := d.SeekToSample(100000); err != nil {
 			t.Fatalf("SeekToSample: %v", err)
 		}
 		if _, err := io.ReadFull(d, make([]byte, 3000)); err != nil {
@@ -39,8 +42,8 @@ func TestResetMatchesFreshDecoder(t *testing.T) {
 		{"stereo->family1 2ch", stereo, ms2(2, 0, 0, 1), 5000, nil},
 		{"family1 2 streams->1 coupled stream", ms2(2, 0, 0, 1), ms2(1, 1, 0, 1), 5000, nil},
 		{"family1 mapping 0,1->1,0", ms2(2, 0, 0, 1), ms2(2, 0, 1, 0), 5000, nil},
-		{"stereo->stereo after seek", stereo, stereo, 0, seekedAndRead},
-		{"family1->family1 after seek", family1Stream(t, 40), family1Stream(t, 30), 0, seekedAndRead},
+		{"stereo->stereo after seek", longStereo, longStereo, 0, seekedAndRead},
+		{"family1->family1 after seek", family1Stream(t, 120), family1Stream(t, 90), 0, seekedAndRead},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
