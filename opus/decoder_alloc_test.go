@@ -326,8 +326,9 @@ func TestDecoderSILKHybridAllocatesNothing(t *testing.T) {
 // TestDecoderRFCVectorsAllocateNothing pins that decoding the SILK, hybrid and
 // mode-transition RFC vectors allocates nothing from a fresh decoder's first
 // Decode. Real encoder output reaches paths that random payloads reach only by
-// chance, hybrid-mode redundancy in particular (vectors 10 and 12). The CELT
-// vectors are covered by TestDecoderCELTAllocatesNothing.
+// chance, hybrid-mode redundancy in particular (vectors 10 and 12). The
+// CELT-only vectors 01, 07 and 11 are not decoded here;
+// TestDecoderCELTAllocatesNothing pins CELT decoding on encoder-made packets.
 func TestDecoderRFCVectorsAllocateNothing(t *testing.T) {
 	if _, err := os.Stat(vectorsDir); err != nil {
 		t.Skipf("test vectors not present (%v); run scripts/fetch-vectors.sh", err)
