@@ -69,7 +69,7 @@ type Decoder struct {
 	dec  frameDecoder // nil until init succeeds, and after a failed Reset
 	info Info
 
-	pcmBuf      []byte        // backing array fill writes into; kept across Reset
+	pcmBuf      []byte        // backing array fill writes into; kept across Reset, grown by init for more channels
 	pcm         []byte        // view of pcmBuf awaiting delivery
 	br          *bufio.Reader // source read buffer, kept across Reset and re-pointed at each source
 	preSkipLeft int           // pre-skip samples per channel still to drop
@@ -105,8 +105,9 @@ type Decoder struct {
 // position of r at this call, so a stream embedded in a larger source works.
 //
 // The codec state and two PCM buffers sized for the longest Opus frame are
-// allocated here and kept across Reset: about 59 KiB (mono) to 68 KiB (stereo) of
-// codec state per Opus stream, plus 23,040 bytes per channel.
+// allocated here: about 59 KiB (mono) to 68 KiB (stereo) of codec state per Opus
+// stream, about 26 KiB more per Decoder for a channel mapping family other than 0,
+// and 23,040 bytes per channel. Reset describes when it reuses them and when it rebuilds them.
 // A Decoder keeps its page and packet buffers between packets and across Reset;
 // they stay under about 450 KiB. An audio packet that spans several pages needs
 // buffers of its own size until the Decoder has read past it, at most the limit
@@ -136,9 +137,10 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 
 // Reset rebinds the Decoder to a new source r, re-parsing its OpusHead and
 // OpusTags headers, so one Decoder can decode many independent streams. Its source
-// read buffer (used when r is not a *bufio.Reader), its decoded-PCM buffer and the
-// container's page and packet buffers are reused, and so is the page-scan window
-// that Length and the seek methods read through. The codec is reset and reused
+// read buffer (used when r is not a *bufio.Reader), its decoded-PCM buffer (grown
+// when the new stream has more channels) and the container's page and packet
+// buffers are reused, and so is the page-scan window that Length and the seek
+// methods read through. The codec and its own PCM buffer are reset and reused
 // when the new stream has the same layout (the same channel count for mapping
 // family 0; the same family, channel count, stream count, coupled count and
 // mapping table otherwise) and rebuilt when it does not; the output is the same as
