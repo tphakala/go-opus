@@ -145,17 +145,9 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	if cr == nil {
 		cr = new(containerReader)
 	}
-	arena, partial := cr.arena[:0], cr.partial[:0]
-	if cap(arena) > maxReusedBuf {
-		arena = nil
-	}
-	if cap(partial) > maxReusedBuf {
-		partial = nil
-	}
-	// Stale queue slots would keep a dropped arena reachable.
-	queue := cr.queue[:cap(cr.queue)]
-	clear(queue)
-	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: arena, queue: queue[:0], partial: partial,
+	cr.resetArena()
+	cr.resetPartial()
+	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: cr.arena, queue: cr.queue[:0], partial: cr.partial,
 		limit: streamPacketLimit, headers: 2}
 	cr.presize()
 	hp, err := cr.nextRawPacket()
@@ -187,9 +179,7 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	}
 	cr.head = head
 	cr.tags = tags
-	cr.afterHeaders.lastGranule = cr.lastGranule
-	cr.afterHeaders.finalGranule = cr.finalGranule
-	cr.afterHeaders.sawEOS = cr.sawEOS
+	cr.afterHeaders.lastGranule, cr.afterHeaders.finalGranule, cr.afterHeaders.sawEOS = cr.lastGranule, cr.finalGranule, cr.sawEOS
 	return cr, nil
 }
 

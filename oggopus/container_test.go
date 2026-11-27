@@ -374,18 +374,13 @@ func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
 // of the packet buffers: packets of minPacketBuf bytes, each continued from one
 // page to the next, are read without allocating once the reader is built.
 func TestContainerCarriedPacketsUpToMinPacketBufDoNotAllocate(t *testing.T) {
-	p := &pager{t: t, serial: 0x1234, max: maxPageSegments}
-	p.add(testHead(1, 312).marshal(), 0)
-	p.flush(false)
-	p.add(opusTags{vendor: "v"}.marshal(), 0)
-	p.flush(false)
-	p.max = 20 // a packet of minPacketBuf bytes has 33 lacing values
 	const n = 20
-	for i := range n {
-		p.add(makeRamp(minPacketBuf), int64((i+1)*960))
+	pkts := make([][]byte, n)
+	for i := range pkts {
+		pkts[i] = makeRamp(minPacketBuf)
 	}
-	p.flush(true)
-	data := p.out.Bytes()
+	// 20 lacing values per page: a packet of minPacketBuf bytes has 33.
+	data := limitStream(t, testHead(1, 312).marshal(), opusTags{vendor: "v"}.marshal(), pkts, 20, true)
 
 	var got int
 	var readErr error
