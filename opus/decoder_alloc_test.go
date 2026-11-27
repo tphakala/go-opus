@@ -40,6 +40,28 @@ func mallocsUntilZero(prepare func() (measured func())) []uint64 {
 	return counts
 }
 
+// requireDecodeAllocatesNothing builds a fresh rate Hz, ch-channel Decoder for
+// each mallocsUntilZero attempt and fails t unless run decodes with it without
+// an error and allocates nothing in at least one attempt. what names the decoded
+// sequence in the failure message.
+func requireDecodeAllocatesNothing(t *testing.T, rate, ch int, what string, run func(*opus.Decoder) error) {
+	t.Helper()
+	var runErr error
+	counts := mallocsUntilZero(func() func() {
+		d, err := opus.NewDecoder(rate, ch)
+		if err != nil {
+			t.Fatalf("NewDecoder: %v", err)
+		}
+		return func() { runErr = run(d) }
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if counts[len(counts)-1] != 0 {
+		t.Errorf("decoding %s from the first Decode allocated %v times (one count per attempt), want 0 in at least one attempt", what, counts)
+	}
+}
+
 // celtAllocPackets returns a CELT packet sequence that reaches every decode
 // scratch buffer, with nil entries for lost frames: noise and impulse trains at
 // every frame duration from 2.5 to 120 ms (each LM, transient and non-transient
@@ -128,31 +150,18 @@ func TestDecoderCELTAllocatesNothing(t *testing.T) {
 			rate := row.rate
 			pcm := make([]int16, rate/1000*120) // 120 ms, mono
 			lost := pcm[:rate/50]               // 20 ms of concealment per lost packet
-			var decodeErr error
-			counts := mallocsUntilZero(func() func() {
-				d, err := opus.NewDecoder(rate, 1)
-				if err != nil {
-					t.Fatalf("NewDecoder: %v", err)
-				}
-				return func() {
-					for _, p := range pkts {
-						out := pcm
-						if p == nil {
-							out = lost
-						}
-						if _, err := d.Decode(p, out); err != nil {
-							decodeErr = err
-							return
-						}
+			requireDecodeAllocatesNothing(t, rate, 1, fmt.Sprintf("%d packets", len(pkts)), func(d *opus.Decoder) error {
+				for i, p := range pkts {
+					out := pcm
+					if p == nil {
+						out = lost
+					}
+					if _, err := d.Decode(p, out); err != nil {
+						return fmt.Errorf("packet %d Decode: %w", i, err)
 					}
 				}
+				return nil
 			})
-			if decodeErr != nil {
-				t.Fatalf("Decode: %v", decodeErr)
-			}
-			if counts[len(counts)-1] != 0 {
-				t.Errorf("decoding %d packets from the first Decode allocated %v times (one count per attempt), want 0 in at least one attempt", len(pkts), counts)
-			}
 		})
 	}
 }
@@ -293,37 +302,23 @@ func TestDecoderSILKHybridAllocatesNothing(t *testing.T) {
 			rate, ch := row.rate, row.ch
 			pcm := make([]int16, rate/1000*120*ch) // 120 ms
 			fecPCM := pcm[:3*rate/50*ch]           // 60 ms covers any SILK packet
-			var decodeErr error
-			counts := mallocsUntilZero(func() func() {
-				d, err := opus.NewDecoder(rate, ch)
-				if err != nil {
-					t.Fatalf("NewDecoder: %v", err)
-				}
-				return func() {
-					for i, s := range steps {
-						out := pcm
-						if s.lossMS != 0 {
-							out = pcm[:rate/1000*s.lossMS*ch]
-						}
-						if s.fec {
-							if _, err := d.DecodeFEC(s.packet, fecPCM); err != nil {
-								decodeErr = fmt.Errorf("step %d DecodeFEC: %w", i, err)
-								return
-							}
-						}
-						if _, err := d.Decode(s.packet, out); err != nil {
-							decodeErr = fmt.Errorf("step %d Decode: %w", i, err)
-							return
+			requireDecodeAllocatesNothing(t, rate, ch, fmt.Sprintf("%d steps", len(steps)), func(d *opus.Decoder) error {
+				for i, s := range steps {
+					out := pcm
+					if s.lossMS != 0 {
+						out = pcm[:rate/1000*s.lossMS*ch]
+					}
+					if s.fec {
+						if _, err := d.DecodeFEC(s.packet, fecPCM); err != nil {
+							return fmt.Errorf("step %d DecodeFEC: %w", i, err)
 						}
 					}
+					if _, err := d.Decode(s.packet, out); err != nil {
+						return fmt.Errorf("step %d Decode: %w", i, err)
+					}
 				}
+				return nil
 			})
-			if decodeErr != nil {
-				t.Fatal(decodeErr)
-			}
-			if counts[len(counts)-1] != 0 {
-				t.Errorf("decoding %d steps from the first Decode allocated %v times (one count per attempt), want 0 in at least one attempt", len(steps), counts)
-			}
 		})
 	}
 }
@@ -345,27 +340,14 @@ func TestDecoderRFCVectorsAllocateNothing(t *testing.T) {
 			}
 			recs := readBitRecords(t, data)
 			pcm := make([]int16, 5760*2) // 120 ms at 48 kHz stereo: max packet
-			var decodeErr error
-			counts := mallocsUntilZero(func() func() {
-				d, err := opus.NewDecoder(48000, 2)
-				if err != nil {
-					t.Fatalf("NewDecoder: %v", err)
-				}
-				return func() {
-					for i, rec := range recs {
-						if _, err := d.Decode(rec.packet, pcm); err != nil {
-							decodeErr = fmt.Errorf("packet %d: %w", i, err)
-							return
-						}
+			requireDecodeAllocatesNothing(t, 48000, 2, fmt.Sprintf("%d packets", len(recs)), func(d *opus.Decoder) error {
+				for i, rec := range recs {
+					if _, err := d.Decode(rec.packet, pcm); err != nil {
+						return fmt.Errorf("packet %d Decode: %w", i, err)
 					}
 				}
+				return nil
 			})
-			if decodeErr != nil {
-				t.Fatal(decodeErr)
-			}
-			if counts[len(counts)-1] != 0 {
-				t.Errorf("decoding %d packets from the first Decode allocated %v times (one count per attempt), want 0 in at least one attempt", len(recs), counts)
-			}
 		})
 	}
 }

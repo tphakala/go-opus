@@ -215,8 +215,7 @@ func plcConceal(psDec *DecoderState, psDecCtrl *DecoderControl, frame []int16) {
 	psPLC := &psDec.SPLC
 	var prevGainQ10 [2]int32
 
-	/* ALLOC( sLTP_Q14, ... ) (PLC.c:245) and ALLOC( sLTP, ... ) (PLC.c:250):
-	   fixed-size stack arrays sized by the C maxima */
+	/* ALLOC( sLTP_Q14, ... ) (PLC.c:245) and ALLOC( sLTP, ... ) (PLC.c:250) */
 	sLTPQ14Len := psDec.LtpMemLength + psDec.FrameLength
 	var sLTPQ14Arr [maxLTPMemLength + maxFrameLength]int32
 	sLTPQ14 := sLTPQ14Arr[:sLTPQ14Len:sLTPQ14Len]

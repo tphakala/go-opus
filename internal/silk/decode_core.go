@@ -56,8 +56,7 @@ func DecodeCore(psDec *DecoderState, psDecCtrl *DecoderControl, xq []int16, puls
 	/* silk_assert( psDec->prev_gain_Q16 != 0 ); */
 
 	/* ALLOC( sLTP, psDec->ltp_mem_length, opus_int16 ) (decode_core.c:58) and
-	   the three below: fixed-size stack arrays sized by the C maxima, sliced to
-	   the C length. The maxima hold for the fs_kHz and nb_subfr values
+	   the three below, bounded for the fs_kHz and nb_subfr values
 	   silk_decoder_set_fs asserts (decoder_set_fs.c:43-44) */
 	var sLTPArr [maxLTPMemLength]int16
 	sLTP := sLTPArr[:psDec.LtpMemLength:psDec.LtpMemLength]
