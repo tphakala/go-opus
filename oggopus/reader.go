@@ -321,9 +321,9 @@ func (cr *containerReader) processPage(pg *page) error {
 	// pages grew far larger than a page is dropped rather than held for the rest
 	// of the stream.
 	cr.resetArena()
-	// An audio packet that starts and ends on this page is queued as a slice of
+	// An audio packet whose bytes all lie on this page is queued as a slice of
 	// pg.body, which stays valid until the next readPage. Header packets and a
-	// packet continued from an earlier page are assembled in partial and copied
+	// packet completed from earlier pages are assembled in partial and copied
 	// into the arena. start is the first body byte not yet in partial or the
 	// queue.
 	off, start := 0, 0
