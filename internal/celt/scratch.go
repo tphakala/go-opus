@@ -13,8 +13,9 @@
 // All of them are part of the decode zeroing audit exactly like the dec* fields.
 //
 // A Decoder's window sizes depend on the bitstream, so NewDecoder presizes every
-// decode field to its worst case (presizeDecode, at the end of this file, has the
-// bounds and the rule for a new field) and decoding never grows the pool. An
+// decode field except decDeemph to its worst case (presizeDecode, at the end of
+// this file, has the bounds and the rule for a new field), SetDownsample presizes
+// decDeemph for sub-48 kHz output, and decoding never grows the pool. An
 // Encoder's fields grow to the largest request seen.
 //
 // THE ZEROING CONTRACT: the one thing that can silently break bit-exactness here.
@@ -258,36 +259,35 @@ func (sc *scratch) presizeDecode(m *celtMode) {
 	for i := 0; i < nb; i++ {
 		widest = max(widest, (int(m.eBands[i+1])-int(m.eBands[i]))<<m.maxLM)
 	}
-	// celt_plc_pitch_search's pitch_search arguments (celt_decoder.go:487).
+	// The pitch_search arguments of celt_plc_pitch_search (celtPlcPitchSearch).
 	pitchLen := decodeBufferSize - plcPitchLagMax
 	maxPitch := plcPitchLagMax - plcPitchLagMin
 
-	alloc(&sc.decIy, widest)                      // vq.go:280 alg_unquant iy, N <= band width
-	alloc(&sc.hadamardTmp, widest)                // bands.go:522, 544 tmp, N0*stride = band width
-	alloc(&sc.norm, C*M*int(m.eBands[nb-1]))      // bands.go:1304 _norm, C*(M*eBands[nbEBands-1] - M*eBands[start])
-	alloc(&sc.mdctF2, m.mdct.n>>2)                // mdct.go:58 f2, N4 = (n>>shift)>>2
-	alloc(&sc.bits1, nb)                          // rate.go:452 bits1, len = nbEBands
-	alloc(&sc.bits2, nb)                          // rate.go:453 bits2
-	alloc(&sc.thresh, nb)                         // rate.go:454 thresh
-	alloc(&sc.trimOffset, nb)                     // rate.go:455 trim_offset
-	alloc(&sc.decTfRes, nb)                       // celt_decoder.go:925 tf_res, nbEBands
-	alloc(&sc.decCap, nb)                         // celt_decoder.go:934 cap
-	alloc(&sc.decOffsets, nb)                     // celt_decoder.go:937 offsets
-	alloc(&sc.decFineQuant, nb)                   // celt_decoder.go:963 fine_quant
-	alloc(&sc.decPulses, nb)                      // celt_decoder.go:976 pulses
-	alloc(&sc.decFinePriority, nb)                // celt_decoder.go:977 fine_priority
-	alloc(&sc.decX, C*N)                          // celt_decoder.go:987 X and :540 (noise PLC), C*N
-	alloc(&sc.decCollapseMasks, C*nb)             // celt_decoder.go:995 collapse_masks, C*nbEBands
-	alloc(&sc.decFreq, N)                         // celt_decoder.go:389 celt_synthesis freq, N
-	alloc(&sc.decEtmp, m.overlap)                 // celt_decoder.go:460 prefilter_and_fold etmp, overlap
-	alloc(&sc.decLpPitchBuf, decodeBufferSize>>1) // celt_decoder.go:484 lp_pitch_buf
-	alloc(&sc.decExcBuf, maxPeriodC+celtLpcOrder) // celt_decoder.go:615 _exc
-	alloc(&sc.decFirTmp, maxPeriodC)              // celt_decoder.go:616 fir_tmp, IMIN(2*pitch_index, MAX_PERIOD)
-	alloc(&sc.xLp4, pitchLen>>2)                  // pitch.go:228 x_lp4, len>>2
-	alloc(&sc.yLp4, (pitchLen+maxPitch)>>2)       // pitch.go:229 y_lp4, (len+max_pitch)>>2
-	alloc(&sc.pitchXcorr, maxPitch>>1)            // pitch.go:230 xcorr, max_pitch>>1
-	// celt_lpc.go:185 _celt_autocorr xx, n: DECODE_BUFFER_SIZE>>1 from
-	// pitch_downsample (pitch.go:193), MAX_PERIOD from celt_decode_lost
-	// (celt_decoder.go:631).
+	alloc(&sc.decIy, widest)                      // algUnquant iy, N <= band width
+	alloc(&sc.hadamardTmp, widest)                // (de)interleaveHadamard tmp, N0*stride = band width
+	alloc(&sc.norm, C*M*int(m.eBands[nb-1]))      // quantAllBands _norm, C*(M*eBands[nbEBands-1] - M*eBands[start])
+	alloc(&sc.mdctF2, m.mdct.n>>2)                // cltMDCTBackward f2, N4 = (n>>shift)>>2
+	alloc(&sc.bits1, nb)                          // cltComputeAllocation bits1, len = nbEBands
+	alloc(&sc.bits2, nb)                          // cltComputeAllocation bits2
+	alloc(&sc.thresh, nb)                         // cltComputeAllocation thresh
+	alloc(&sc.trimOffset, nb)                     // cltComputeAllocation trim_offset
+	alloc(&sc.decTfRes, nb)                       // DecodeWithEC tf_res, nbEBands
+	alloc(&sc.decCap, nb)                         // DecodeWithEC cap
+	alloc(&sc.decOffsets, nb)                     // DecodeWithEC offsets
+	alloc(&sc.decFineQuant, nb)                   // DecodeWithEC fine_quant
+	alloc(&sc.decPulses, nb)                      // DecodeWithEC pulses
+	alloc(&sc.decFinePriority, nb)                // DecodeWithEC fine_priority
+	alloc(&sc.decX, C*N)                          // DecodeWithEC X and celtDecodeLost (noise PLC), C*N
+	alloc(&sc.decCollapseMasks, C*nb)             // DecodeWithEC collapse_masks, C*nbEBands
+	alloc(&sc.decFreq, N)                         // celtSynthesis freq, N
+	alloc(&sc.decEtmp, m.overlap)                 // foldPrefilter etmp, overlap
+	alloc(&sc.decLpPitchBuf, decodeBufferSize>>1) // celtPlcPitchSearch lp_pitch_buf
+	alloc(&sc.decExcBuf, maxPeriodC+celtLpcOrder) // celtDecodeLost _exc
+	alloc(&sc.decFirTmp, maxPeriodC)              // celtDecodeLost fir_tmp, IMIN(2*pitch_index, MAX_PERIOD)
+	alloc(&sc.xLp4, pitchLen>>2)                  // pitchSearch x_lp4, len>>2
+	alloc(&sc.yLp4, (pitchLen+maxPitch)>>2)       // pitchSearch y_lp4, (len+max_pitch)>>2
+	alloc(&sc.pitchXcorr, maxPitch>>1)            // pitchSearch xcorr, max_pitch>>1
+	// celtAutocorr xx, n: DECODE_BUFFER_SIZE>>1 from pitchDownsample, MAX_PERIOD
+	// from celtDecodeLost.
 	alloc(&sc.autocorrXX, max(decodeBufferSize>>1, maxPeriodC))
 }
