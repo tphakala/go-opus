@@ -133,7 +133,11 @@ func CNG(psDec *DecoderState, psDecCtrl *DecoderControl, frame []int16, length i
 
 	/* Add CNG when packet is lost or during DTX */
 	if psDec.LossCnt != 0 {
-		cngSigQ14 := make([]int32, length+maxLPCOrder)
+		/* ALLOC( CNG_sig_Q14, length + MAX_LPC_ORDER, opus_int32 ) (CNG.c:131);
+		   length is the frame length, at most MAX_FRAME_LENGTH */
+		cngSigQ14Len := length + maxLPCOrder
+		var cngSigQ14Arr [maxFrameLength + maxLPCOrder]int32
+		cngSigQ14 := cngSigQ14Arr[:cngSigQ14Len:cngSigQ14Len]
 
 		/* Generate CNG excitation */
 		gainQ16 = silkmath.Silk_SMULWW(int32(psDec.SPLC.RandScaleQ14), psDec.SPLC.PrevGainQ16[1])

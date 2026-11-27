@@ -32,7 +32,8 @@ package silk
 // silk/resampler_private_IIR_FIR.c and silk/resampler_private_down_FIR.c
 // (libopus v1.6.1). Names, control flow and comments follow the C; fixed-point
 // operations route through internal/silkmath. The scratch "buf" arrays that C
-// allocates on the stack (VARDECL/ALLOC) are plain Go slices here.
+// allocates on the stack (VARDECL/ALLOC) are fixed-size Go arrays sized by the C
+// maxima and sliced to the C length, so they stay on the goroutine stack.
 
 import "github.com/tphakala/go-opus/internal/silkmath"
 
@@ -143,7 +144,13 @@ func silkResamplerPrivateIIRFIRInterpol(out []int16, outIdx int, buf []int16, ma
 func silkResamplerPrivateIIRFIR(S *ResamplerState, out []int16, in []int16, inLen int32) {
 	var nSamplesIn int32
 
-	buf := make([]int16, 2*S.BatchSize+resamplerOrderFIR12)
+	/* ALLOC( buf, 2 * S->batchSize + RESAMPLER_ORDER_FIR_12, opus_int16 )
+	   (resampler_private_IIR_FIR.c:78). ResamplerInit selects IIR_FIR only for
+	   fsHzOut > fsHzIn, which caps the input at 16 kHz for both the decoder and
+	   the encoder rate sets, so batchSize <= 160 */
+	bufLen := 2*S.BatchSize + resamplerOrderFIR12
+	var bufArr [2*maxFSKHz*resamplerMaxBatchSizeMS + resamplerOrderFIR12]int16
+	buf := bufArr[:bufLen:bufLen]
 
 	/* Copy buffered samples to start of buffer */
 	for i := 0; i < resamplerOrderFIR12; i++ {
@@ -285,7 +292,12 @@ func silkResamplerPrivateDownFIRInterpol(out []int16, outIdx int, buf []int32, f
 func silkResamplerPrivateDownFIR(S *ResamplerState, out []int16, in []int16, inLen int32) {
 	var nSamplesIn int32
 
-	buf := make([]int32, S.BatchSize+S.FIROrder)
+	/* ALLOC( buf, S->batchSize + S->FIR_Order, opus_int32 )
+	   (resampler_private_down_FIR.c:159), bounded for every ResamplerInit
+	   configuration, including the encoder's 48 kHz input */
+	bufLen := S.BatchSize + S.FIROrder
+	var bufArr [resamplerMaxBatchSizeIn + silkResamplerMaxFIROrder]int32
+	buf := bufArr[:bufLen:bufLen]
 
 	/* Copy buffered samples to start of buffer */
 	for i := 0; i < S.FIROrder; i++ {

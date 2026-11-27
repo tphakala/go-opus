@@ -121,8 +121,9 @@ planned behind the same scalar function signatures.
 ## Performance
 
 go-opus encodes at **1.5x to 2.0x the time of the equivalent C**, decodes at
-**1.3x to 1.5x**, and **allocates nothing per frame on either path**. That is
-the honest headline. There is more on the table.
+**1.3x to 1.5x**, and **allocates nothing per frame on either path**, for CELT,
+SILK and hybrid streams alike. That is the honest headline. There is more on
+the table.
 
 The C it is measured against is the pinned v1.6.1 oracle built `FIXED_POINT +
 DISABLE_FLOAT_API`, with libopus's hand-written NEON and SSE kernels switched
@@ -191,6 +192,9 @@ Four things closed most of it:
   application's collector, which a benchmark loop cannot see. The contract that
   makes pooling bit-exact (every buffer written before it is read) is enforced
   on every CI run by a build-tagged allocator that poisons reused buffers.
+  SILK and hybrid decoding needed no pool: their per-frame buffers have small
+  compile-time bounds, so they are fixed-size stack arrays, which took the 11
+  to 17 allocations per packet of the SILK and hybrid RFC vectors to zero.
 - **Bounds-check elimination in the four hottest scalar kernels** (the PVQ
   search, `exp_rotation`, the norm inner product, `haar1`): overlapping window
   slices let the compiler prove the hot loops in range, removing 2-4 checks per

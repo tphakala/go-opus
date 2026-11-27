@@ -70,6 +70,23 @@ const (
 	silkFlagDecodeLBRR   = 2 // FLAG_DECODE_LBRR
 )
 
+// Bounds of opus_decode_frame's stack buffers (C ALLOCs sized from F5 or F10
+// times channels). newDecoder accepts Fs <= 48000 and at most 2 channels, and
+// every multistream sub-decoder comes from newDecoder too, so 5 ms and 10 ms at
+// 48 kHz stereo bound them.
+const (
+	maxF5PCM  = 48000 / 200 * 2 // F5 * channels: 480
+	maxF10PCM = 48000 / 100 * 2 // F10 * channels: 960
+)
+
+// silence is the 2-byte CELT frame opus_decode_frame decodes for the hybrid to
+// SILK fade-out (opus_decoder.c:614). C keeps it on the stack; it is package
+// level here because escape analysis reports the data parameter of celt
+// Decoder.DecodeWithEC as leaking, which would move a local copy to the heap on
+// every such frame. Nothing writes it (the range decoder only reads its input),
+// so decoders share it safely.
+var silence = [2]byte{0xFF, 0xFF}
+
 func imin(a, b int) int {
 	if a < b {
 		return a
@@ -404,9 +421,13 @@ func (st *OpusDecoder) opusDecodeFrame(data []byte, pcm []int16, frameSize, deco
 		transition = 1
 		/* Decide where to allocate the stack memory for pcm_transition */
 		if mode == modeCeltOnly {
-			pcmTransitionCelt = make([]int16, F5*st.channels)
+			pcmTransitionCeltSize := F5 * st.channels
+			var pcmTransitionCeltArr [maxF5PCM]int16
+			pcmTransitionCelt = pcmTransitionCeltArr[:pcmTransitionCeltSize:pcmTransitionCeltSize]
 		} else {
-			pcmTransitionSilk = make([]int16, F5*st.channels)
+			pcmTransitionSilkSize := F5 * st.channels
+			var pcmTransitionSilkArr [maxF5PCM]int16
+			pcmTransitionSilk = pcmTransitionSilkArr[:pcmTransitionSilkSize:pcmTransitionSilkSize]
 		}
 	}
 	if transition != 0 && mode == modeCeltOnly {
@@ -425,7 +446,9 @@ func (st *OpusDecoder) opusDecodeFrame(data []byte, pcm []int16, frameSize, deco
 		pcmTooSmall := frameSize < F10
 		var pcmSilk []int16
 		if pcmTooSmall {
-			pcmSilk = make([]int16, F10*st.channels)
+			pcmSilkSize := F10 * st.channels
+			var pcmSilkArr [maxF10PCM]int16
+			pcmSilk = pcmSilkArr[:pcmSilkSize:pcmSilkSize]
 			pcmPtr = pcmSilk
 		} else {
 			pcmPtr = pcm
@@ -566,7 +589,9 @@ func (st *OpusDecoder) opusDecodeFrame(data []byte, pcm []int16, frameSize, deco
 
 	/* Only allocation memory for redundancy if/when needed */
 	if redundancy != 0 {
-		redundantAudio = make([]int16, F5*st.channels)
+		redundantAudioSize := F5 * st.channels
+		var redundantAudioArr [maxF5PCM]int16
+		redundantAudio = redundantAudioArr[:redundantAudioSize:redundantAudioSize]
 	}
 
 	/* 5 ms redundant frame for CELT->SILK */
@@ -611,7 +636,6 @@ func (st *OpusDecoder) opusDecodeFrame(data []byte, pcm []int16, frameSize, deco
 		}
 		st.rangeFinal = celtDec.Rng()
 	} else {
-		silence := []byte{0xFF, 0xFF}
 		if celtAccum == 0 {
 			for i := 0; i < frameSize*st.channels; i++ {
 				pcm[i] = 0
@@ -623,7 +647,7 @@ func (st *OpusDecoder) opusDecodeFrame(data []byte, pcm []int16, frameSize, deco
 			if err := celtDec.SetStartBand(0); err != nil {
 				return opusInternalError
 			}
-			if _, err := celtDec.DecodeWithEC(silence, pcm, F2_5, nil, celtAccum); err != nil {
+			if _, err := celtDec.DecodeWithEC(silence[:], pcm, F2_5, nil, celtAccum); err != nil {
 				return opusInternalError
 			}
 		}

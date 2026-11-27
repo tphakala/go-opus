@@ -55,10 +55,20 @@ func DecodeCore(psDec *DecoderState, psDecCtrl *DecoderControl, xq []int16, puls
 
 	/* silk_assert( psDec->prev_gain_Q16 != 0 ); */
 
-	sLTP := make([]int16, psDec.LtpMemLength)
-	sLTPQ15 := make([]int32, psDec.LtpMemLength+psDec.FrameLength)
-	resQ14 := make([]int32, psDec.SubfrLength)
-	sLPCQ14 := make([]int32, psDec.SubfrLength+maxLPCOrder)
+	/* ALLOC( sLTP, psDec->ltp_mem_length, opus_int16 ) (decode_core.c:58) and
+	   the three below: fixed-size stack arrays sized by the C maxima, sliced to
+	   the C length. The maxima hold for the fs_kHz and nb_subfr values
+	   silk_decoder_set_fs asserts (decoder_set_fs.c:43-44) */
+	var sLTPArr [maxLTPMemLength]int16
+	sLTP := sLTPArr[:psDec.LtpMemLength:psDec.LtpMemLength]
+	sLTPQ15Len := psDec.LtpMemLength + psDec.FrameLength
+	var sLTPQ15Arr [maxLTPMemLength + maxFrameLength]int32
+	sLTPQ15 := sLTPQ15Arr[:sLTPQ15Len:sLTPQ15Len]
+	var resQ14Arr [maxSubFrameLength]int32
+	resQ14 := resQ14Arr[:psDec.SubfrLength:psDec.SubfrLength]
+	sLPCQ14Len := psDec.SubfrLength + maxLPCOrder
+	var sLPCQ14Arr [maxSubFrameLength + maxLPCOrder]int32
+	sLPCQ14 := sLPCQ14Arr[:sLPCQ14Len:sLPCQ14Len]
 
 	offsetQ10 = int32(silkQuantizationOffsetsQ10[psDec.Indices.SignalType>>1][psDec.Indices.QuantOffsetType])
 

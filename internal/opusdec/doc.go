@@ -17,4 +17,8 @@
 // transition crossfades, and drives the opus-level PLC (data==NULL) and FEC/LBRR
 // (decode_fec) paths. opusDecodeNative is the packet parse + multi-frame loop +
 // FEC entry. The public opus package wraps this internal core.
+//
+// opusDecodeFrame's stack buffers (C ALLOCs) are fixed-size arrays declared in
+// the branch that needs them, so each recursive call for a transition owns its
+// own and nothing is pooled.
 package opusdec
