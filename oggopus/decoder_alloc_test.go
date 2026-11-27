@@ -344,14 +344,55 @@ func preSkip3840Stream(t *testing.T) []byte {
 	return b.Bytes()
 }
 
+// growingPacketsStream is a stereo stream whose packets grow while its pages do
+// not: 255 CBR 20 ms packets of 250 bytes fill the first audio page, then 40 CBR
+// 120 ms packets of 4950 bytes follow, 12 or 13 to a page of a similar size,
+// and every full page among them continues its last packet on the next page.
+func growingPacketsStream(t *testing.T) []byte {
+	t.Helper()
+	const preSkip = 312
+	r := rand.New(rand.NewPCG(3, 4))
+	var b bytes.Buffer
+	cw, err := newContainerWriter(&b, 0x1234, testHead(2, preSkip), opusTags{vendor: "go-opus"})
+	if err != nil {
+		t.Fatalf("newContainerWriter: %v", err)
+	}
+	buf := make([]byte, 8000)
+	total := 0
+	for _, run := range []struct{ n, frame, bitrate int }{{255, 960, 100000}, {40, 5760, 330000}} {
+		enc, err := opus.NewEncoder(opus.EncoderConfig{SampleRate: 48000, Channels: 2, Bitrate: run.bitrate, CBR: true})
+		if err != nil {
+			t.Fatalf("opus.NewEncoder: %v", err)
+		}
+		for range run.n {
+			n, err := enc.Encode(allocNoise(r, run.frame, 2, 20000), buf)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if err := cw.writePacket(buf[:n], run.frame); err != nil {
+				t.Fatalf("writePacket: %v", err)
+			}
+			total += run.frame
+		}
+	}
+	if err := cw.close(int64(total - preSkip)); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return b.Bytes()
+}
+
 // TestDecoderReadCELTAllocatesNothingAfterFirstRead pins that once the first Read
 // has decoded the first packet, reading a CELT stream to the end allocates
 // nothing: the codec's scratch is sized for the worst case when it is built
 // (bitstream-dependent sizes, two coded channels, packet-loss concealment), and
-// the decoded-PCM buffer for the longest frame of the stream's channel count. The
-// fixtures keep their Ogg pages from growing after the first audio page, since a
-// later, larger page still grows the container's buffers. Before the fix the rows
-// took between 3 and 64 allocations.
+// the decoded-PCM buffer for the longest frame of the stream's channel count; the
+// container's page and packet buffers are sized when the Decoder is bound, and
+// packets that start and end on one page are read from the page buffer. The rows
+// include later pages that are larger or complete more packets than the first
+// audio page, packets that grow and continue across pages, and restarts from the
+// first audio page by both seek methods. Before the codec fix the first rows took
+// between 3 and 64 allocations; before the container fix the rising-page,
+// more-packets, growing-packets and rewind rows took 2, 1, 8 and 38.
 func TestDecoderReadCELTAllocatesNothingAfterFirstRead(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	preSkip3840 := preSkip3840Stream(t)
@@ -392,6 +433,10 @@ func TestDecoderReadCELTAllocatesNothingAfterFirstRead(t *testing.T) {
 		name   string
 		stream []byte
 		before []byte // when set, decoded to the end and then Reset onto stream
+		// rewind measures SeekToSample(0) and SeekToSampleExact(0), each followed by
+		// reading to the end, instead of reading on from the first Read. The index
+		// they need is built before the measurement.
+		rewind bool
 	}{
 		// The issue's reproduction: full-scale stereo noise at the defaults.
 		{name: "stereo/20ms/noise", stream: encodeOgg(t, Config{SampleRate: 48000, Channels: 2}, allocNoise(r, 5*48000, 2, 32767))},
@@ -402,6 +447,16 @@ func TestDecoderReadCELTAllocatesNothingAfterFirstRead(t *testing.T) {
 		// A mono decoded-PCM buffer holds the stereo stream's first packet but not
 		// its second, so this pins the sizing on Reset as well as the codec rebuild.
 		{name: "reset/mono-to-stereo", stream: preSkip3840, before: encodeOgg(t, Config{SampleRate: 48000, Channels: 1}, allocNoise(r, 2*48000, 1, 20000))},
+		// Audio page bodies of about 32, 52 and 41 KB: the second is larger than the
+		// first.
+		{name: "stereo/256k/silence-then-noise", stream: encodeOgg(t, Config{SampleRate: 48000, Channels: 2, Bitrate: 256000},
+			append(make([]int16, 2*48000*2), allocNoise(r, 4*48000, 2, 32767)...))},
+		// Pages complete 127, 168, 255 and 251 packets: more than the first audio
+		// page's 127, and more than a queue grown by append to hold those would fit.
+		{name: "stereo/160k/dtx-long-silence", stream: encodeOgg(t, Config{SampleRate: 48000, Channels: 2, Bitrate: 160000, DTX: true},
+			append(tone(4*48000, 2, 440, 48000), make([]int16, 12*48000*2)...))},
+		{name: "stereo/growing-packets", stream: growingPacketsStream(t)},
+		{name: "stereo/rewind", stream: encodeOgg(t, Config{SampleRate: 48000, Channels: 2}, allocNoise(r, 3*48000, 2, 20000)), rewind: true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -421,11 +476,16 @@ func TestDecoderReadCELTAllocatesNothingAfterFirstRead(t *testing.T) {
 						t.Fatalf("Reset: %v", err)
 					}
 				}
+				if row.rewind {
+					if _, err := d.Length(); err != nil {
+						t.Fatalf("Length: %v", err)
+					}
+				}
 				buf := make([]byte, 2*960*d.Info().Channels) // 20 ms
 				if _, err := d.Read(buf); err != nil {
 					t.Fatalf("first Read: %v", err)
 				}
-				return func() {
+				readToEnd := func() {
 					for {
 						_, err := d.Read(buf)
 						if errors.Is(err, io.EOF) {
@@ -433,6 +493,25 @@ func TestDecoderReadCELTAllocatesNothingAfterFirstRead(t *testing.T) {
 						}
 						if err != nil {
 							readErr = err
+							return
+						}
+					}
+				}
+				if !row.rewind {
+					return readToEnd
+				}
+				// SeekToSample leaves the decoder out of sequence, so the exact seek
+				// restarts from the first audio page too rather than decoding on. The
+				// method values are made here, outside the measured window.
+				seeks := []func(int64) (int64, error){d.SeekToSample, d.SeekToSampleExact}
+				return func() {
+					for _, seek := range seeks {
+						if _, err := seek(0); err != nil {
+							readErr = err
+							return
+						}
+						readToEnd()
+						if readErr != nil {
 							return
 						}
 					}

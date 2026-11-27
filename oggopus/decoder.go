@@ -76,12 +76,11 @@ type Decoder struct {
 	delivered   int64         // samples per channel already produced
 	limit       int64         // total output samples per channel, or -1 until known
 
-	// Seeking state. rs is nil unless the source is a working io.ReadSeeker; base is
-	// its offset at bind time. idx is built lazily by Length or the first seek and is
-	// valid only for the bound source (Reset clears it). scan is the scratch window
-	// for page scans, kept across Reset and rebound to each source.
+	// Seeking state. rs is nil unless the source is a working io.ReadSeeker. idx is
+	// built lazily by Length or the first seek and is valid only for the bound
+	// source (Reset clears it). scan is the scratch window for page scans, kept
+	// across Reset and rebound to each source.
 	rs      io.ReadSeeker
-	base    int64
 	idx     seekIndex
 	scan    *pageScanner
 	skipTo  int64 // per-channel index below which decoded samples are discarded
@@ -108,12 +107,23 @@ type Decoder struct {
 // allocated here: about 59 KiB (mono) to 68 KiB (stereo) of codec state per Opus
 // stream, about 26 KiB more per Decoder for a channel mapping family other than 0,
 // and 23,040 bytes per channel. Reset describes when it reuses them and when it rebuilds them.
-// A Decoder keeps its page and packet buffers between packets and across Reset;
-// they stay under about 450 KiB. An audio packet that spans several pages needs
-// buffers of its own size until the Decoder has read past it, at most the limit
-// described for ErrPacketTooLarge. OpusHead and OpusTags are cut as the package
-// documentation describes, which also covers the header packet size and the
-// channel mapping families that make NewDecoder fail.
+// The page and packet buffers, about 86 KiB, are allocated here too and kept
+// between packets, across seeks and across Reset; an OpusHead or OpusTags
+// packet over 8 KiB grows the packet buffers when it is read. A packet
+// continued from an earlier page that is longer than 8 KiB, and than any such
+// packet before it, grows the packet buffers to fit; the buffers kept stay
+// under about 450 KiB. An audio packet longer than two page bodies (about 127
+// KiB), which only a multistream or padded stream has, needs buffers of its own
+// size until the Decoder has read past it, at most the limit described for
+// ErrPacketTooLarge. Such buffers may then be released, and the next continued
+// packet allocates new ones until Reset, or a seek that starts reading at
+// another page, restores the initial ones. Once the first Read has decoded a
+// packet, Read and WriteTo calls that return no error allocate nothing for a
+// CELT stream, also after SeekToSample or SeekToSampleExact restart it at the
+// first audio page, except when a continued packet grows the buffers as above.
+// OpusHead and OpusTags are cut as the package documentation describes, which
+// also covers the header packet size and the channel mapping families that make
+// NewDecoder fail.
 // Length and the seek methods read through a further window of about 128 KiB,
 // allocated by the first such call and kept across Reset.
 //
@@ -165,7 +175,6 @@ func (d *Decoder) Reset(r io.Reader) error {
 	}
 	d.dec = nil
 	d.rs = nil
-	d.base = 0
 	d.idx = seekIndex{}
 	d.skipTo = 0
 	d.atEnd = false
@@ -252,7 +261,6 @@ func (d *Decoder) init(r io.Reader, reuse *containerReader, reuseDec frameDecode
 	if d.scan != nil {
 		d.scan.rebind(rs)
 	}
-	d.base = base
 	d.idx = seekIndex{audioStart: base + cr.consumed}
 	// Audio packets sharing the OpusTags page break the granule arithmetic the
 	// seek path relies on (RFC 7845 section 3 requires the comment header to end
