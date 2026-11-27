@@ -133,10 +133,9 @@ func celtLPC(lpcOut []int16, ac []int32, p int) {
 // reversed into rnum internally; the resulting integer MAC sum is
 // order-independent, so this scalar form is bit-identical to the unrolled C.)
 //
-// rnum is C's ALLOC(rnum, ord, opus_val16). ord is always CELT_LPC_ORDER here
-// (the PLC call in celtDecodeLost and the CeltFir wrapper the differential tests
-// use), so a fixed array keeps the lost-frame path allocation-free; a larger ord
-// panics on the slice.
+// rnum is C's ALLOC(rnum, ord, opus_val16), a fixed array of CELT_LPC_ORDER
+// entries so the lost-frame path stays allocation-free: the decoder always passes
+// CELT_LPC_ORDER (celtDecodeLost), and a larger ord panics on the slice.
 func celtFir(x []int16, xOff int, num []int16, y []int16, N, ord int) {
 	var rnumBuf [celtLpcOrder]int16
 	rnum := rnumBuf[:ord]
@@ -274,7 +273,8 @@ func CeltLPC(ac []int32, p int) []int16 {
 }
 
 // CeltFir runs celtFir: xfull holds ord history samples then N samples (length
-// N+ord); it returns the N filtered outputs.
+// N+ord); it returns the N filtered outputs. ord must not exceed CELT_LPC_ORDER
+// (24), the size of celtFir's fixed coefficient array; a larger ord panics.
 func CeltFir(xfull []int16, N, ord int, num []int16) []int16 {
 	y := make([]int16, N)
 	celtFir(xfull, ord, num, y, N, ord)
@@ -282,7 +282,9 @@ func CeltFir(xfull []int16, N, ord int, num []int16) []int16 {
 }
 
 // CeltIir runs celtIir on x (length N) with den/mem (length ord) and returns the
-// N outputs and the updated mem (a fresh copy; the input mem is not mutated).
+// N outputs and the updated mem (a fresh copy; the input mem is not mutated). ord
+// must not exceed CELT_LPC_ORDER (24), the size of celtIir's fixed history array;
+// a larger ord panics.
 func CeltIir(x []int32, den []int16, N, ord int, mem []int16) ([]int32, []int16) {
 	y := make([]int32, N)
 	memOut := append([]int16(nil), mem...)
