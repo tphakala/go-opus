@@ -69,7 +69,7 @@ type Decoder struct {
 	dec  frameDecoder // nil until init succeeds, and after a failed Reset
 	info Info
 
-	pcmBuf      []byte        // backing array fill writes into; kept across Reset, grown by init for more channels
+	pcmBuf      []byte        // backing array fill writes into; kept across Reset, grown by init when a stream needs more
 	pcm         []byte        // view of pcmBuf awaiting delivery
 	br          *bufio.Reader // source read buffer, kept across Reset and re-pointed at each source
 	preSkipLeft int           // pre-skip samples per channel still to drop
@@ -138,7 +138,7 @@ func NewDecoder(r io.Reader) (*Decoder, error) {
 // Reset rebinds the Decoder to a new source r, re-parsing its OpusHead and
 // OpusTags headers, so one Decoder can decode many independent streams. Its source
 // read buffer (used when r is not a *bufio.Reader), its decoded-PCM buffer (grown
-// when the new stream has more channels) and the container's page and packet
+// when the new stream needs more than it holds) and the container's page and packet
 // buffers are reused, and so is the page-scan window that Length and the seek
 // methods read through. The codec and its own PCM buffer are reset and reused
 // when the new stream has the same layout (the same channel count for mapping
