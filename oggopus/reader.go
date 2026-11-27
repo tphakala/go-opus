@@ -21,8 +21,9 @@ type containerReader struct {
 	tags      opusTags
 
 	partial []byte // bytes of a packet still spanning pages
-	// queue holds the packets completed on the current page. A packet that starts
-	// and ends on the page aliases pg.body; any other aliases arena.
+	// queue holds the packets completed on the current page. An audio packet whose
+	// bytes all lie on the page aliases pg.body; a header packet or one completed
+	// from earlier pages aliases arena.
 	queue [][]byte
 	qi    int // index of the next packet to serve from queue
 
@@ -291,9 +292,9 @@ func (cr *containerReader) repositionAt(r io.Reader) {
 }
 
 // processPage reassembles the packets that complete on one page into the queue
-// and updates the granule and end-of-stream accounting. A packet that starts and
-// ends on pg aliases pg.body, so pg must not be rewritten while the queue is in
-// use; the packet that continues to the next page is copied into partial. An
+// and updates the granule and end-of-stream accounting. An audio packet whose
+// bytes all lie on pg aliases pg.body, so pg must not be rewritten while the queue
+// is in use; the packet that continues to the next page is copied into partial. An
 // audio packet longer than cr.limit fails with ErrPacketTooLarge; a header packet
 // is cut to maxHeaderPacketLen instead, and fails with ErrPacketTooLarge only once
 // it spans more than maxHeaderSpan.
