@@ -343,8 +343,8 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 // next whole sample Read would return (a sample the caller has partly read counts
 // as behind it) and nothing has disturbed the codec state since the decoder was
 // bound or last seeked exactly: no SeekToSample, no seek to the end of the stream,
-// no failed seek and no read error. Otherwise it restarts at the first audio page,
-// as SeekToSample does, and decodes from there. Either way the cost is
+// no failed seek and no read error. Otherwise it restarts at the first audio page
+// and decodes from there. Either way the cost is
 // linear in the samples decoded, up to everything before sampleIndex, unlike
 // SeekToSample, which decodes a bounded pre-roll. The result, whether output,
 // error or position, does not depend on earlier calls.
