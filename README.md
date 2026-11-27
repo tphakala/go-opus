@@ -121,9 +121,9 @@ planned behind the same scalar function signatures.
 ## Performance
 
 go-opus encodes at **1.5x to 2.0x the time of the equivalent C**, decodes at
-**1.3x to 1.5x**, and **allocates nothing per frame on either path**, for CELT,
-SILK and hybrid streams alike. That is the honest headline. There is more on
-the table.
+**1.3x to 1.5x**, and **allocates nothing per frame on either path** (the
+decoder for CELT, SILK and hybrid streams alike). That is the honest headline.
+There is more on the table.
 
 The C it is measured against is the pinned v1.6.1 oracle built `FIXED_POINT +
 DISABLE_FLOAT_API`, with libopus's hand-written NEON and SSE kernels switched
