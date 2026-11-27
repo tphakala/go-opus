@@ -370,16 +370,18 @@ func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
 	}
 }
 
-// TestContainerCarriedPacketsUpToMinPacketBufDoNotAllocate pins the initial size
-// of the packet buffers: packets of minPacketBuf bytes, each continued from one
-// page to the next, are read without allocating once the reader is built.
-func TestContainerCarriedPacketsUpToMinPacketBufDoNotAllocate(t *testing.T) {
-	const n = 20
+// TestContainerCarriedPacketsUpTo8KiBDoNotAllocate pins the documented initial
+// size of the packet buffers, 8 KiB, which holds the largest packet this
+// package's encoder writes: packets of 8 KiB, each continued from one page to the
+// next, are read without allocating once the reader is built. The size is a
+// literal so that shrinking minPacketBuf fails the test.
+func TestContainerCarriedPacketsUpTo8KiBDoNotAllocate(t *testing.T) {
+	const n, size = 20, 8 << 10
 	pkts := make([][]byte, n)
 	for i := range pkts {
-		pkts[i] = makeRamp(minPacketBuf)
+		pkts[i] = makeRamp(size)
 	}
-	// 20 lacing values per page: a packet of minPacketBuf bytes has 33.
+	// 20 lacing values per page: a packet of 8 KiB has 33.
 	data := limitStream(t, testHead(1, 312).marshal(), opusTags{vendor: "v"}.marshal(), pkts, 20, true)
 
 	var got int
@@ -399,7 +401,7 @@ func TestContainerCarriedPacketsUpToMinPacketBufDoNotAllocate(t *testing.T) {
 					}
 					return
 				}
-				if len(pkt) == minPacketBuf {
+				if len(pkt) == size {
 					got++
 				}
 			}
@@ -409,7 +411,7 @@ func TestContainerCarriedPacketsUpToMinPacketBufDoNotAllocate(t *testing.T) {
 		t.Fatalf("nextPacket: %v", readErr)
 	}
 	if got != n {
-		t.Fatalf("read %d packets of %d bytes, want %d", got, minPacketBuf, n)
+		t.Fatalf("read %d packets of %d bytes, want %d", got, size, n)
 	}
 	if counts[len(counts)-1] != 0 {
 		t.Errorf("reading the packets allocated %v times (one count per attempt), want 0 in at least one attempt", counts)
