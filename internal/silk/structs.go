@@ -61,6 +61,11 @@ const (
 	maxSubFrameLength = subFrameLengthMS * maxFSKHz   // MAX_SUB_FRAME_LENGTH (80)
 	outBufLength      = maxFrameLength + 2*maxSubFrameLength
 
+	// maxLTPMemLength has no C define: ltp_mem_length = LTP_MEM_LENGTH_MS * fs_kHz
+	// (decoder_set_fs.c:73) peaks at MAX_FS_KHZ. It sizes the per-frame LTP
+	// buffers of decode_core and the PLC.
+	maxLTPMemLength = ltpMemLengthMS * maxFSKHz // 320
+
 	// QUANT_LEVEL_ADJUST_Q10 (define.h): excitation quantization-level adjustment.
 	quantLevelAdjustQ10 = 80
 

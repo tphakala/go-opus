@@ -180,7 +180,10 @@ func plcUpdate(psDec *DecoderState, psDecCtrl *DecoderControl) {
 // shifted sum-of-squares, used to pick the lower-energy subframe as the random-noise
 // source for concealment.
 func plcEnergy(excQ14 []int32, prevGainQ10 [2]int32, subfrLength, nbSubfr int) (energy1 int32, shift1 int, energy2 int32, shift2 int) {
-	excBuf := make([]int16, 2*subfrLength)
+	/* ALLOC( exc_buf, 2*subfr_length, opus_int16 ) (PLC.c:199) */
+	excBufLen := 2 * subfrLength
+	var excBufArr [2 * maxSubFrameLength]int16
+	excBuf := excBufArr[:excBufLen:excBufLen]
 	/* Find random noise component */
 	/* Scale previous excitation signal */
 	for k := 0; k < 2; k++ {
@@ -212,8 +215,12 @@ func plcConceal(psDec *DecoderState, psDecCtrl *DecoderControl, frame []int16) {
 	psPLC := &psDec.SPLC
 	var prevGainQ10 [2]int32
 
-	sLTPQ14 := make([]int32, psDec.LtpMemLength+psDec.FrameLength)
-	sLTP := make([]int16, psDec.LtpMemLength)
+	/* ALLOC( sLTP_Q14, ... ) (PLC.c:245) and ALLOC( sLTP, ... ) (PLC.c:250) */
+	sLTPQ14Len := psDec.LtpMemLength + psDec.FrameLength
+	var sLTPQ14Arr [maxLTPMemLength + maxFrameLength]int32
+	sLTPQ14 := sLTPQ14Arr[:sLTPQ14Len:sLTPQ14Len]
+	var sLTPArr [maxLTPMemLength]int16
+	sLTP := sLTPArr[:psDec.LtpMemLength:psDec.LtpMemLength]
 
 	prevGainQ10[0] = silkmath.Silk_RSHIFT(psPLC.PrevGainQ16[0], 6)
 	prevGainQ10[1] = silkmath.Silk_RSHIFT(psPLC.PrevGainQ16[1], 6)

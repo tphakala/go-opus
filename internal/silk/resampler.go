@@ -69,9 +69,14 @@ const (
 	silkResamplerMaxIIROrder = 6  // SILK_RESAMPLER_MAX_IIR_ORDER
 )
 
-// Inner-loop batch size (silk/resampler_private.h). RESAMPLER_MAX_FS_KHZ and
-// RESAMPLER_MAX_BATCH_SIZE_IN are compile-time only in C and not needed here.
-const resamplerMaxBatchSizeMS = 10 // RESAMPLER_MAX_BATCH_SIZE_MS
+// Inner-loop batch size (silk/resampler_private.h). RESAMPLER_MAX_BATCH_SIZE_IN
+// bounds BatchSize for every ResamplerInit configuration, so it sizes the
+// down_FIR stack buffer.
+const (
+	resamplerMaxBatchSizeMS = 10                                          // RESAMPLER_MAX_BATCH_SIZE_MS
+	resamplerMaxFSKHz       = 48                                          // RESAMPLER_MAX_FS_KHZ
+	resamplerMaxBatchSizeIn = resamplerMaxBatchSizeMS * resamplerMaxFSKHz // RESAMPLER_MAX_BATCH_SIZE_IN
+)
 
 // Resampler function selectors (silk/resampler.c). USE_silk_resampler_private_down_FIR
 // is reached on the decoder path for the down-sampling rate pairs.

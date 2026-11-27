@@ -72,7 +72,10 @@ func DecodeFrame(psDec *DecoderState, psRangeDec *rangecoding.Decoder, pOut []in
 	if lostFlag == flagDecodeNormal ||
 		(lostFlag == flagDecodeLBRR && psDec.LBRRFlags[psDec.NFramesDecoded] == 1) {
 		pulsesLen := (L + shellCodecFrameLength - 1) & ^(shellCodecFrameLength - 1)
-		pulses := make([]int16, pulsesLen)
+		/* ALLOC( pulses, ... ) (decode_frame.c:78); MAX_FRAME_LENGTH is a
+		   multiple of SHELL_CODEC_FRAME_LENGTH, so it bounds the rounded length */
+		var pulsesArr [maxFrameLength]int16
+		pulses := pulsesArr[:pulsesLen:pulsesLen]
 		/*********************************************/
 		/* Decode quantization indices of side info  */
 		/*********************************************/

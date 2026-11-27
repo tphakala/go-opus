@@ -1,11 +1,16 @@
-package opus
+package opus_test
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/tphakala/go-opus/opus"
 )
 
 // mallocsUntilZero runs prepare and then the measured function it returns, up to
@@ -35,6 +40,28 @@ func mallocsUntilZero(prepare func() (measured func())) []uint64 {
 	return counts
 }
 
+// requireDecodeAllocatesNothing builds a fresh rate Hz, ch-channel Decoder for
+// each mallocsUntilZero attempt and fails t unless run decodes with it without
+// an error and allocates nothing in at least one attempt. what names the decoded
+// sequence in the failure message.
+func requireDecodeAllocatesNothing(t *testing.T, rate, ch int, what string, run func(*opus.Decoder) error) {
+	t.Helper()
+	var runErr error
+	counts := mallocsUntilZero(func() func() {
+		d, err := opus.NewDecoder(rate, ch)
+		if err != nil {
+			t.Fatalf("NewDecoder: %v", err)
+		}
+		return func() { runErr = run(d) }
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if counts[len(counts)-1] != 0 {
+		t.Errorf("decoding %s from the first Decode allocated %v times (one count per attempt), want 0 in at least one attempt", what, counts)
+	}
+}
+
 // celtAllocPackets returns a CELT packet sequence that reaches every decode
 // scratch buffer, with nil entries for lost frames: noise and impulse trains at
 // every frame duration from 2.5 to 120 ms (each LM, transient and non-transient
@@ -45,7 +72,7 @@ func mallocsUntilZero(prepare func() (measured func())) []uint64 {
 func celtAllocPackets(t *testing.T) [][]byte {
 	t.Helper()
 	const ch = 2
-	enc, err := NewEncoder(EncoderConfig{SampleRate: 48000, Channels: ch, DTX: true})
+	enc, err := opus.NewEncoder(opus.EncoderConfig{SampleRate: 48000, Channels: ch, DTX: true})
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)
 	}
@@ -123,31 +150,205 @@ func TestDecoderCELTAllocatesNothing(t *testing.T) {
 			rate := row.rate
 			pcm := make([]int16, rate/1000*120) // 120 ms, mono
 			lost := pcm[:rate/50]               // 20 ms of concealment per lost packet
-			var decodeErr error
-			counts := mallocsUntilZero(func() func() {
-				d, err := NewDecoder(rate, 1)
-				if err != nil {
-					t.Fatalf("NewDecoder: %v", err)
-				}
-				return func() {
-					for _, p := range pkts {
-						out := pcm
-						if p == nil {
-							out = lost
-						}
-						if _, err := d.Decode(p, out); err != nil {
-							decodeErr = err
-							return
-						}
+			requireDecodeAllocatesNothing(t, rate, 1, fmt.Sprintf("%d packets", len(pkts)), func(d *opus.Decoder) error {
+				for i, p := range pkts {
+					out := pcm
+					if p == nil {
+						out = lost
+					}
+					if _, err := d.Decode(p, out); err != nil {
+						return fmt.Errorf("packet %d Decode: %w", i, err)
 					}
 				}
+				return nil
 			})
-			if decodeErr != nil {
-				t.Fatalf("Decode: %v", decodeErr)
+		})
+	}
+}
+
+// silkAllocStep is one call of the SILK and hybrid allocation sequence.
+type silkAllocStep struct {
+	packet []byte // nil or empty for a lost packet
+	lossMS int    // concealed duration of a lost packet (20 or 5 ms); 0 decodes into the whole buffer
+	fec    bool   // conceal the lost frame before packet from its in-band FEC first
+}
+
+// silkAllocSteps returns a fixed SILK, hybrid and CELT call sequence that reaches
+// every per-frame buffer of the SILK decoder and of the mode-switching layer
+// above it. SILK and hybrid packets are a valid code 0 TOC with a seeded random
+// payload; CELT packets come from the encoder. Only fixed-bound IntN calls are
+// used, so the bytes are the same on every architecture. Events that depend on
+// random bits (voiced frames, LBRR flags, SILK-only redundancy and its
+// direction) get at least 10 chances; a mode boundary that must not carry
+// redundancy uses a SILK packet with a 2-byte frame, which is too short for the
+// redundancy flag (opus_decoder.c ec_tell check) yet not a PLC marker.
+//
+// Which group reaches which path (checked with a coverage profile of this test;
+// rerun that check after changing the seed or the groups):
+//  1. 40 SILK packets: DecodeCore with voiced and unvoiced frames, DecodeFrame,
+//     the API buffers of silk Decoder.Decode, the resamplers (LBRR frames occur).
+//  2. Losses, an empty packet, a TOC-only (DTX) packet and a 5 ms loss: the SILK
+//     PLC and CNG buffers and the 10 ms SILK buffer of a short decode.
+//  3. (loss, SILK packet) pairs concealed with DecodeFEC: the LBRR decode and
+//     the FEC completion in opus_decode_native.
+//  4. (short SILK packet, CELT packet): SILK to CELT transition and its nested
+//     SILK PLC.
+//  5. (CELT packet, short SILK packet): non-redundant CELT to SILK transition and
+//     its nested CELT PLC.
+//  6. Long SILK packets: SILK-only redundancy in both directions.
+//  7. Hybrid packets, then (hybrid packet, short SILK packet): hybrid decode and
+//     the hybrid to SILK fade that decodes the static silence frame.
+//  8. CELT, then hybrid (CELT to hybrid), two losses and one more SILK packet.
+func silkAllocSteps(t *testing.T) []silkAllocStep {
+	t.Helper()
+	r := rand.New(rand.NewPCG(119, 1))
+	enc, err := opus.NewEncoder(opus.EncoderConfig{SampleRate: 48000, Channels: 2})
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	encBuf := make([]byte, 4000)
+	celt := func() []byte {
+		pcm := make([]int16, 960*2)
+		for i := range pcm {
+			pcm[i] = int16(r.IntN(20000) - 10000)
+		}
+		nb, err := enc.Encode(pcm, encBuf)
+		if err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+		return bytes.Clone(encBuf[:nb])
+	}
+	// packet returns a code 0 packet with a TOC config in [cfgLo, cfgLo+cfgN)
+	// (0..11 SILK NB/MB/WB at 10 to 60 ms, 12..15 hybrid), random stereo flag
+	// and a random payload of minLen to maxLen bytes.
+	packet := func(cfgLo, cfgN, minLen, maxLen int) []byte {
+		cfg := cfgLo + r.IntN(cfgN)
+		stereo := r.IntN(2)
+		p := make([]byte, 1+minLen+r.IntN(maxLen-minLen+1))
+		p[0] = byte(cfg<<3 | stereo<<2)
+		for i := 1; i < len(p); i++ {
+			p[i] = byte(r.IntN(256))
+		}
+		return p
+	}
+	silk := func(minLen, maxLen int) []byte { return packet(0, 12, minLen, maxLen) }
+	hybrid := func(minLen, maxLen int) []byte { return packet(12, 4, minLen, maxLen) }
+	shortSILK := func() []byte { return silk(2, 2) }
+
+	var steps []silkAllocStep
+	add := func(p []byte) { steps = append(steps, silkAllocStep{packet: p}) }
+	lose := func(ms int) { steps = append(steps, silkAllocStep{lossMS: ms}) }
+
+	for range 40 { // group 1
+		add(silk(20, 80))
+	}
+	lose(20) // group 2
+	lose(20)
+	lose(20)
+	steps = append(steps, silkAllocStep{packet: []byte{}, lossMS: 20})
+	add(silk(0, 0)) // TOC only: DTX
+	lose(5)
+	for range 10 { // group 3
+		steps = append(steps, silkAllocStep{packet: silk(20, 80), fec: true})
+	}
+	for range 5 { // group 4
+		add(shortSILK())
+		add(celt())
+	}
+	for range 5 { // group 5
+		add(celt())
+		add(shortSILK())
+	}
+	for range 10 { // group 6
+		add(silk(120, 250))
+	}
+	for range 20 { // group 7
+		add(hybrid(40, 200))
+	}
+	for range 5 {
+		add(hybrid(40, 200))
+		add(shortSILK())
+	}
+	for range 3 { // group 8
+		add(celt())
+	}
+	for range 5 {
+		add(hybrid(40, 200))
+	}
+	lose(20)
+	lose(20)
+	add(silk(20, 80))
+	return steps
+}
+
+// TestDecoderSILKHybridAllocatesNothing pins that SILK and hybrid decoding
+// allocates nothing from a fresh decoder's first Decode, including packet loss,
+// short concealment, CNG, DTX, in-band FEC, SILK-only redundancy and every mode
+// transition. The rows cover the largest buffers (48 kHz stereo, which also runs
+// the IIR_FIR upsampler) and the down_FIR resampler at 12 kHz mono (stereo
+// packets into a mono decoder) and at 8 kHz stereo. Before the fix this
+// sequence took 2,447 to 2,845 allocations per row.
+func TestDecoderSILKHybridAllocatesNothing(t *testing.T) {
+	steps := silkAllocSteps(t)
+	for _, row := range []struct {
+		name     string
+		rate, ch int
+	}{
+		{"48kHz_stereo", 48000, 2},
+		{"12kHz_mono", 12000, 1},
+		{"8kHz_stereo", 8000, 2},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			rate, ch := row.rate, row.ch
+			pcm := make([]int16, rate/1000*120*ch) // 120 ms
+			fecPCM := pcm[:3*rate/50*ch]           // 60 ms covers any SILK packet
+			requireDecodeAllocatesNothing(t, rate, ch, fmt.Sprintf("%d steps", len(steps)), func(d *opus.Decoder) error {
+				for i, s := range steps {
+					out := pcm
+					if s.lossMS != 0 {
+						out = pcm[:rate/1000*s.lossMS*ch]
+					}
+					if s.fec {
+						if _, err := d.DecodeFEC(s.packet, fecPCM); err != nil {
+							return fmt.Errorf("step %d DecodeFEC: %w", i, err)
+						}
+					}
+					if _, err := d.Decode(s.packet, out); err != nil {
+						return fmt.Errorf("step %d Decode: %w", i, err)
+					}
+				}
+				return nil
+			})
+		})
+	}
+}
+
+// TestDecoderRFCVectorsAllocateNothing pins that decoding the SILK, hybrid and
+// mode-transition RFC vectors allocates nothing from a fresh decoder's first
+// Decode. Real encoder output reaches paths that random payloads reach only by
+// chance, hybrid-mode redundancy in particular (vectors 10 and 12). The
+// CELT-only vectors 01, 07 and 11 are not decoded here;
+// TestDecoderCELTAllocatesNothing pins CELT decoding on encoder-made packets.
+func TestDecoderRFCVectorsAllocateNothing(t *testing.T) {
+	if _, err := os.Stat(vectorsDir); err != nil {
+		t.Skipf("test vectors not present (%v); run scripts/fetch-vectors.sh", err)
+	}
+	for _, name := range []string{"02", "03", "04", "05", "06", "08", "09", "10", "12"} {
+		t.Run("vector"+name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(vectorsDir, "testvector"+name+".bit"))
+			if err != nil {
+				t.Fatalf("read vector: %v", err)
 			}
-			if counts[len(counts)-1] != 0 {
-				t.Errorf("decoding %d packets from the first Decode allocated %v times (one count per attempt), want 0 in at least one attempt", len(pkts), counts)
-			}
+			recs := readBitRecords(t, data)
+			pcm := make([]int16, 5760*2) // 120 ms at 48 kHz stereo: max packet
+			requireDecodeAllocatesNothing(t, 48000, 2, fmt.Sprintf("%d packets", len(recs)), func(d *opus.Decoder) error {
+				for i, rec := range recs {
+					if _, err := d.Decode(rec.packet, pcm); err != nil {
+						return fmt.Errorf("packet %d Decode: %w", i, err)
+					}
+				}
+				return nil
+			})
 		})
 	}
 }

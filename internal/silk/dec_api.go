@@ -265,7 +265,11 @@ func (psDec *Decoder) Decode(
 	   we can delay allocating the temp buffer until after the SILK peak stack
 	   usage. We need to use a < and not a <= because of the two extra samples. */
 	tmpStride := channelState[0].FrameLength + 2
-	samplesOut1TmpStorage := make([]int16, decControl.NChannelsInternal*tmpStride)
+	/* ALLOC( samplesOut1_tmp_storage1, ... ) (dec_API.c:319), at most two
+	   internal channels of MAX_FRAME_LENGTH + 2 */
+	samplesOut1TmpLen := decControl.NChannelsInternal * tmpStride
+	var samplesOut1TmpArr [decoderNumChannels * (maxFrameLength + 2)]int16
+	samplesOut1TmpStorage := samplesOut1TmpArr[:samplesOut1TmpLen:samplesOut1TmpLen]
 	var samplesOut1Tmp [2][]int16
 	samplesOut1Tmp[0] = samplesOut1TmpStorage[0:tmpStride]
 	if decControl.NChannelsInternal == 2 {
@@ -326,7 +330,10 @@ func (psDec *Decoder) Decode(
 		silkmath.Silk_SMULBB(int32(channelState[0].FsKHz), 1000))
 
 	/* Set up pointers to temp buffers */
-	samplesOut2Tmp := make([]int16, nSamplesOut)
+	/* ALLOC( samplesOut2_tmp, *nSamplesOut, opus_int16 ) (dec_API.c:382): at most
+	   one 20 ms frame at the 48 kHz API rate checked above */
+	var samplesOut2TmpArr [maxFrameLengthMS * maxAPIFSKHz]int16
+	samplesOut2Tmp := samplesOut2TmpArr[:nSamplesOut:nSamplesOut]
 	resampleOutPtr := samplesOut2Tmp
 
 	for n = 0; n < silkmath.Silk_min_int(decControl.NChannelsAPI, decControl.NChannelsInternal); n++ {
