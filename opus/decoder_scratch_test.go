@@ -19,10 +19,9 @@ import (
 // suites instead. The 24 kHz case decodes with downsample=2, reaching the
 // deemphasis scratch that 48 kHz decoding never allocates.
 //
-// The dirty stream MUST use a frame size >= the real stream's: alloc reallocates
-// (freshly zeroed) when a call asks for more than any previous one, so a smaller
-// dirty frame would zero every N-proportional buffer on the first real frame,
-// erasing the carried values exactly when they matter.
+// The decoder's scratch is presized when it is built, so no window is ever
+// reallocated (and freshly zeroed): the dirty stream's values reach every window
+// whatever the two streams' frame sizes.
 func TestDecoderScratchCarryover(t *testing.T) {
 	for _, ch := range []int{1, 2} {
 		for _, rate := range []int{48000, 24000} {
@@ -42,9 +41,8 @@ func TestDecoderScratchCarryover(t *testing.T) {
 					pkts[i] = buf[:n]
 				}
 
-				// A second stream with different content (same 960-sample frame
-				// size; see the doc comment for why it must not be smaller), used
-				// only to leave its values behind in the reused decoder's pool.
+				// A second stream with different content, used only to leave its
+				// values behind in the reused decoder's pool.
 				dirtyEnc, err := NewEncoder(EncoderConfig{SampleRate: 48000, Channels: ch, Bitrate: 64000 * ch})
 				if err != nil {
 					t.Fatalf("NewEncoder(dirty): %v", err)

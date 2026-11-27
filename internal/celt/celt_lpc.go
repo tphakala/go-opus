@@ -132,8 +132,13 @@ func celtLPC(lpcOut []int16, ac []int32, p int) {
 // ord samples of history before xOff. y receives N outputs. (The C's num is
 // reversed into rnum internally; the resulting integer MAC sum is
 // order-independent, so this scalar form is bit-identical to the unrolled C.)
+//
+// rnum is C's ALLOC(rnum, ord, opus_val16), a fixed array of CELT_LPC_ORDER
+// entries so the lost-frame path stays allocation-free: the decoder always passes
+// CELT_LPC_ORDER (celtDecodeLost), and a larger ord panics on the slice.
 func celtFir(x []int16, xOff int, num []int16, y []int16, N, ord int) {
-	rnum := make([]int16, ord)
+	var rnumBuf [celtLpcOrder]int16
+	rnum := rnumBuf[:ord]
 	for i := 0; i < ord; i++ {
 		rnum[i] = num[ord-i-1]
 	}
@@ -152,8 +157,12 @@ func celtFir(x []int16, xOff int, num []int16, y []int16, N, ord int) {
 // recent first); it is updated on return the way the non-SMALL_FOOTPRINT C leaves
 // it (the truncated last outputs). x and y may alias the same slice (the PLC
 // filters in place).
+//
+// m is the working copy of the ord-sample output history that the SMALL_FOOTPRINT
+// C updates in mem directly; a fixed array for the same reason as celtFir's rnum.
 func celtIir(x []int32, den []int16, y []int32, N, ord int, mem []int16) {
-	m := make([]int16, ord)
+	var mBuf [celtLpcOrder]int16
+	m := mBuf[:ord]
 	copy(m, mem[:ord])
 	for i := 0; i < N; i++ {
 		sum := x[i]
@@ -264,7 +273,8 @@ func CeltLPC(ac []int32, p int) []int16 {
 }
 
 // CeltFir runs celtFir: xfull holds ord history samples then N samples (length
-// N+ord); it returns the N filtered outputs.
+// N+ord); it returns the N filtered outputs. ord must not exceed CELT_LPC_ORDER
+// (24), the size of celtFir's fixed coefficient array; a larger ord panics.
 func CeltFir(xfull []int16, N, ord int, num []int16) []int16 {
 	y := make([]int16, N)
 	celtFir(xfull, ord, num, y, N, ord)
@@ -272,7 +282,9 @@ func CeltFir(xfull []int16, N, ord int, num []int16) []int16 {
 }
 
 // CeltIir runs celtIir on x (length N) with den/mem (length ord) and returns the
-// N outputs and the updated mem (a fresh copy; the input mem is not mutated).
+// N outputs and the updated mem (a fresh copy; the input mem is not mutated). ord
+// must not exceed CELT_LPC_ORDER (24), the size of celtIir's fixed history array;
+// a larger ord panics.
 func CeltIir(x []int32, den []int16, N, ord int, mem []int16) ([]int32, []int16) {
 	y := make([]int32, N)
 	memOut := append([]int16(nil), mem...)

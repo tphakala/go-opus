@@ -45,18 +45,19 @@ import (
 //	                    parse frame table all became decoder-held pooled storage.
 //
 // BenchmarkEncode and BenchmarkDecode now report 0 allocs/op on every config.
-// BenchmarkDecode makes one untimed warm-up pass over its packet corpus so the
-// pools' first-use growth lands outside the timed loop and 0 B/op holds at any
-// -benchtime. BenchmarkEncode deliberately has no warm-up pass (it would settle
+// The decode scratch is presized when the Decoder is built, so BenchmarkDecode
+// shows 0 B/op at any -benchtime; its untimed warm-up pass over the packet corpus
+// is no longer needed for that and is kept so the timed loop starts from a primed
+// decoder. BenchmarkEncode deliberately has no warm-up pass (it would settle
 // the VBR reservoir into a different trajectory and shift ns/op by several
 // percent, redefining the published numbers), so at a tiny explicit -benchtime
 // it can show a residual B/op (up to a couple of kB/op at -benchtime=1x, gone at
 // realistic N) from first-use pool growth; a few encode scratch sizes also depend
 // on cross-frame state and keep growing briefly. The
 // public API never allocated (Encode writes the caller's []byte, Decode the caller's
-// []int16). The pool is one buffer per codec instance, sized by (mode, channels,
-// frameSize), so after the first largest frame nothing reallocates. See
-// internal/celt/scratch.go.
+// []int16). The pool is one buffer per codec instance: decode scratch is presized
+// when the Decoder is built, so decoding never reallocates, and encode scratch
+// grows to the largest frame. See internal/celt/scratch.go.
 //
 // THE ZEROING CONTRACT is what keeps this bit-exact. A C stack ALLOC is uninitialised,
 // a Go make() zeroes, and a pooled buffer carries the previous frame's values. Every
@@ -188,7 +189,8 @@ func BenchmarkDecode(b *testing.B) {
 				}
 				pcm := make([]int16, frameSize*ch)
 
-				// Untimed full-corpus pool warm-up; see BenchmarkEncode.
+				// Untimed full-corpus warm-up, so the timed loop starts from a primed
+				// decoder; see the doc block.
 				for _, p := range pkts {
 					if _, err := dec.Decode(p, pcm); err != nil {
 						b.Fatalf("Decode: %v", err)

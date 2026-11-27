@@ -12,6 +12,12 @@
 // bits1/bits2/thresh/trimOffset (clt_compute_allocation), and mdctF2 (the MDCT).
 // All of them are part of the decode zeroing audit exactly like the dec* fields.
 //
+// A Decoder's window sizes depend on the bitstream, so NewDecoder presizes every
+// decode field except decDeemph to its worst case (presizeDecode, at the end of
+// this file, has the bounds and the rule for a new field), SetDownsample presizes
+// decDeemph for sub-48 kHz output, and decoding never grows the pool. An
+// Encoder's fields grow to the largest request seen.
+//
 // THE ZEROING CONTRACT: the one thing that can silently break bit-exactness here.
 // Three behaviours must not be confused:
 //
@@ -65,8 +71,9 @@
 //	                  the post-rotation reads them; shared with the forward MDCT, which a
 //	                  Decoder never runs (Encoder and Decoder own separate scratch).
 //	decDeemph         written [0,N) per channel before the downsample read (downsample>1).
-//	                  Only allocated for sub-48 kHz output; TestDecoderScratchCarryover
-//	                  decodes at 24 kHz so the poison run reaches it.
+//	                  Only used, and presized by SetDownsample, for sub-48 kHz output;
+//	                  TestDecoderScratchCarryover decodes at 24 kHz so the poison run
+//	                  reaches it.
 //
 //	The PLC buffers (lost-frame path only) follow the same rule:
 //	decExcBuf         celtDecodeLost's per-channel copy loop rewrites all MAX_PERIOD+
@@ -215,7 +222,7 @@ type scratch struct {
 	decX             []int32 // :1457 X,              C*N
 	decCollapseMasks []byte  // :1487 collapse_masks, C*nbEBands
 	decFreq          []int32 // :432  celt_synthesis freq, N
-	decDeemph        []int32 // :335  deemphasis scratch,  N (downsample>1 only)
+	decDeemph        []int32 // :335  deemphasis scratch,  N (downsample>1 only; presized by SetDownsample)
 
 	// PLC (packet-loss concealment) working buffers: celtDecodeLost (celt_decode_lost)
 	// and the two helpers it calls, celtPlcPitchSearch (celt_plc_pitch_search) and
@@ -229,4 +236,58 @@ type scratch struct {
 	decFirTmp     []int16 // celt_decode_lost fir_tmp,       exc_length
 	decLpPitchBuf []int16 // celt_plc_pitch_search lp_pitch_buf, DECODE_BUFFER_SIZE>>1
 	decEtmp       []int32 // prefilter_and_fold etmp,        overlap
+}
+
+// presizeDecode sizes every decode-path field for the largest window any
+// bitstream can ask of it, so a Decoder's alloc calls never grow the pool. The
+// sizes depend on the bitstream (PVQ leaf width, transient flag, coded channel
+// count, LM, PLC pitch), so a lazily grown pool would allocate on whichever later
+// frame first needs more. Each bound is the use site's C expression at its worst
+// case: LM = maxLM, start = 0, shift = 0 and C = 2 (CELT_SET_CHANNELS may switch a
+// mono decoder to two coded channels on any packet). A new decode field needs a
+// line here as well as alloc at its use site. Not presized, because decode never
+// asks for them: XSave..normSave2 and lowbandScratch (quant_all_bands gets
+// resynthAlloc = 0 on decode), bytesSave and pvqY/pvqSignx/pvqIy (encode only),
+// and the encode groups. decDeemph is presized by SetDownsample, since only a
+// sub-48 kHz decoder uses it.
+func (sc *scratch) presizeDecode(m *celtMode) {
+	const C = 2
+	nb := m.nbEBands
+	M := 1 << m.maxLM
+	N := m.shortMdctSize << m.maxLM
+	widest := 0 // widest band in bins at maxLM: (eBands[i+1]-eBands[i])<<LM
+	for i := 0; i < nb; i++ {
+		widest = max(widest, (int(m.eBands[i+1])-int(m.eBands[i]))<<m.maxLM)
+	}
+	// The pitch_search arguments of celt_plc_pitch_search (celtPlcPitchSearch).
+	pitchLen := decodeBufferSize - plcPitchLagMax
+	maxPitch := plcPitchLagMax - plcPitchLagMin
+
+	alloc(&sc.decIy, widest)                      // algUnquant iy, N <= band width
+	alloc(&sc.hadamardTmp, widest)                // (de)interleaveHadamard tmp, N0*stride = band width
+	alloc(&sc.norm, C*M*int(m.eBands[nb-1]))      // quantAllBands _norm, C*(M*eBands[nbEBands-1] - M*eBands[start])
+	alloc(&sc.mdctF2, m.mdct.n>>2)                // cltMDCTBackward f2, N4 = (n>>shift)>>2
+	alloc(&sc.bits1, nb)                          // cltComputeAllocation bits1, len = nbEBands
+	alloc(&sc.bits2, nb)                          // cltComputeAllocation bits2
+	alloc(&sc.thresh, nb)                         // cltComputeAllocation thresh
+	alloc(&sc.trimOffset, nb)                     // cltComputeAllocation trim_offset
+	alloc(&sc.decTfRes, nb)                       // DecodeWithEC tf_res, nbEBands
+	alloc(&sc.decCap, nb)                         // DecodeWithEC cap
+	alloc(&sc.decOffsets, nb)                     // DecodeWithEC offsets
+	alloc(&sc.decFineQuant, nb)                   // DecodeWithEC fine_quant
+	alloc(&sc.decPulses, nb)                      // DecodeWithEC pulses
+	alloc(&sc.decFinePriority, nb)                // DecodeWithEC fine_priority
+	alloc(&sc.decX, C*N)                          // DecodeWithEC X and celtDecodeLost (noise PLC), C*N
+	alloc(&sc.decCollapseMasks, C*nb)             // DecodeWithEC collapse_masks, C*nbEBands
+	alloc(&sc.decFreq, N)                         // celtSynthesis freq, N
+	alloc(&sc.decEtmp, m.overlap)                 // foldPrefilter etmp, overlap
+	alloc(&sc.decLpPitchBuf, decodeBufferSize>>1) // celtPlcPitchSearch lp_pitch_buf
+	alloc(&sc.decExcBuf, maxPeriodC+celtLpcOrder) // celtDecodeLost _exc
+	alloc(&sc.decFirTmp, maxPeriodC)              // celtDecodeLost fir_tmp, IMIN(2*pitch_index, MAX_PERIOD)
+	alloc(&sc.xLp4, pitchLen>>2)                  // pitchSearch x_lp4, len>>2
+	alloc(&sc.yLp4, (pitchLen+maxPitch)>>2)       // pitchSearch y_lp4, (len+max_pitch)>>2
+	alloc(&sc.pitchXcorr, maxPitch>>1)            // pitchSearch xcorr, max_pitch>>1
+	// celtAutocorr xx, n: DECODE_BUFFER_SIZE>>1 from pitchDownsample, MAX_PERIOD
+	// from celtDecodeLost.
+	alloc(&sc.autocorrXX, max(decodeBufferSize>>1, maxPeriodC))
 }
