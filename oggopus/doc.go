@@ -17,8 +17,8 @@
 // never ends is not read forever. The ceiling on one-shot decoded output,
 // ErrDecodeLimit, is separate.
 //
-// Once the first Read has decoded a packet, reading a CELT stream allocates
-// nothing, with the exceptions NewDecoder describes.
+// Once the first Read has decoded a packet, reading a CELT stream that decodes
+// without error allocates nothing, with the exceptions NewDecoder describes.
 //
 // # Channel mapping families
 //

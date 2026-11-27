@@ -108,20 +108,22 @@ type Decoder struct {
 // stream, about 26 KiB more per Decoder for a channel mapping family other than 0,
 // and 23,040 bytes per channel. Reset describes when it reuses them and when it rebuilds them.
 // The page and packet buffers, about 86 KiB, are allocated here too and kept
-// between packets, across seeks and across Reset. A packet continued from an
-// earlier page that is longer than 8 KiB, and than any such packet before it,
-// grows the packet buffers to fit; the buffers kept stay under about 450 KiB.
-// An audio packet longer than two page bodies (about 127 KiB), which only a
-// multistream or padded stream has, needs buffers of its own size until the
-// Decoder has read past it, at most the limit described for ErrPacketTooLarge.
-// Such buffers may then be released, and the next continued packet allocates
-// new ones until Reset, or a seek that starts reading at another page, restores
-// the initial ones. Once the first Read has decoded a packet, Read and WriteTo
-// allocate nothing for a CELT stream, also after SeekToSample or
-// SeekToSampleExact restart it at the first audio page, except when a continued
-// packet grows the buffers as above. OpusHead and OpusTags are cut as the
-// package documentation describes, which also covers the header packet size and
-// the channel mapping families that make NewDecoder fail.
+// between packets, across seeks and across Reset; an OpusHead or OpusTags
+// packet over 8 KiB grows the packet buffers when it is read. A packet
+// continued from an earlier page that is longer than 8 KiB, and than any such
+// packet before it, grows the packet buffers to fit; the buffers kept stay
+// under about 450 KiB. An audio packet longer than two page bodies (about 127
+// KiB), which only a multistream or padded stream has, needs buffers of its own
+// size until the Decoder has read past it, at most the limit described for
+// ErrPacketTooLarge. Such buffers may then be released, and the next continued
+// packet allocates new ones until Reset, or a seek that starts reading at
+// another page, restores the initial ones. Once the first Read has decoded a
+// packet, Read and WriteTo calls that return no error allocate nothing for a
+// CELT stream, also after SeekToSample or SeekToSampleExact restart it at the
+// first audio page, except when a continued packet grows the buffers as above.
+// OpusHead and OpusTags are cut as the package documentation describes, which
+// also covers the header packet size and the channel mapping families that make
+// NewDecoder fail.
 // Length and the seek methods read through a further window of about 128 KiB,
 // allocated by the first such call and kept across Reset.
 //
