@@ -260,8 +260,9 @@ func (d *Decoder) Length() (int64, error) {
 // on the last page that ends at least 1.28 s (61440 samples) before the target,
 // resets the codec and decodes and discards up to the target, all before
 // returning. The next Read starts at exactly sampleIndex. For a target too close
-// to the start for such a page to exist, the decoder restarts at the beginning and
-// the output is bit-identical to sequential decoding.
+// to the start for such a page to exist, the decoder restarts at the first audio
+// page and the output is bit-identical to sequential decoding. A restart does not
+// read the header pages again: they were read when the source was bound.
 //
 // Otherwise the codec state is rebuilt from the pre-roll alone. The output usually
 // equals sequential decoding exactly, but this is not guaranteed: on some
@@ -342,8 +343,8 @@ func (d *Decoder) SeekToSample(sampleIndex int64) (int64, error) {
 // next whole sample Read would return (a sample the caller has partly read counts
 // as behind it) and nothing has disturbed the codec state since the decoder was
 // bound or last seeked exactly: no SeekToSample, no seek to the end of the stream,
-// no failed seek and no read error. Otherwise it restarts at the first audio page
-// and decodes from there. Either way the cost is
+// no failed seek and no read error. Otherwise it restarts at the first audio page,
+// as SeekToSample does, and decodes from there. Either way the cost is
 // linear in the samples decoded, up to everything before sampleIndex, unlike
 // SeekToSample, which decodes a bounded pre-roll. The result, whether output,
 // error or position, does not depend on earlier calls.
@@ -388,19 +389,23 @@ func (d *Decoder) SeekToSampleExact(sampleIndex int64) (int64, error) {
 }
 
 // rewind points the container reader at the first audio page of the bound source,
-// as a decoder that has just been bound to it.
+// as a decoder that has just been bound to it. It restarts d.cr in place: the
+// header pages were read and validated when the source was bound, so they are not
+// read again, and the source sees one Seek to the first audio page. d.cr keeps
+// its parsed headers whatever fails, so a later seek recovers from a failed one.
+//
+// A restart at sample 0 decodes nothing before the seek returns, so rewind reads
+// the start of the first audio page itself: a source that cannot be read there
+// fails the seek, which latches the error, instead of failing the next Read.
+// io.EOF is left for the next Read to report, as sequential decoding does.
 func (d *Decoder) rewind() error {
-	if _, err := d.rs.Seek(d.base, io.SeekStart); err != nil {
+	if _, err := d.rs.Seek(d.idx.audioStart, io.SeekStart); err != nil {
 		return err
 	}
-	d.br.Reset(d.rs)
-	// A fresh reader, not d.cr reset in place: a failed rebuild must leave d.cr
-	// intact for the landing seek that recovers from it.
-	cr, err := newContainerReader(d.br, nil)
-	if err != nil {
+	d.cr.restart(d.rs)
+	if _, err := d.cr.br.Peek(1); err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
-	d.cr = cr
 	return nil
 }
 

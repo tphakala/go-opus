@@ -143,8 +143,8 @@ func TestSeekToSampleExactMatchesSequential(t *testing.T) {
 
 // TestSeekToSampleExactRestartsOnlyWhenNeeded pins when SeekToSampleExact decodes
 // forward and when it restarts from the first audio page. The restart is the only
-// path that seeks the source to the stream start, so the recorded Seek calls show
-// which one ran, which a content comparison cannot (both are bit-identical).
+// path that seeks the source to the first audio page, so the recorded Seek calls
+// show which one ran, which a content comparison cannot (both are bit-identical).
 func TestSeekToSampleExactRestartsOnlyWhenNeeded(t *testing.T) {
 	stream := toneStream(t, 2, 20, 128000, 4*48000, 1100)
 	want := streamingDecode(t, stream)
@@ -188,8 +188,8 @@ func TestSeekToSampleExactRestartsOnlyWhenNeeded(t *testing.T) {
 			t.Fatalf("forward seek restarted: source seeks to %v", src.startSeek)
 		}
 		check(t, d, 50000)
-		if !slices.Equal(src.startSeek, []int64{0}) {
-			t.Fatalf("backward seek: source seeks to %v, want [0]", src.startSeek)
+		if !slices.Equal(src.startSeek, []int64{d.idx.audioStart}) {
+			t.Fatalf("backward seek: source seeks to %v, want [%d] (the first audio page)", src.startSeek, d.idx.audioStart)
 		}
 	})
 	t.Run("after SeekToSample restarts", func(t *testing.T) {
@@ -199,7 +199,7 @@ func TestSeekToSampleExactRestartsOnlyWhenNeeded(t *testing.T) {
 		}
 		src.startSeek = nil
 		check(t, d, 140000)
-		if !slices.Contains(src.startSeek, 0) {
+		if !slices.Contains(src.startSeek, d.idx.audioStart) {
 			t.Fatalf("seek after SeekToSample did not restart: source seeks to %v", src.startSeek)
 		}
 		// The restart puts the decoder back in sequence: a later target and a sample
@@ -223,7 +223,7 @@ func TestSeekToSampleExactRestartsOnlyWhenNeeded(t *testing.T) {
 		}
 		src.startSeek = nil
 		check(t, d, 1000)
-		if !slices.Contains(src.startSeek, 0) {
+		if !slices.Contains(src.startSeek, d.idx.audioStart) {
 			t.Fatalf("seek after a seek to the end did not restart: source seeks to %v", src.startSeek)
 		}
 	})
@@ -239,7 +239,7 @@ func TestSeekToSampleExactRestartsOnlyWhenNeeded(t *testing.T) {
 		src.failAll = false
 		src.startSeek = nil
 		check(t, d, 100000)
-		if !slices.Contains(src.startSeek, 0) {
+		if !slices.Contains(src.startSeek, d.idx.audioStart) {
 			t.Fatalf("seek after a failed seek did not restart: source seeks to %v", src.startSeek)
 		}
 	})

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -90,6 +91,20 @@ func FuzzContainerReader(f *testing.F) {
 	f.Add([]byte("OggS garbage"))
 	f.Add(oversizedPacketSeed(f))
 	f.Add(oversizedTagsSeed(f))
+	// Packets continued from one page and completed on the next, followed on that
+	// page by a packet that continues to the page after: the completed packet must
+	// not share memory with the fragment written after it.
+	p := &pager{t: f, serial: 0x1234, max: maxPageSegments}
+	p.add(testHead(1, 312).marshal(), 0)
+	p.flush(false)
+	p.add(opusTags{vendor: "v"}.marshal(), 0)
+	p.flush(false)
+	p.max = 3
+	for i, pk := range synthPackets(60) {
+		p.add(pk, int64((i+1)*960))
+	}
+	p.flush(true)
+	f.Add(p.out.Bytes())
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(data)), nil)
@@ -101,8 +116,15 @@ func FuzzContainerReader(f *testing.F) {
 			}
 			return
 		}
-		for range 4096 {
+		ref := refPackets(data)
+		for i := range 4096 {
 			p, err := cr.nextPacket()
+			if errors.Is(err, io.EOF) {
+				if i+2 != len(ref) {
+					t.Fatalf("stream ended after %d audio packets, the reference has %d", i, len(ref)-2)
+				}
+				return
+			}
 			if err != nil {
 				return
 			}
@@ -110,8 +132,58 @@ func FuzzContainerReader(f *testing.F) {
 			if len(p) > cr.limit {
 				t.Fatalf("packet of %d bytes, limit %d", len(p), cr.limit)
 			}
+			if i+2 >= len(ref) || !bytes.Equal(p, ref[i+2]) {
+				t.Fatalf("packet %d (%d bytes) differs from the reference reassembly", i, len(p))
+			}
 		}
 	})
+}
+
+// refPackets reassembles the packets of the logical stream in data, OpusHead and
+// OpusTags first, into owned copies, as a reference for the container reader. It
+// keeps the first maxHeaderPacketLen bytes of each header packet, drops a
+// fragment a page without the continued flag leaves dangling, and stops after the
+// end-of-stream page, at the first page that does not parse or belongs to
+// another stream, or at the end of data. It applies no size limit, so it agrees
+// with the reader only on the packets the reader returns without an error.
+func refPackets(data []byte) [][]byte {
+	var pkts [][]byte
+	var cur []byte
+	var serial uint32
+	for first := true; len(data) > 0; first = false {
+		pg, n, err := parsePage(data)
+		if err != nil {
+			return pkts
+		}
+		data = data[n:]
+		if first {
+			if pg.flags&flagBOS == 0 {
+				return pkts
+			}
+			serial = pg.serial
+		} else if pg.serial != serial {
+			return pkts
+		}
+		if pg.flags&flagContinued == 0 {
+			cur = nil
+		}
+		off := 0
+		for _, l := range pg.segTable {
+			cur = append(cur, pg.body[off:off+int(l)]...)
+			off += int(l)
+			if l < maxSegmentLen {
+				if len(pkts) < 2 {
+					cur = cur[:min(len(cur), maxHeaderPacketLen)]
+				}
+				pkts = append(pkts, cur)
+				cur = nil
+			}
+		}
+		if pg.flags&flagEOS != 0 {
+			return pkts
+		}
+	}
+	return pkts
 }
 
 // oversizedPacketSeed returns headers and a mono audio packet one byte over the

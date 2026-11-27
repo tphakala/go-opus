@@ -113,7 +113,8 @@ func readContainer(t *testing.T, r io.Reader) (cr *containerReader, packets [][]
 }
 
 // drainPackets returns copies of every remaining packet of cr. The copies are
-// required: packets alias the reader's arena, which the next page overwrites.
+// required: packets alias the reader's page buffer or arena, which the next page
+// overwrites.
 func drainPackets(t *testing.T, cr *containerReader) [][]byte {
 	t.Helper()
 	var got [][]byte
@@ -250,20 +251,50 @@ func TestContainerReleasesOversizedPacketBuffers(t *testing.T) {
 	if c := cap(cr.partial); c > maxReusedBuf {
 		t.Errorf("partial capacity %d after the large packet, want at most %d", c, maxReusedBuf)
 	}
+
+	// A packet left dangling (its next page does not continue it) is dropped by a
+	// page that starts a packet of its own, which must release the buffer too.
+	buf.Reset()
+	writeContainer(t, &buf, testStreamsHead(2, preSkip), opusTags{vendor: "v"}, nil, dur, 0)
+	cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(buf.Bytes())), nil)
+	if err != nil {
+		t.Fatalf("newContainerReader: %v", err)
+	}
+	full := bytes.Repeat([]byte{maxSegmentLen}, maxPageSegments)
+	for i := range 3 {
+		var flags headerType
+		if i > 0 {
+			flags = flagContinued
+		}
+		pg := page{flags: flags, serial: cr.serial, granule: granuleNone, segTable: full, body: make([]byte, maxPageBodyLen)}
+		if err := cr.processPage(&pg); err != nil {
+			t.Fatalf("processPage: %v", err)
+		}
+	}
+	if c := cap(cr.partial); c <= maxReusedBuf {
+		t.Fatalf("partial capacity %d after three full pages, want it above maxReusedBuf (%d)", c, maxReusedBuf)
+	}
+	pg := page{serial: cr.serial, granule: dur, segTable: []byte{17}, body: make([]byte, 17)}
+	if err := cr.processPage(&pg); err != nil {
+		t.Fatalf("processPage: %v", err)
+	}
+	if c := cap(cr.partial); c > maxReusedBuf {
+		t.Errorf("partial capacity %d after the dangling packet was dropped, want at most %d", c, maxReusedBuf)
+	}
 }
 
-// TestContainerDroppedArenaIsReleased pins that dropping an oversized arena
-// releases it. The page that completes the large packet also completes two small
-// ones; the later pages complete one packet each, so queue slots past the current
-// page's packets would keep the old arena reachable unless they are cleared. The
-// head has two streams, so the 200000-byte packet is within the audio packet limit.
+// TestContainerDroppedArenaIsReleased pins that a seek (repositionAt) after an
+// oversized packet releases the arena that holds it and restores the buffers'
+// initial capacity. The queue still holds the large packet, which aliases the
+// arena, so its slots keep the old arena reachable unless they are cleared. The
+// head has two streams, so the 200000-byte packet is within the audio packet
+// limit. No packet is left spanning pages, so partial holds only what
+// repositionAt gives it.
 func TestContainerDroppedArenaIsReleased(t *testing.T) {
 	pkts := [][]byte{
 		makeRamp(200000),
 		bytes.Repeat([]byte{0x11}, 17),
 		bytes.Repeat([]byte{0x22}, 17),
-		bytes.Repeat([]byte{0x33}, maxPageBodyLen),
-		bytes.Repeat([]byte{0x44}, maxPageBodyLen),
 	}
 	const dur, preSkip = 960, 312
 	var buf bytes.Buffer
@@ -277,27 +308,16 @@ func TestContainerDroppedArenaIsReleased(t *testing.T) {
 	if err != nil || len(first) != len(pkts[0]) {
 		t.Fatalf("first packet: %d bytes, err %v; want %d bytes", len(first), err, len(pkts[0]))
 	}
-	queued := len(cr.queue)
-	if queued < 2 {
-		t.Fatalf("the large packet's page queued %d packets, want the small ones too", queued)
-	}
 	if cap(cr.arena) <= maxReusedBuf {
 		t.Fatalf("arena capacity %d after the large packet, want it above maxReusedBuf (%d)", cap(cr.arena), maxReusedBuf)
 	}
 	old := weak.Make(&cr.arena[:1][0])
-	for {
-		if _, err := cr.nextPacket(); err != nil {
-			if !errors.Is(err, io.EOF) {
-				t.Fatalf("nextPacket: %v", err)
-			}
-			break
-		}
+	cr.repositionAt(bytes.NewReader(nil))
+	if c := cap(cr.arena); c > maxReusedBuf || c < minPacketBuf {
+		t.Fatalf("arena capacity %d after repositionAt, want the oversized one dropped and at least %d", c, minPacketBuf)
 	}
-	if cap(cr.arena) > maxReusedBuf {
-		t.Fatalf("arena capacity %d, want the oversized one dropped", cap(cr.arena))
-	}
-	if len(cr.queue) >= queued {
-		t.Fatalf("the last page queued %d packets, want fewer than %d so stale slots remain", len(cr.queue), queued)
+	if c := cap(cr.partial); c < minPacketBuf {
+		t.Fatalf("partial capacity %d after repositionAt, want at least %d", c, minPacketBuf)
 	}
 	for range 3 {
 		runtime.GC()
@@ -311,9 +331,9 @@ func TestContainerDroppedArenaIsReleased(t *testing.T) {
 // TestContainerLargePacketsDoNotReallocate pins that packets up to a page body
 // long, which span two pages, are reassembled in the reused arena and partial
 // buffer: reading 100 of them costs about the same allocations as reading 10.
-// 61200 bytes is the largest frame payload (48 frames of 1275 bytes); a full page
-// body makes the arena need two page bodies, whose grown and rounded-up capacity
-// must stay within maxReusedBuf.
+// 61200 bytes is the largest frame payload (48 frames of 1275 bytes). Each buffer
+// holds one such packet at a time, whose grown and rounded-up capacity must stay
+// within maxReusedBuf.
 func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
 	// The measured difference is 2 for 61200-byte packets (3 under -race) and 0 for
 	// page-body ones, on darwin/arm64, linux/amd64 and linux/386. A per-page slice
@@ -347,6 +367,57 @@ func TestContainerLargePacketsDoNotReallocate(t *testing.T) {
 		if long-short > slack {
 			t.Errorf("%d-byte packets: 100 cost %.0f allocations, 10 cost %.0f; want a difference of at most %d", size, long, short, slack)
 		}
+	}
+}
+
+// TestContainerCarriedPacketsUpToMinPacketBufDoNotAllocate pins the initial size
+// of the packet buffers: packets of minPacketBuf bytes, each continued from one
+// page to the next, are read without allocating once the reader is built.
+func TestContainerCarriedPacketsUpToMinPacketBufDoNotAllocate(t *testing.T) {
+	p := &pager{t: t, serial: 0x1234, max: maxPageSegments}
+	p.add(testHead(1, 312).marshal(), 0)
+	p.flush(false)
+	p.add(opusTags{vendor: "v"}.marshal(), 0)
+	p.flush(false)
+	p.max = 20 // a packet of minPacketBuf bytes has 33 lacing values
+	const n = 20
+	for i := range n {
+		p.add(makeRamp(minPacketBuf), int64((i+1)*960))
+	}
+	p.flush(true)
+	data := p.out.Bytes()
+
+	var got int
+	var readErr error
+	counts := mallocsUntilZero(func() func() {
+		cr, err := newContainerReader(bufio.NewReader(bytes.NewReader(data)), nil)
+		if err != nil {
+			t.Fatalf("newContainerReader: %v", err)
+		}
+		got = 0
+		return func() {
+			for {
+				pkt, err := cr.nextPacket()
+				if err != nil {
+					if !errors.Is(err, io.EOF) {
+						readErr = err
+					}
+					return
+				}
+				if len(pkt) == minPacketBuf {
+					got++
+				}
+			}
+		}
+	})
+	if readErr != nil {
+		t.Fatalf("nextPacket: %v", readErr)
+	}
+	if got != n {
+		t.Fatalf("read %d packets of %d bytes, want %d", got, minPacketBuf, n)
+	}
+	if counts[len(counts)-1] != 0 {
+		t.Errorf("reading the packets allocated %v times (one count per attempt), want 0 in at least one attempt", counts)
 	}
 }
 
@@ -470,6 +541,11 @@ func TestNewContainerReaderReuse(t *testing.T) {
 	}
 	if cap(next.arena) > maxReusedBuf || cap(next.partial) > maxReusedBuf {
 		t.Errorf("oversized buffers carried over: arena cap %d, partial cap %d, limit %d", cap(next.arena), cap(next.partial), maxReusedBuf)
+	}
+	// Dropped buffers are replaced at their initial size, so a pooled Decoder does
+	// not allocate again while reading the next stream.
+	if cap(next.arena) < minPacketBuf || cap(next.partial) < minPacketBuf {
+		t.Errorf("buffers after the drop: arena cap %d, partial cap %d, want at least %d", cap(next.arena), cap(next.partial), minPacketBuf)
 	}
 	_, want := readContainer(t, bytes.NewReader(stream))
 	got := drainPackets(t, next)

@@ -1293,6 +1293,40 @@ func TestSeekRewindSeekFailure(t *testing.T) {
 	}
 }
 
+// TestSeekToZeroFailsOnUnreadableFirstAudioPage pins that a restart at sample
+// 0, which has nothing to decode inside the seek, still reads the source before
+// returning: a read error at the first audio page fails the seek and is latched,
+// as it is for a later target, instead of surfacing unlatched at the next Read.
+func TestSeekToZeroFailsOnUnreadableFirstAudioPage(t *testing.T) {
+	stream := seekFixture(t, 1, 20, 48000, 64000)
+	for _, exact := range []bool{false, true} {
+		src := newFlaky(stream)
+		d, err := NewDecoder(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.Length(); err != nil {
+			t.Fatal(err)
+		}
+		// A read moves the decoder past sample 0, so the exact seek restarts too.
+		if _, err := io.ReadFull(d, make([]byte, 1000)); err != nil {
+			t.Fatal(err)
+		}
+		seek := d.SeekToSample
+		if exact {
+			seek = d.SeekToSampleExact
+		}
+		src.armed, src.failAt = true, 1 // the Seek succeeds, the first Read after it fails
+		if _, err := seek(0); !errors.Is(err, errInjected) {
+			t.Fatalf("exact %v: seek to 0 = %v, want the injected read error", exact, err)
+		}
+		src.armed = false
+		if _, err := d.Read(make([]byte, 8)); !errors.Is(err, errInjected) {
+			t.Fatalf("exact %v: Read after the failed seek = %v, want the latched error", exact, err)
+		}
+	}
+}
+
 // TestReadWriteToReturnLatchedError pins that WriteTo, like Read, refuses to run
 // on a decoder whose seek failed.
 func TestReadWriteToReturnLatchedError(t *testing.T) {
@@ -1424,9 +1458,9 @@ func TestSeekLeavesAtLeastPreRoll(t *testing.T) {
 			}
 		}
 		if want < 0 {
-			// No page is far enough back: the decoder restarts at the stream start.
-			if got := src.startSeek[len(src.startSeek)-1]; got != 0 {
-				t.Fatalf("n=%d: no landing page exists but the last seek was to %d, want the stream start", n, got)
+			// No page is far enough back: the decoder restarts at the first audio page.
+			if got := src.startSeek[len(src.startSeek)-1]; got != d.idx.audioStart {
+				t.Fatalf("n=%d: no landing page exists but the last seek was to %d, want the first audio page (%d)", n, got, d.idx.audioStart)
 			}
 			continue
 		}

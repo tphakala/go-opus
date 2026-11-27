@@ -17,6 +17,9 @@
 // never ends is not read forever. The ceiling on one-shot decoded output,
 // ErrDecodeLimit, is separate.
 //
+// Once the first Read has decoded a packet, reading a CELT stream allocates
+// nothing, with the exceptions NewDecoder describes.
+//
 // # Channel mapping families
 //
 // The decoder reads family 0 (mono and stereo), family 1 (surround, up to 8

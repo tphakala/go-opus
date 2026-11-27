@@ -20,12 +20,17 @@ type containerReader struct {
 	head      opusHead
 	tags      opusTags
 
-	partial []byte   // bytes of a packet still spanning pages
-	queue   [][]byte // completed packets from the current page; each aliases arena
-	qi      int      // index of the next packet to serve from queue
+	partial []byte // bytes of a packet still spanning pages
+	// queue holds the packets completed on the current page. A packet that starts
+	// and ends on the page aliases pg.body; any other aliases arena.
+	queue [][]byte
+	qi    int // index of the next packet to serve from queue
 
-	pg    page   // readPage scratch, reused for every page
-	arena []byte // backing store for the packets in queue, rewritten for every page
+	pg page // readPage scratch, reused for every page
+	// arena holds owned copies of the packets in queue that pg.body cannot serve:
+	// the header packets and a packet completed from earlier pages. It is
+	// rewritten for every page.
+	arena []byte
 
 	lastGranule  int64 // granule of the most recent page that completed a packet
 	finalGranule int64 // granule of the EOS page, or -1 if not yet seen
@@ -51,6 +56,13 @@ type containerReader struct {
 	// and body). After newContainerReader it is the length of the header pages, so
 	// the first audio page begins at the stream's starting offset plus consumed.
 	consumed int64
+
+	// afterHeaders is the granule and end-of-stream state newContainerReader left
+	// once the header packets were read, which restart restores.
+	afterHeaders struct {
+		lastGranule, finalGranule int64
+		sawEOS                    bool
+	}
 }
 
 // Packet size limits. An Opus packet without padding is at most 61,298*N - 2
@@ -93,18 +105,28 @@ func audioPacketLimit(h opusHead) int {
 }
 
 // maxReusedBuf is the largest capacity of the packet arena or the partial-packet
-// buffer that a containerReader keeps. With packets no longer than a page body
-// (an unpadded Opus packet is at most 61,298 bytes per stream), either buffer
-// needs at most two page bodies: the arena holds one page body plus a carried
-// fragment. Growing a slice can overshoot its need by a quarter plus 192 bytes
-// (nextslicecap, runtime/slice.go:341, Go 1.27.3) and a large allocation is then
-// rounded up to an 8 KiB page (roundupsize, runtime/msize.go:31), so the limit
-// adds that headroom and such a buffer is never dropped. A larger one comes from a
-// packet that spans several pages, such as a multistream or padded audio packet.
-// processPage drops it once that packet is done, and newContainerReader does not
-// carry it over from a previous reader, so one such packet does not pin its memory
-// for the rest of the stream or in a pooled Decoder.
+// buffer that a containerReader keeps. Each holds at most one audio packet at a
+// time (partial the packet still spanning pages, the arena the one completed from
+// them), so the limit keeps a buffer for a packet of up to two page bodies, which
+// covers an unpadded packet of up to two Opus streams (at most 61,298*2 - 2 =
+// 122,594 bytes, see the packet size limits above). Growing a slice can overshoot
+// its need by a quarter plus 192 bytes (nextslicecap, runtime/slice.go:341, Go
+// 1.27.3) and a large allocation is then rounded up to an 8 KiB page
+// (roundupsize, runtime/msize.go:31), so the limit adds that headroom and such a
+// buffer is never dropped. A larger one comes from a multistream or padded audio
+// packet. processPage drops it once that packet is done, repositionAt drops it
+// when a seek moves the reader, and newContainerReader does not carry it over from
+// a previous reader, so one such packet does not pin its memory for the rest of
+// the stream or in a pooled Decoder.
 const maxReusedBuf = 2*maxPageBodyLen + 2*maxPageBodyLen/4 + 16<<10
+
+// minPacketBuf is the capacity a containerReader gives its arena and its
+// partial-packet buffer up front. Only header packets and packets continued from
+// an earlier page are copied into them, and 8 KiB holds every packet this
+// package's encoder writes (at most maxPacketBytes, 7656 bytes, codec.go:66), so
+// reading the audio of such a stream does not grow them. A longer packet grows
+// them as needed.
+const minPacketBuf = 8 << 10
 
 // newContainerReader reads and validates the OpusHead and OpusTags header
 // packets, leaving the reader positioned at the first audio packet. A first
@@ -112,9 +134,12 @@ const maxReusedBuf = 2*maxPageBodyLen + 2*maxPageBodyLen/4 + 16<<10
 // packet spanning more than maxHeaderSpan bytes returns an error wrapping
 // ErrPacketTooLarge.
 //
-// br is the buffered source. reuse, when not nil, is a reader of an earlier stream
-// whose page, packet and queue buffers are recycled and whose struct is
-// overwritten; the caller must not use it afterwards.
+// br is the buffered source. The reader's buffers are sized here for the largest
+// page, the most packets a page can complete and minPacketBuf bytes of carried
+// packet (see presize). reuse, when not nil, is a reader of an earlier stream
+// whose page, packet and queue buffers are recycled when they are within
+// maxReusedBuf and whose struct is overwritten; the caller must not use it
+// afterwards.
 func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerReader, error) {
 	cr := reuse
 	if cr == nil {
@@ -132,6 +157,7 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	clear(queue)
 	*cr = containerReader{br: br, finalGranule: -1, pg: page{raw: cr.pg.raw}, arena: arena, queue: queue[:0], partial: partial,
 		limit: streamPacketLimit, headers: 2}
+	cr.presize()
 	hp, err := cr.nextRawPacket()
 	if err != nil {
 		return nil, headerErr("OpusHead", err)
@@ -161,12 +187,61 @@ func newContainerReader(br *bufio.Reader, reuse *containerReader) (*containerRea
 	}
 	cr.head = head
 	cr.tags = tags
+	cr.afterHeaders.lastGranule = cr.lastGranule
+	cr.afterHeaders.finalGranule = cr.finalGranule
+	cr.afterHeaders.sawEOS = cr.sawEOS
 	return cr, nil
 }
 
+// presize grows the reader's buffers, which must be empty, so that reading pages
+// does not grow them: the page buffer to the largest page, the queue to the most
+// packets one page completes (each ends at a lacing value below 255, so at most
+// one per segment), and the arena and partial to minPacketBuf. slices.Grow keeps
+// a buffer that is already large enough.
+func (cr *containerReader) presize() {
+	cr.pg.raw = slices.Grow(cr.pg.raw[:0], maxPageLen)
+	cr.queue = slices.Grow(cr.queue[:0], maxPageSegments)
+	cr.arena = slices.Grow(cr.arena[:0], minPacketBuf)
+	cr.partial = slices.Grow(cr.partial[:0], minPacketBuf)
+}
+
+// resetPartial empties partial, dropping it when a packet that spanned several
+// pages grew it past maxReusedBuf.
+func (cr *containerReader) resetPartial() {
+	if cap(cr.partial) > maxReusedBuf {
+		cr.partial = nil
+	} else {
+		cr.partial = cr.partial[:0]
+	}
+}
+
+// resetArena empties the arena, dropping it when a packet that spanned several
+// pages grew it past maxReusedBuf. Queue slots past the current length may still
+// alias a dropped arena, so they are cleared too.
+func (cr *containerReader) resetArena() {
+	if cap(cr.arena) > maxReusedBuf {
+		clear(cr.queue[:cap(cr.queue)])
+		cr.arena = nil
+	} else {
+		cr.arena = cr.arena[:0]
+	}
+}
+
+// restart rebinds the reader to r, which must be positioned at the first audio
+// page, in the state newContainerReader left it in. That state has no queued
+// packet and no partial one only when the header pages hold no audio, which the
+// callers guarantee: seeking, the only caller, refuses a stream whose OpusTags
+// page carries audio (Decoder.tagsBad).
+func (cr *containerReader) restart(r io.Reader) {
+	cr.repositionAt(r)
+	cr.lastGranule = cr.afterHeaders.lastGranule
+	cr.finalGranule = cr.afterHeaders.finalGranule
+	cr.sawEOS = cr.afterHeaders.sawEOS
+}
+
 // nextPacket returns the next audio packet, or io.EOF when the stream ends. The
-// packet aliases the reader's arena and is valid until the next call to nextPacket
-// or nextRawPacket, which may read a page into that arena.
+// packet aliases the reader's page buffer or arena and is valid until the next
+// call to nextPacket or nextRawPacket, which may read a page into them.
 func (cr *containerReader) nextPacket() ([]byte, error) {
 	return cr.nextRawPacket()
 }
@@ -212,20 +287,26 @@ func (cr *containerReader) nextRawPacket() ([]byte, error) {
 // repositionAt rebinds the reader to r, which must be positioned at a page
 // boundary, and drops all packet state so the next page read starts clean. It
 // keeps the parsed headers and serial. lastGranule is left for the caller to set
-// by processing the page it lands on.
+// by processing the page it lands on. It also releases packet buffers grown past
+// maxReusedBuf and restores the sizes newContainerReader gave the buffers.
 func (cr *containerReader) repositionAt(r io.Reader) {
 	cr.br.Reset(r)
 	cr.queue = cr.queue[:0]
 	cr.qi = 0
-	cr.partial = cr.partial[:0]
+	cr.resetPartial()
+	cr.resetArena()
+	cr.presize()
 	cr.sawEOS = false
 	cr.finalGranule = -1
 }
 
-// processPage reassembles the packets on one page into the queue and updates the
-// granule and end-of-stream accounting. An audio packet longer than cr.limit fails
-// with ErrPacketTooLarge; a header packet is cut to maxHeaderPacketLen instead,
-// and fails with ErrPacketTooLarge only once it spans more than maxHeaderSpan.
+// processPage reassembles the packets that complete on one page into the queue
+// and updates the granule and end-of-stream accounting. A packet that starts and
+// ends on pg aliases pg.body, so pg must not be rewritten while the queue is in
+// use; the packet that continues to the next page is copied into partial. An
+// audio packet longer than cr.limit fails with ErrPacketTooLarge; a header packet
+// is cut to maxHeaderPacketLen instead, and fails with ErrPacketTooLarge only once
+// it spans more than maxHeaderSpan.
 func (cr *containerReader) processPage(pg *page) error {
 	if !cr.serialSet {
 		cr.serial = pg.serial
@@ -240,32 +321,26 @@ func (cr *containerReader) processPage(pg *page) error {
 	// If this page does not continue a packet but one was left dangling, the
 	// previous packet was truncated; drop it rather than fuse across a gap.
 	if pg.flags&flagContinued == 0 && len(cr.partial) > 0 {
-		cr.partial = cr.partial[:0]
+		cr.resetPartial()
 	}
 
 	cr.queue = cr.queue[:0]
 	cr.qi = 0
-	// Packets are copied into the arena, which is rewritten for every page. Growing
-	// it once up front keeps it from reallocating mid-page, and only a page that
-	// completes a packet writes to it, so a run of continuation-only pages grows
-	// partial alone. A packet that spanned several pages can leave the arena far
-	// larger than a page; such an arena is dropped rather than held for the rest of
-	// the stream. Queue slots past the current length still alias it, so they are
-	// cleared too.
-	if cap(cr.arena) > maxReusedBuf {
-		clear(cr.queue[:cap(cr.queue)])
-		cr.arena = nil
-	} else {
-		cr.arena = cr.arena[:0]
-	}
-	if pg.completesPacket() {
-		cr.arena = slices.Grow(cr.arena, len(cr.partial)+len(pg.body))
-	}
-	off := 0
+	// The arena is rewritten for every page. One that a packet spanning several
+	// pages grew far larger than a page is dropped rather than held for the rest
+	// of the stream.
+	cr.resetArena()
+	// An audio packet that starts and ends on this page is queued as a slice of
+	// pg.body, which stays valid until the next readPage. Header packets and a
+	// packet continued from an earlier page are assembled in partial and copied
+	// into the arena. start is the first body byte not yet in partial or the
+	// queue.
+	off, start := 0, 0
 	for _, l := range pg.segTable {
 		seg := pg.body[off : off+int(l)]
 		off += int(l)
-		// The check runs before the append, so partial never exceeds the limit.
+		// The check runs on the packet's length so far, partial plus its bytes on
+		// this page, before anything is kept, so partial never exceeds the limit.
 		// Acceptance of an audio packet depends on its length alone, not on how pages
 		// split it; a header packet is cut instead, and only its total span
 		// (headerSpan) can fail it.
@@ -277,27 +352,40 @@ func (cr *containerReader) processPage(pg *page) error {
 				return fmt.Errorf("%w: a header packet spans more than %d bytes", ErrPacketTooLarge, maxHeaderSpan)
 			}
 		}
-		if len(cr.partial) > limit-len(seg) {
+		if len(cr.partial) > limit-(off-start) {
 			if cr.headers == 0 {
 				return cr.packetTooLarge()
 			}
 			seg = seg[:limit-len(cr.partial)] // a header packet is cut; only its span can fail it
 		}
+		if cr.headers == 0 && len(cr.partial) == 0 {
+			// An audio packet that started on this page.
+			if l < maxSegmentLen {
+				cr.queue = append(cr.queue, pg.body[start:off:off])
+				start = off
+			}
+			continue
+		}
 		cr.partial = append(cr.partial, seg...)
+		start = off
 		if l < maxSegmentLen {
 			if cr.headers > 0 {
 				cr.headers--
 				cr.headerSpan = 0
 			}
-			start := len(cr.arena)
+			// Copied, not aliased: a packet that starts later on this page and
+			// continues to the next is written into partial.
+			n := len(cr.arena)
 			cr.arena = append(cr.arena, cr.partial...)
-			cr.queue = append(cr.queue, cr.arena[start:len(cr.arena):len(cr.arena)])
-			if cap(cr.partial) > maxReusedBuf {
-				cr.partial = nil // the multi-page packet it held is complete
-			} else {
-				cr.partial = cr.partial[:0]
-			}
+			cr.queue = append(cr.queue, cr.arena[n:len(cr.arena):len(cr.arena)])
+			cr.resetPartial() // the multi-page packet it held is complete
 		}
+	}
+	// The packet that started on this page and continues to the next moves to
+	// partial, because the next readPage overwrites pg.body. Its length passed the
+	// limit check above.
+	if start < len(pg.body) {
+		cr.partial = append(cr.partial, pg.body[start:]...)
 	}
 
 	if pg.granule != granuleNone {

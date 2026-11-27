@@ -108,12 +108,17 @@ type Decoder struct {
 // allocated here: about 59 KiB (mono) to 68 KiB (stereo) of codec state per Opus
 // stream, about 26 KiB more per Decoder for a channel mapping family other than 0,
 // and 23,040 bytes per channel. Reset describes when it reuses them and when it rebuilds them.
-// A Decoder keeps its page and packet buffers between packets and across Reset;
-// they stay under about 450 KiB. An audio packet that spans several pages needs
-// buffers of its own size until the Decoder has read past it, at most the limit
-// described for ErrPacketTooLarge. OpusHead and OpusTags are cut as the package
-// documentation describes, which also covers the header packet size and the
-// channel mapping families that make NewDecoder fail.
+// The page and packet buffers, about 86 KiB, are allocated here too and kept
+// between packets, across seeks and across Reset. A packet continued from an
+// earlier page that is longer than 8 KiB, and than any such packet before it,
+// grows the packet buffers to fit; they stay under about 450 KiB. An audio packet
+// that spans several pages needs buffers of its own size until the Decoder has
+// read past it, at most the limit described for ErrPacketTooLarge. Once the first
+// Read has decoded a packet, Read and WriteTo allocate nothing for a CELT stream,
+// also after SeekToSample or SeekToSampleExact restart it at the first audio page,
+// except when such a packet grows the buffers. OpusHead and OpusTags are cut as
+// the package documentation describes, which also covers the header packet size
+// and the channel mapping families that make NewDecoder fail.
 // Length and the seek methods read through a further window of about 128 KiB,
 // allocated by the first such call and kept across Reset.
 //
