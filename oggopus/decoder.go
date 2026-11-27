@@ -66,7 +66,7 @@ type Info struct {
 // sequential decoding does, at a cost linear in the distance it decodes.
 type Decoder struct {
 	cr   *containerReader
-	dec  frameDecoder // nil until the codec seam is wired
+	dec  frameDecoder // nil until init succeeds, and after a failed Reset
 	info Info
 
 	pcmBuf      []byte        // backing array fill writes into; kept across Reset
@@ -97,14 +97,16 @@ type Decoder struct {
 }
 
 // NewDecoder reads and validates the OpusHead and OpusTags headers from r and
-// returns a Decoder positioned at the first audio packet. Header parsing is
-// real; the PCM output path is stubbed at the codec seam. A stream whose first
+// returns a Decoder positioned at the first audio packet. A stream whose first
 // packet is not an OpusHead returns an error wrapping ErrNotOpus.
 //
 // Whether r supports Length and the seek methods is decided here: r must implement
 // io.Seeker and answer Seek(0, io.SeekCurrent). Offsets are then relative to the
 // position of r at this call, so a stream embedded in a larger source works.
 //
+// The codec state and two PCM buffers sized for the longest Opus frame are
+// allocated here and kept across Reset: about 59 KiB (mono) to 68 KiB (stereo) of
+// codec state per Opus stream, plus 23,040 bytes per channel.
 // A Decoder keeps its page and packet buffers between packets and across Reset;
 // they stay under about 450 KiB. An audio packet that spans several pages needs
 // buffers of its own size until the Decoder has read past it, at most the limit
@@ -181,8 +183,9 @@ func (d *Decoder) Reset(r io.Reader) error {
 
 // init parses and validates the container headers from r and populates the
 // decoder's per-stream state. It backs both NewDecoder and Reset, so the two agree
-// on header handling and on rejecting a nil source before any read. It leaves
-// d.pcmBuf in place, so Reset retains that buffer across streams, and binds d.br
+// on header handling and on rejecting a nil source before any read. It sizes
+// d.pcmBuf for the longest Opus frame of the stream's channel count, keeping a
+// larger one, so Reset retains that buffer across streams, and binds d.br
 // (allocated on first use) to r unless r is already a *bufio.Reader. reuse, when
 // not nil, is the previous stream's container reader, whose buffers the new one
 // recycles; reuseDec, when not nil, is the previous stream's codec, which is reset
@@ -238,6 +241,10 @@ func (d *Decoder) init(r io.Reader, reuse *containerReader, reuseDec frameDecode
 			d.br.Reset(nil)
 		}
 		return err
+	}
+	// 120 ms of decoded PCM, so fill never grows pcmBuf once decoding has started.
+	if need := 2 * maxFrameSamples48k * int(cr.head.channels); cap(d.pcmBuf) < need {
+		d.pcmBuf = make([]byte, 0, need)
 	}
 	d.rs = rs
 	if d.scan != nil {
@@ -398,7 +405,8 @@ func (d *Decoder) fill() (done bool, err error) {
 
 	// Build the bytes from the start of pcmBuf, not of d.pcm: Read and WriteTo
 	// advance d.pcm, which would shrink its capacity to the undelivered tail and
-	// reallocate on every packet.
+	// reallocate on every packet. init sizes pcmBuf for the longest frame, so this
+	// Grow does not allocate.
 	buf := slices.Grow(d.pcmBuf[:0], 2*len(samples))
 	for _, s := range samples {
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(s))

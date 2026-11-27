@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"runtime"
 	"slices"
 	"testing"
 	"weak"
+
+	"github.com/tphakala/go-opus/opus"
 )
 
 // drainDecoder decodes d to EOF with WriteTo when buf is nil, otherwise with Read
@@ -269,6 +272,177 @@ func TestDecoderResetReusesCodecAllocs(t *testing.T) {
 			})
 			if got > row.bound {
 				t.Errorf("Reset + decode: %v allocs, want at most %v", got, row.bound)
+			}
+		})
+	}
+}
+
+// mallocsUntilZero runs prepare and then the measured function it returns, up to
+// three times, and returns the exact number of heap allocations the measured
+// function made in each attempt. It stops at the first attempt that allocates
+// nothing. A decoder allocation is deterministic on a fresh decoder and repeats in
+// every attempt, while the runtime occasionally attributes a stray malloc to the
+// window, so one clean attempt is the pass condition. The two GCs empty any
+// sync.Pool, so a retry cannot pass on what an earlier attempt allocated.
+func mallocsUntilZero(prepare func() (measured func())) []uint64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	var counts []uint64
+	var ms runtime.MemStats
+	for range 3 {
+		runtime.GC()
+		runtime.GC()
+		measured := prepare()
+		runtime.ReadMemStats(&ms)
+		before := ms.Mallocs
+		measured()
+		runtime.ReadMemStats(&ms)
+		counts = append(counts, ms.Mallocs-before)
+		if ms.Mallocs == before {
+			break
+		}
+	}
+	return counts
+}
+
+// allocNoise returns n frames of uniform noise of the given peak amplitude.
+func allocNoise(r *rand.Rand, n, ch int, amp float64) []int16 {
+	pcm := make([]int16, n*ch)
+	for i := range pcm {
+		pcm[i] = int16((r.Float64()*2 - 1) * amp)
+	}
+	return pcm
+}
+
+// preSkip3840Stream is a CBR stereo stream of 120 ms noise packets whose OpusHead
+// carries a pre-skip of 3840, so the first packet yields only 1920 samples per
+// channel and the second is the first to need a full 120 ms of decoded PCM. With
+// the encoder's pre-skip of 312 the first packet already yields nearly 120 ms,
+// and the allocator's size class for it holds every later packet.
+func preSkip3840Stream(t *testing.T) []byte {
+	t.Helper()
+	const (
+		frame   = 5760
+		preSkip = 3840
+		nPkts   = 60
+	)
+	enc, err := opus.NewEncoder(opus.EncoderConfig{SampleRate: 48000, Channels: 2, Bitrate: 96000, CBR: true})
+	if err != nil {
+		t.Fatalf("opus.NewEncoder: %v", err)
+	}
+	r := rand.New(rand.NewPCG(9, 9))
+	buf := make([]byte, 8000)
+	pkts := make([][]byte, nPkts)
+	for i := range pkts {
+		n, err := enc.Encode(allocNoise(r, frame, 2, 20000), buf)
+		if err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+		pkts[i] = slices.Clone(buf[:n])
+	}
+	var b bytes.Buffer
+	writeContainer(t, &b, testHead(2, preSkip), opusTags{vendor: "go-opus"}, pkts, frame, int64(nPkts*frame-preSkip))
+	return b.Bytes()
+}
+
+// TestDecoderReadCELTAllocatesNothingAfterFirstRead pins that once the first Read
+// has decoded the first packet, reading a CELT stream to the end allocates
+// nothing: the codec's scratch is sized for the worst case when it is built
+// (bitstream-dependent sizes, two coded channels, packet-loss concealment), and
+// the decoded-PCM buffer for the longest frame of the stream's channel count. The
+// fixtures keep their Ogg pages from growing after the first audio page, since a
+// later, larger page still grows the container's buffers. Before the fix the rows
+// took between 3 and 64 allocations.
+func TestDecoderReadCELTAllocatesNothingAfterFirstRead(t *testing.T) {
+	r := rand.New(rand.NewPCG(1, 2))
+	preSkip3840 := preSkip3840Stream(t)
+
+	// 1 s blocks cycling noise, tone, click train and digital silence. CBR keeps
+	// every packet, and so every full page, the same size.
+	var mixed []int16
+	for s := range 12 {
+		switch s % 4 {
+		case 0:
+			mixed = append(mixed, allocNoise(r, 48000, 1, 20000)...)
+		case 1:
+			mixed = append(mixed, tone(48000, 1, 440, 48000)...)
+		case 2:
+			clicks := make([]int16, 48000)
+			for i := 0; i < len(clicks); i += 4800 {
+				for k := range 40 {
+					clicks[i+k] = 30000
+				}
+			}
+			mixed = append(mixed, clicks...)
+		default:
+			mixed = append(mixed, make([]int16, 48000)...)
+		}
+	}
+	// 1 s of tone and 1 s of digital silence, alternating: DTX codes the silence
+	// as TOC-only packets, which the decoder conceals.
+	var dtx []int16
+	for s := range 10 {
+		if s%2 == 0 {
+			dtx = append(dtx, tone(48000, 1, 330, 48000)...)
+		} else {
+			dtx = append(dtx, make([]int16, 48000)...)
+		}
+	}
+
+	rows := []struct {
+		name   string
+		stream []byte
+		before []byte // when set, decoded to the end and then Reset onto stream
+	}{
+		// The issue's reproduction: full-scale stereo noise at the defaults.
+		{name: "stereo/20ms/noise", stream: encodeOgg(t, Config{SampleRate: 48000, Channels: 2}, allocNoise(r, 5*48000, 2, 32767))},
+		{name: "mono/20ms/mixed", stream: encodeOgg(t, Config{SampleRate: 48000, Channels: 1, Bitrate: 64000, CBR: true}, mixed)},
+		{name: "stereo/120ms/preskip3840", stream: preSkip3840},
+		{name: "mono/20ms/dtx", stream: encodeOgg(t, Config{SampleRate: 48000, Channels: 1, DTX: true}, dtx)},
+		{name: "family1/3ch", stream: family1Stream(t, 300)},
+		// A mono decoded-PCM buffer holds the stereo stream's first packet but not
+		// its second, so this pins the sizing on Reset as well as the codec rebuild.
+		{name: "reset/mono-to-stereo", stream: preSkip3840, before: encodeOgg(t, Config{SampleRate: 48000, Channels: 1}, allocNoise(r, 2*48000, 1, 20000))},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			var readErr error
+			counts := mallocsUntilZero(func() func() {
+				first := row.stream
+				if row.before != nil {
+					first = row.before
+				}
+				d, err := NewDecoder(bytes.NewReader(first))
+				if err != nil {
+					t.Fatalf("NewDecoder: %v", err)
+				}
+				if row.before != nil {
+					drainDecoder(t, d, nil)
+					if err := d.Reset(bytes.NewReader(row.stream)); err != nil {
+						t.Fatalf("Reset: %v", err)
+					}
+				}
+				buf := make([]byte, 2*960*d.Info().Channels) // 20 ms
+				if _, err := d.Read(buf); err != nil {
+					t.Fatalf("first Read: %v", err)
+				}
+				return func() {
+					for {
+						_, err := d.Read(buf)
+						if errors.Is(err, io.EOF) {
+							return
+						}
+						if err != nil {
+							readErr = err
+							return
+						}
+					}
+				}
+			})
+			if readErr != nil {
+				t.Fatalf("Read: %v", readErr)
+			}
+			if counts[len(counts)-1] != 0 {
+				t.Errorf("Reads after the first allocated %v times (one count per attempt), want 0 in at least one attempt", counts)
 			}
 		})
 	}

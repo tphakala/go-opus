@@ -132,8 +132,14 @@ func celtLPC(lpcOut []int16, ac []int32, p int) {
 // ord samples of history before xOff. y receives N outputs. (The C's num is
 // reversed into rnum internally; the resulting integer MAC sum is
 // order-independent, so this scalar form is bit-identical to the unrolled C.)
+//
+// rnum is C's ALLOC(rnum, ord, opus_val16). ord is always CELT_LPC_ORDER here
+// (the PLC call in celtDecodeLost and the CeltFir wrapper the differential tests
+// use), so a fixed array keeps the lost-frame path allocation-free; a larger ord
+// panics on the slice.
 func celtFir(x []int16, xOff int, num []int16, y []int16, N, ord int) {
-	rnum := make([]int16, ord)
+	var rnumBuf [celtLpcOrder]int16
+	rnum := rnumBuf[:ord]
 	for i := 0; i < ord; i++ {
 		rnum[i] = num[ord-i-1]
 	}
@@ -152,8 +158,12 @@ func celtFir(x []int16, xOff int, num []int16, y []int16, N, ord int) {
 // recent first); it is updated on return the way the non-SMALL_FOOTPRINT C leaves
 // it (the truncated last outputs). x and y may alias the same slice (the PLC
 // filters in place).
+//
+// m is the working copy of the ord-sample output history that the SMALL_FOOTPRINT
+// C updates in mem directly; a fixed array for the same reason as celtFir's rnum.
 func celtIir(x []int32, den []int16, y []int32, N, ord int, mem []int16) {
-	m := make([]int16, ord)
+	var mBuf [celtLpcOrder]int16
+	m := mBuf[:ord]
 	copy(m, mem[:ord])
 	for i := 0; i < N; i++ {
 		sum := x[i]

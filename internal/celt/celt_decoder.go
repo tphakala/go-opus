@@ -88,8 +88,9 @@ type Decoder struct {
 	lastAntiCollapse bool
 
 	// Per-frame working buffers. In C these are stack VARDECL/ALLOCs, reclaimed on
-	// frame pop; here they are pooled on the decoder so a steady-state Decode
-	// allocates nothing (see scratch.go, and its decode zeroing audit). This is
+	// frame pop; here they are pooled on the decoder and presized to their worst
+	// case by NewDecoder (and SetDownsample), so DecodeWithEC never allocates (see
+	// scratch.go, presizeDecode, and the decode zeroing audit). This is
 	// state only in the sense that a C thread's stack is: it carries nothing across
 	// frames that any frame reads, and ResetState does not need to touch it.
 	sc scratch
@@ -131,6 +132,7 @@ func NewDecoder(channels int) *Decoder {
 	st.oldLogE2 = make([]int32, 2*nb)
 	st.backgroundLogE = make([]int32, 2*nb)
 	st.lpc = make([]int16, channels*celtLpcOrder)
+	st.sc.presizeDecode(m)
 
 	st.ResetState()
 	return st
@@ -213,6 +215,11 @@ func (st *Decoder) SetDownsample(factor int) error {
 	switch factor {
 	case 1, 2, 3, 4, 6:
 		st.downsample = factor
+		if factor > 1 {
+			// deemphasis draws decDeemph only when downsampling, N samples of the
+			// 48 kHz frame; presize it so decoding never grows it.
+			alloc(&st.sc.decDeemph, st.mode.shortMdctSize<<st.mode.maxLM)
+		}
 		return nil
 	default:
 		return ErrBadArg

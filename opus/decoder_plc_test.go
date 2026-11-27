@@ -56,11 +56,10 @@ var plcGolden = map[string]uint64{
 //     scratch, so a buffer whose whole-array fill regresses (its filler stops
 //     covering an index another path already dirtied, as in decExcBuf) shows up
 //     as a divergence on the NORMAL build. Verified by sabotage: dropping the
-//     last excBuf fill index fails at the first lost frame. The priming and
-//     measured runs use the identical packet sequence so every pooled buffer
-//     allocates at the same size in both, and the one variable-length buffer,
-//     decFirTmp (excLength = IMIN(2*pitchIndex, maxPeriodC)), never reallocates
-//     smaller and zero-fills the carryover away.
+//     last excBuf fill index fails at the first lost frame. The decoder's
+//     scratch is presized when it is built, so no pooled buffer reallocates and
+//     the carryover reaches every window, including the variable-length
+//     decFirTmp (excLength = IMIN(2*pitchIndex, maxPeriodC)).
 func TestDecoderPLCScratchCarryover(t *testing.T) {
 	const (
 		frame = 960 // 20 ms at 48 kHz
