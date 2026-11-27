@@ -20,5 +20,5 @@
 //
 // opusDecodeFrame's stack buffers (C ALLOCs) are fixed-size arrays declared in
 // the branch that needs them, so each recursive call for a transition owns its
-// own and nothing is pooled.
+// own and none of them is pooled.
 package opusdec
